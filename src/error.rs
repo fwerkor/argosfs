@@ -32,6 +32,8 @@ pub enum ArgosError {
     UnrecoverableStripe { stripe_id: String, reason: String },
     #[error("invalid argument: {0}")]
     Invalid(String),
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
     #[error("unsupported operation: {0}")]
     Unsupported(String),
 }
@@ -48,6 +50,7 @@ impl ArgosError {
             ArgosError::DiskFull { .. } => libc::ENOSPC,
             ArgosError::UnrecoverableStripe { .. } => libc::EIO,
             ArgosError::Invalid(_) => libc::EINVAL,
+            ArgosError::PermissionDenied(_) => libc::EACCES,
             ArgosError::Unsupported(_) => libc::ENOTSUP,
             ArgosError::Io(err) => err.raw_os_error().unwrap_or(libc::EIO),
             _ => libc::EIO,

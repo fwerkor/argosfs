@@ -1,6 +1,9 @@
 use anyhow::{bail, Context, Result};
+use argosfs::acl;
+use argosfs::crypto;
 use argosfs::fusefs;
-use argosfs::types::{Compression, DiskStatus, StorageTier, VolumeConfig};
+use argosfs::metrics;
+use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
 use argosfs::ArgosFs;
 use clap::{Parser, Subcommand};
 use std::ffi::CString;
@@ -197,6 +200,56 @@ enum Command {
     Snapshot {
         root: PathBuf,
         name: String,
+    },
+    EnableEncryption {
+        root: PathBuf,
+        #[arg(long)]
+        passphrase: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        #[arg(long)]
+        reencrypt: bool,
+    },
+    EncryptionStatus {
+        root: PathBuf,
+    },
+    SetIoMode {
+        root: PathBuf,
+        #[arg(long, default_value = "buffered")]
+        mode: IoMode,
+        #[arg(long)]
+        direct_io: bool,
+        #[arg(long)]
+        no_zero_copy: bool,
+        #[arg(long)]
+        no_numa: bool,
+    },
+    Prometheus {
+        root: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:9108")]
+        listen: String,
+    },
+    SetPosixAcl {
+        root: PathBuf,
+        path: String,
+        acl: String,
+        #[arg(long)]
+        default_acl: bool,
+    },
+    GetPosixAcl {
+        root: PathBuf,
+        path: String,
+        #[arg(long)]
+        default_acl: bool,
+    },
+    SetNfs4Acl {
+        root: PathBuf,
+        path: String,
+        acl_json: String,
+    },
+    GetNfs4Acl {
+        root: PathBuf,
+        path: String,
     },
 }
 
@@ -452,8 +505,118 @@ fn main() -> Result<()> {
             let path = ArgosFs::open(root)?.snapshot(&name)?;
             println!("{}", path.display());
         }
+        Command::EnableEncryption {
+            root,
+            passphrase,
+            key_file,
+            reencrypt,
+        } => {
+            let passphrase = load_passphrase(passphrase, key_file)?;
+            let fs = ArgosFs::open(root)?;
+            fs.enable_encryption(&passphrase)?;
+            std::env::set_var("ARGOSFS_KEY", &passphrase);
+            let rewritten = if reencrypt { fs.rebalance()? } else { 0 };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"encryption_enabled": true, "rewritten_files": rewritten})
+                )?
+            );
+        }
+        Command::EncryptionStatus { root } => {
+            let meta = ArgosFs::open(root)?.metadata_snapshot();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "enabled": meta.encryption.enabled,
+                    "kdf": meta.encryption.kdf,
+                    "encrypted_blocks": meta
+                        .inodes
+                        .values()
+                        .flat_map(|inode| inode.blocks.iter())
+                        .filter(|block| block.encrypted)
+                        .count()
+                }))?
+            );
+        }
+        Command::SetIoMode {
+            root,
+            mode,
+            direct_io,
+            no_zero_copy,
+            no_numa,
+        } => {
+            let fs = ArgosFs::open(root)?;
+            fs.set_io_policy(
+                mode,
+                direct_io || mode == IoMode::Direct,
+                !no_zero_copy,
+                !no_numa,
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&fs.metadata_snapshot().config)?
+            );
+        }
+        Command::Prometheus { root, listen } => {
+            let fs = ArgosFs::open(root)?;
+            metrics::serve(fs, &listen)?;
+        }
+        Command::SetPosixAcl {
+            root,
+            path,
+            acl,
+            default_acl,
+        } => {
+            let fs = ArgosFs::open(root)?;
+            fs.set_posix_acl_path(&path, default_acl, acl::parse_posix_acl(&acl)?)?;
+        }
+        Command::GetPosixAcl {
+            root,
+            path,
+            default_acl,
+        } => {
+            let fs = ArgosFs::open(root)?;
+            let acl = fs
+                .get_posix_acl_path(&path, default_acl)?
+                .unwrap_or_default();
+            println!("{}", acl::format_posix_acl(&acl));
+        }
+        Command::SetNfs4Acl {
+            root,
+            path,
+            acl_json,
+        } => {
+            let fs = ArgosFs::open(root)?;
+            let acl_json = load_inline_or_file(&acl_json)?;
+            fs.set_nfs4_acl_path(&path, acl::parse_nfs4_acl_json(&acl_json)?)?;
+        }
+        Command::GetNfs4Acl { root, path } => {
+            let fs = ArgosFs::open(root)?;
+            let acl = fs.get_nfs4_acl_path(&path)?.unwrap_or_default();
+            println!("{}", acl::nfs4_to_json(&acl)?);
+        }
     }
     Ok(())
+}
+
+fn load_passphrase(passphrase: Option<String>, key_file: Option<PathBuf>) -> Result<String> {
+    if let Some(passphrase) = passphrase {
+        return Ok(passphrase);
+    }
+    if let Some(path) = key_file {
+        return Ok(fs::read_to_string(path)?.trim_end_matches('\n').to_string());
+    }
+    crypto::passphrase_from_env()?
+        .context("provide --passphrase, --key-file, ARGOSFS_KEY, or ARGOSFS_KEY_FILE")
+}
+
+fn load_inline_or_file(value: &str) -> Result<String> {
+    if let Some(path) = value.strip_prefix('@') {
+        Ok(fs::read_to_string(path)?)
+    } else {
+        Ok(value.to_string())
+    }
 }
 
 fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {

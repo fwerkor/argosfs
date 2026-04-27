@@ -1,0 +1,14 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "set-health",
+    "/root/project/argosfs/paper-data/runs/advanced/volume",
+    "disk-0001",
+    "--pending-sectors",
+    "12"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.021331829018890858,
+  "stdout": "",
+  "stderr": ""
+}

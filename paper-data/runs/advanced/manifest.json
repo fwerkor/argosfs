@@ -1,0 +1,368 @@
+{
+  "started_at": 1777301569.641413,
+  "platform": "Linux-6.8.0-106-generic-x86_64-with-glibc2.36",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "repo": "/root/project/argosfs",
+  "steps": [
+    {
+      "cmd": [
+        "/root/.cargo/bin/cargo",
+        "build"
+      ],
+      "elapsed_sec": 5.612689388915896,
+      "stdout": "",
+      "stderr": "   Compiling bitflags v2.11.1\n   Compiling ahash v0.7.8\n   Compiling io-uring v0.7.12\n   Compiling hashbrown v0.12.3\n   Compiling lru v0.7.8\n   Compiling reed-solomon-erasure v6.0.0\n   Compiling argosfs v0.1.0 (/root/project/argosfs)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.56s\n",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301575257-cargo.log",
+      "env": []
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "mkfs",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "--force",
+        "--disks",
+        "6",
+        "--k",
+        "4",
+        "--m",
+        "2",
+        "--chunk-size",
+        "65536",
+        "--compression",
+        "zstd"
+      ],
+      "elapsed_sec": 0.17750488920137286,
+      "stdout": "{\n  \"volume_uuid\": \"41b57e7c-a913-4891-aa79-bc345733855d\",\n  \"txid\": 0,\n  \"files\": 0,\n  \"directories\": 1,\n  \"symlinks\": 0,\n  \"specials\": 0,\n  \"disks\": [\n    {\n      \"id\": \"disk-0000\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.607788,\n      \"write_latency_ewma_ms\": 1.10558,\n      \"observed_read_mib_s\": 1645.310535910548,\n      \"observed_write_mib_s\": 904.5026140125544,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0001\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.476051,\n      \"write_latency_ewma_ms\": 0.934493,\n      \"observed_read_mib_s\": 2100.615270212645,\n      \"observed_write_mib_s\": 1070.0989734540549,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0002\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.474809,\n      \"write_latency_ewma_ms\": 0.834578,\n      \"observed_read_mib_s\": 2106.110035824932,\n      \"observed_write_mib_s\": 1198.2103530167342,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0003\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.451221,\n      \"write_latency_ewma_ms\": 0.78886,\n      \"observed_read_mib_s\": 2216.208908716571,\n      \"observed_write_mib_s\": 1267.652054863981,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0004\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.226617932254356,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 1.131946,\n      \"write_latency_ewma_ms\": 0.926157,\n      \"observed_read_mib_s\": 883.4343687773091,\n      \"observed_write_mib_s\": 1079.7305424458273,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0005\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.388140369380896,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 1.021208,\n      \"write_latency_ewma_ms\": 0.908902,\n      \"observed_read_mib_s\": 979.2324384454488,\n      \"observed_write_mib_s\": 1100.2286275087963,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    }\n  ],\n  \"cache\": {\n    \"hit_ratio\": 0.0,\n    \"hits\": 0,\n    \"l2_hits\": 0,\n    \"l2_writes\": 0,\n    \"memory_bytes\": 0,\n    \"memory_items\": 0,\n    \"misses\": 0\n  },\n  \"io_mode\": \"buffered\",\n  \"encryption_enabled\": false\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301575709-argosfs-_root_project_argosfs_paper-data_runs_advanced_v---force.log",
+      "env": []
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "mkdir",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/data",
+        "--mode",
+        "755"
+      ],
+      "elapsed_sec": 0.01369151333346963,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301575723-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_data.log",
+      "env": []
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "enable-encryption",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "--key-file",
+        "/root/project/argosfs/paper-data/runs/advanced/metrics/argosfs-validation.key"
+      ],
+      "elapsed_sec": 2.7302450421266258,
+      "stdout": "{\n  \"encryption_enabled\": true,\n  \"rewritten_files\": 0\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301578454-argosfs-_root_project_argosfs_paper-data_runs_advanced_v---key-file.log",
+      "env": []
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "set-io-mode",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "--mode",
+        "io-uring"
+      ],
+      "elapsed_sec": 0.013961093965917826,
+      "stdout": "{\n  \"k\": 4,\n  \"m\": 2,\n  \"chunk_size\": 65536,\n  \"compression\": \"zstd\",\n  \"compression_level\": 3,\n  \"l2_cache_bytes\": 4294967296,\n  \"fsname\": \"argosfs\",\n  \"io_mode\": \"io-uring\",\n  \"direct_io\": false,\n  \"zero_copy\": true,\n  \"numa_aware\": true\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301578468-argosfs-_root_project_argosfs_paper-data_runs_advanced_v---mode.log",
+      "env": []
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "put",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/root/project/argosfs/paper-data/runs/advanced/datasets/text-small.txt",
+        "/data/text-small.txt"
+      ],
+      "elapsed_sec": 2.6697254455648363,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301581139-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_root_project_argosfs_paper-data_runs_advanced_d.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "get",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/data/text-small.txt",
+        "/root/project/argosfs/paper-data/runs/advanced/recovered/text-small.txt"
+      ],
+      "elapsed_sec": 2.6882040449418128,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301583827-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_data_text-small.txt.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "put",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/root/project/argosfs/paper-data/runs/advanced/datasets/zeros-1m.bin",
+        "/data/zeros-1m.bin"
+      ],
+      "elapsed_sec": 2.766680218745023,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301586595-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_root_project_argosfs_paper-data_runs_advanced_d.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "get",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/data/zeros-1m.bin",
+        "/root/project/argosfs/paper-data/runs/advanced/recovered/zeros-1m.bin"
+      ],
+      "elapsed_sec": 2.8060557059943676,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301589402-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_data_zeros-1m.bin.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "put",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/root/project/argosfs/paper-data/runs/advanced/datasets/pattern-2m.bin",
+        "/data/pattern-2m.bin"
+      ],
+      "elapsed_sec": 2.99499026639387,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301592407-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_root_project_argosfs_paper-data_runs_advanced_d.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "get",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/data/pattern-2m.bin",
+        "/root/project/argosfs/paper-data/runs/advanced/recovered/pattern-2m.bin"
+      ],
+      "elapsed_sec": 2.7835779199376702,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301595192-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_data_pattern-2m.bin.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "put",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/root/project/argosfs/paper-data/runs/advanced/datasets/random-1m.bin",
+        "/data/random-1m.bin"
+      ],
+      "elapsed_sec": 3.19142807694152,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301598400-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_root_project_argosfs_paper-data_runs_advanced_d.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "get",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/data/random-1m.bin",
+        "/root/project/argosfs/paper-data/runs/advanced/recovered/random-1m.bin"
+      ],
+      "elapsed_sec": 3.1539807147346437,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301601555-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_data_random-1m.bin.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "set-posix-acl",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/data/text-small.txt",
+        "user::rw-,group::r--,mask::r--,other::---"
+      ],
+      "elapsed_sec": 0.02156341588124633,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301601586-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_data_text-small.txt.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "set-nfs4-acl",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "/data/text-small.txt",
+        "@/root/project/argosfs/paper-data/runs/advanced/metrics/nfs4-acl.json"
+      ],
+      "elapsed_sec": 0.01986029464751482,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301601607-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-_data_text-small.txt.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "encryption-status",
+        "/root/project/argosfs/paper-data/runs/advanced/volume"
+      ],
+      "elapsed_sec": 0.01363033289089799,
+      "stdout": "{\n  \"enabled\": true,\n  \"encrypted_blocks\": 17,\n  \"kdf\": \"argon2id\"\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301601621-argosfs-_root_project_argosfs_paper-data_runs_advanced_v.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "fsck",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "--repair",
+        "--remove-orphans"
+      ],
+      "elapsed_sec": 13.522577568888664,
+      "stdout": "{\n  \"files_checked\": 4,\n  \"directories_checked\": 2,\n  \"damaged_files\": 1,\n  \"repaired_files\": 1,\n  \"unrecoverable_files\": 0,\n  \"missing_shards\": 0,\n  \"checksum_errors\": 1,\n  \"orphan_shards\": 0,\n  \"removed_orphans\": 0,\n  \"errors\": []\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301615146-argosfs-_root_project_argosfs_paper-data_runs_advanced_v---repair.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "mark-disk",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "disk-0000",
+        "failed"
+      ],
+      "elapsed_sec": 0.021632006391882896,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301615168-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-disk-0000.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "add-disk",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "--rebalance"
+      ],
+      "elapsed_sec": 24.64111869269982,
+      "stdout": "disk-0006\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301639810-argosfs-_root_project_argosfs_paper-data_runs_advanced_v---rebalance.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "set-health",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "disk-0001",
+        "--pending-sectors",
+        "12"
+      ],
+      "elapsed_sec": 0.021331829018890858,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301639832-argosfs-_root_project_argosfs_paper-data_runs_advanced_v-disk-0001.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "autopilot",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "--once"
+      ],
+      "elapsed_sec": 31.94198110885918,
+      "stdout": "{\n  \"actions\": [\n    {\n      \"action\": \"smart-refresh-skipped\",\n      \"error\": \"unsupported operation: SMART refresh failed for all selected disks: [{\\\"disk_id\\\":\\\"disk-0000\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0000 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0001\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0001 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0002\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0002 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0003\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0003 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0004\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0004 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0005\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0005 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0006\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0006 has no probed backing device\\\"}]\"\n    },\n    {\n      \"action\": \"skip-drain-predicted-failure\",\n      \"disk_id\": \"disk-0001\",\n      \"error\": \"not enough online disks: need 6, have 5\",\n      \"risk\": 0.12\n    },\n    {\n      \"action\": \"scrub\",\n      \"report\": {\n        \"checksum_errors\": 0,\n        \"damaged_files\": 0,\n        \"directories_checked\": 2,\n        \"errors\": [],\n        \"files_checked\": 4,\n        \"missing_shards\": 0,\n        \"orphan_shards\": 0,\n        \"removed_orphans\": 0,\n        \"repaired_files\": 0,\n        \"unrecoverable_files\": 0\n      }\n    },\n    {\n      \"action\": \"rebalance\",\n      \"rewritten_files\": 4\n    }\n  ],\n  \"health\": {\n    \"cache\": {\n      \"hit_ratio\": 0.5,\n      \"hits\": 17,\n      \"l2_hits\": 0,\n      \"l2_writes\": 17,\n      \"memory_bytes\": 0,\n      \"memory_items\": 0,\n      \"misses\": 17\n    },\n    \"directories\": 2,\n    \"disks\": [\n      {\n        \"available_bytes\": 959726878720,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.7803323,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0000\",\n        \"numa_node\": null,\n        \"observed_read_mib_s\": 904.5116134768612,\n        \"observed_write_mib_s\": 835.8450477016769,\n        \"predicted_failure\": true,\n        \"read_latency_ewma_ms\": 1.105569,\n        \"reasons\": [\n          \"failed\"\n        ],\n        \"risk_score\": 1.0,\n        \"rotational\": null,\n        \"status\": \"failed\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 0,\n        \"weight\": 2.9171620294146363,\n        \"write_latency_ewma_ms\": 1.196394\n      },\n      {\n        \"available_bytes\": 959726615877,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.6934963000000001,\n          \"pending_sectors\": 12,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0001\",\n        \"numa_node\": null,\n        \"observed_read_mib_s\": 703.7498650125201,\n        \"observed_write_mib_s\": 127.6300728100717,\n        \"predicted_failure\": true,\n        \"read_latency_ewma_ms\": 0.06414615414838341,\n        \"reasons\": [\n          \"pending-sectors\"\n        ],\n        \"risk_score\": 0.12,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262843,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.3602585848062283\n      },\n      {\n        \"available_bytes\": 959726615877,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.7374857,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0002\",\n        \"numa_node\": null,\n        \"observed_read_mib_s\": 713.2837852731054,\n        \"observed_write_mib_s\": 125.88560579909456,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.06478900260092431,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262843,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.3584906780385373\n      },\n      {\n        \"available_bytes\": 959726615877,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.6038519999999999,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0003\",\n        \"numa_node\": null,\n        \"observed_read_mib_s\": 715.9425565203071,\n        \"observed_write_mib_s\": 122.83040869602024,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.06147601582398087,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262843,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.3670624131621958\n      },\n      {\n        \"available_bytes\": 959726615877,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.9935042,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0004\",\n        \"numa_node\": null,\n        \"observed_read_mib_s\": 780.3468112236783,\n        \"observed_write_mib_s\": 131.72683781613853,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.05904277267735954,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262843,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.35385053977599423\n      },\n      {\n        \"available_bytes\": 959726615877,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.9481725,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0005\",\n        \"numa_node\": null,\n        \"observed_read_mib_s\": 614.6138683365451,\n        \"observed_write_mib_s\": 122.66719345747363,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.07314557851263145,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262843,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.3792547599728606\n      },\n      {\n        \"available_bytes\": 959726615877,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.8082866,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 0.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0006\",\n        \"numa_node\": null,\n        \"observed_read_mib_s\": 719.6183349284977,\n        \"observed_write_mib_s\": 133.60899012112424,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.0626713161002708,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262843,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.34840603296678185\n      }\n    ],\n    \"encryption_enabled\": true,\n    \"files\": 4,\n    \"io_mode\": \"io-uring\",\n    \"specials\": 0,\n    \"symlinks\": 0,\n    \"txid\": 50,\n    \"volume_uuid\": \"41b57e7c-a913-4891-aa79-bc345733855d\"\n  }\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301671774-argosfs-_root_project_argosfs_paper-data_runs_advanced_v---once.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "health",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "--json"
+      ],
+      "elapsed_sec": 0.02223041793331504,
+      "stdout": "{\n  \"volume_uuid\": \"41b57e7c-a913-4891-aa79-bc345733855d\",\n  \"txid\": 51,\n  \"files\": 4,\n  \"directories\": 2,\n  \"symlinks\": 0,\n  \"specials\": 0,\n  \"disks\": [\n    {\n      \"id\": \"disk-0000\",\n      \"status\": \"failed\",\n      \"tier\": \"hot\",\n      \"weight\": 2.9171620294146363,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 1.105569,\n      \"write_latency_ewma_ms\": 1.196394,\n      \"observed_read_mib_s\": 904.5116134768612,\n      \"observed_write_mib_s\": 835.8450477016769,\n      \"risk_score\": 1.0,\n      \"predicted_failure\": true,\n      \"reasons\": [\n        \"failed\"\n      ],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.7803323,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0001\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262843,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615877,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.06414615414838341,\n      \"write_latency_ewma_ms\": 0.3602585848062283,\n      \"observed_read_mib_s\": 703.7498650125201,\n      \"observed_write_mib_s\": 127.6300728100717,\n      \"risk_score\": 0.12,\n      \"predicted_failure\": true,\n      \"reasons\": [\n        \"pending-sectors\"\n      ],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 12,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.6934963000000001,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0002\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262843,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615877,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.06478900260092431,\n      \"write_latency_ewma_ms\": 0.3584906780385373,\n      \"observed_read_mib_s\": 713.2837852731054,\n      \"observed_write_mib_s\": 125.88560579909456,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.7374857,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0003\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262843,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615877,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.06147601582398087,\n      \"write_latency_ewma_ms\": 0.3670624131621958,\n      \"observed_read_mib_s\": 715.9425565203071,\n      \"observed_write_mib_s\": 122.83040869602024,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.6038519999999999,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0004\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262843,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615877,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.05904277267735954,\n      \"write_latency_ewma_ms\": 0.35385053977599423,\n      \"observed_read_mib_s\": 780.3468112236783,\n      \"observed_write_mib_s\": 131.72683781613853,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.9935042,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0005\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262843,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615877,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.07314557851263145,\n      \"write_latency_ewma_ms\": 0.3792547599728606,\n      \"observed_read_mib_s\": 614.6138683365451,\n      \"observed_write_mib_s\": 122.66719345747364,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.9481725,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0006\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262843,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615877,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"numa_node\": null,\n      \"read_latency_ewma_ms\": 0.0626713161002708,\n      \"write_latency_ewma_ms\": 0.34840603296678185,\n      \"observed_read_mib_s\": 719.6183349284977,\n      \"observed_write_mib_s\": 133.60899012112424,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.8082866,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 0.0\n      }\n    }\n  ],\n  \"cache\": {\n    \"hit_ratio\": 0.0,\n    \"hits\": 0,\n    \"l2_hits\": 0,\n    \"l2_writes\": 0,\n    \"memory_bytes\": 0,\n    \"memory_items\": 0,\n    \"misses\": 0\n  },\n  \"io_mode\": \"io-uring\",\n  \"encryption_enabled\": true\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/advanced/logs/1777301671797-argosfs-_root_project_argosfs_paper-data_runs_advanced_v---json.log",
+      "env": [
+        "ARGOSFS_KEY_FILE"
+      ]
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "prometheus",
+        "/root/project/argosfs/paper-data/runs/advanced/volume",
+        "--listen",
+        "127.0.0.1:33947"
+      ],
+      "elapsed_sec": 0.05953695438802242,
+      "output": "/root/project/argosfs/paper-data/runs/advanced/metrics/prometheus.txt",
+      "bytes": 6719
+    }
+  ],
+  "corrupted_shard": "/root/project/argosfs/paper-data/runs/advanced/volume/.argosfs/devices/disk-0005/shards/01/s0000000000000001.000.blk",
+  "finished_at": 1777301682.7078817,
+  "duration_sec": 113.06646871566772
+}

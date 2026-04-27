@@ -90,6 +90,92 @@ pub enum DiskClass {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IoMode {
+    #[default]
+    Buffered,
+    Direct,
+    IoUring,
+}
+
+impl std::str::FromStr for IoMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "buffered" => Ok(Self::Buffered),
+            "direct" => Ok(Self::Direct),
+            "io-uring" | "iouring" => Ok(Self::IoUring),
+            other => Err(format!("unknown I/O mode: {other}")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PosixAclTag {
+    UserObj,
+    User,
+    GroupObj,
+    Group,
+    Mask,
+    Other,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PosixAclEntry {
+    pub tag: PosixAclTag,
+    pub id: Option<u32>,
+    pub perms: u16,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PosixAcl {
+    pub entries: Vec<PosixAclEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Nfs4AceType {
+    Allow,
+    Deny,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Nfs4Ace {
+    pub ace_type: Nfs4AceType,
+    pub principal: String,
+    pub flags: Vec<String>,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Nfs4Acl {
+    pub entries: Vec<Nfs4Ace>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EncryptionConfig {
+    pub enabled: bool,
+    pub kdf: String,
+    pub salt_hex: String,
+    pub key_check_nonce_hex: String,
+    pub key_check_ciphertext_hex: String,
+}
+
+impl Default for EncryptionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kdf: "argon2id".to_string(),
+            salt_hex: String::new(),
+            key_check_nonce_hex: String::new(),
+            key_check_ciphertext_hex: String::new(),
+        }
+    }
+}
+
 impl std::str::FromStr for DiskStatus {
     type Err = String;
 
@@ -115,6 +201,14 @@ pub struct VolumeConfig {
     pub compression_level: i32,
     pub l2_cache_bytes: u64,
     pub fsname: String,
+    #[serde(default)]
+    pub io_mode: IoMode,
+    #[serde(default)]
+    pub direct_io: bool,
+    #[serde(default)]
+    pub zero_copy: bool,
+    #[serde(default)]
+    pub numa_aware: bool,
 }
 
 impl Default for VolumeConfig {
@@ -127,6 +221,10 @@ impl Default for VolumeConfig {
             compression_level: 3,
             l2_cache_bytes: 4 * 1024 * 1024 * 1024,
             fsname: "argosfs".to_string(),
+            io_mode: IoMode::Buffered,
+            direct_io: false,
+            zero_copy: true,
+            numa_aware: true,
         }
     }
 }
@@ -148,6 +246,7 @@ pub struct DiskProbe {
     pub backing_device: Option<PathBuf>,
     pub sysfs_block: Option<String>,
     pub rotational: Option<bool>,
+    pub numa_node: Option<i32>,
     pub capacity_bytes: u64,
     pub available_bytes: u64,
     pub measured_read_mib_s: f64,
@@ -175,6 +274,8 @@ pub struct Disk {
     pub sysfs_block: Option<String>,
     #[serde(default)]
     pub rotational: Option<bool>,
+    #[serde(default)]
+    pub numa_node: Option<i32>,
     #[serde(default)]
     pub read_latency_ewma_ms: f64,
     #[serde(default)]
@@ -206,6 +307,10 @@ pub struct FileBlock {
     pub raw_size: usize,
     pub raw_sha256: String,
     pub codec: Compression,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub nonce_hex: String,
     pub compressed_size: usize,
     pub shard_size: usize,
     pub shards: Vec<Shard>,
@@ -238,6 +343,12 @@ pub struct Inode {
     pub target: Option<String>,
     pub blocks: Vec<FileBlock>,
     pub xattrs: BTreeMap<String, String>,
+    #[serde(default)]
+    pub posix_acl_access: Option<PosixAcl>,
+    #[serde(default)]
+    pub posix_acl_default: Option<PosixAcl>,
+    #[serde(default)]
+    pub nfs4_acl: Option<Nfs4Acl>,
     pub access_count: u64,
     pub write_count: u64,
     pub read_bytes: u64,
@@ -255,6 +366,8 @@ pub struct Metadata {
     pub next_inode: InodeId,
     pub next_stripe: u64,
     pub config: VolumeConfig,
+    #[serde(default)]
+    pub encryption: EncryptionConfig,
     pub disks: BTreeMap<String, Disk>,
     pub inodes: BTreeMap<InodeId, Inode>,
 }
@@ -271,6 +384,7 @@ pub struct HealthDiskReport {
     pub class: DiskClass,
     pub backing_device: Option<PathBuf>,
     pub rotational: Option<bool>,
+    pub numa_node: Option<i32>,
     pub read_latency_ewma_ms: f64,
     pub write_latency_ewma_ms: f64,
     pub observed_read_mib_s: f64,
@@ -291,6 +405,8 @@ pub struct HealthReport {
     pub specials: usize,
     pub disks: Vec<HealthDiskReport>,
     pub cache: BTreeMap<String, serde_json::Value>,
+    pub io_mode: IoMode,
+    pub encryption_enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

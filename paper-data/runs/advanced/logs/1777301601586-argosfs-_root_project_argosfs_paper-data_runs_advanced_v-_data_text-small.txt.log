@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "set-posix-acl",
+    "/root/project/argosfs/paper-data/runs/advanced/volume",
+    "/data/text-small.txt",
+    "user::rw-,group::r--,mask::r--,other::---"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.02156341588124633,
+  "stdout": "",
+  "stderr": ""
+}

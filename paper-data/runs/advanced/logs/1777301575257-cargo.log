@@ -1,0 +1,10 @@
+{
+  "cmd": [
+    "/root/.cargo/bin/cargo",
+    "build"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 5.612689388915896,
+  "stdout": "",
+  "stderr": "   Compiling bitflags v2.11.1\n   Compiling ahash v0.7.8\n   Compiling io-uring v0.7.12\n   Compiling hashbrown v0.12.3\n   Compiling lru v0.7.8\n   Compiling reed-solomon-erasure v6.0.0\n   Compiling argosfs v0.1.0 (/root/project/argosfs)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.56s\n"
+}

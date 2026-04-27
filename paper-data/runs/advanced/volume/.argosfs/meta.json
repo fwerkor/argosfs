@@ -1,0 +1,1481 @@
+{
+  "format": "argosfs-rust-v1",
+  "uuid": "41b57e7c-a913-4891-aa79-bc345733855d",
+  "created_at": 1777301575.5399616,
+  "updated_at": 1777301682.6943893,
+  "txid": 56,
+  "next_inode": 7,
+  "next_stripe": 54,
+  "config": {
+    "k": 4,
+    "m": 2,
+    "chunk_size": 65536,
+    "compression": "zstd",
+    "compression_level": 3,
+    "l2_cache_bytes": 4294967296,
+    "fsname": "argosfs",
+    "io_mode": "io-uring",
+    "direct_io": false,
+    "zero_copy": true,
+    "numa_aware": true
+  },
+  "encryption": {
+    "enabled": true,
+    "kdf": "argon2id",
+    "salt_hex": "d2a9e132bcc5c74a4b06c4df4da7aac6",
+    "key_check_nonce_hex": "3074b7f918061e8a3272ec3e73ba8ee74236beb9f2afe1e3",
+    "key_check_ciphertext_hex": "125890e9d13104d1677669a762ee9699093d2af287938834ea0a9413e811f2804f"
+  },
+  "disks": {
+    "disk-0000": {
+      "id": "disk-0000",
+      "path": ".argosfs/devices/disk-0000",
+      "tier": "hot",
+      "weight": 2.9171620294146363,
+      "status": "failed",
+      "capacity_bytes": 959726878720,
+      "health": {
+        "reallocated_sectors": 0,
+        "pending_sectors": 0,
+        "crc_errors": 0,
+        "io_errors": 0,
+        "latency_ms": 0.7803323,
+        "wear_percent": 0.0,
+        "temperature_c": 30.0
+      },
+      "class": "unknown",
+      "backing_device": null,
+      "sysfs_block": null,
+      "rotational": null,
+      "numa_node": null,
+      "read_latency_ewma_ms": 1.105569,
+      "write_latency_ewma_ms": 1.196394,
+      "observed_read_mib_s": 904.5116134768612,
+      "observed_write_mib_s": 835.8450477016769,
+      "io_samples": 37,
+      "last_probe": {
+        "class": "unknown",
+        "backing_device": null,
+        "sysfs_block": null,
+        "rotational": null,
+        "numa_node": null,
+        "capacity_bytes": 959726878720,
+        "available_bytes": 610607177728,
+        "measured_read_mib_s": 904.5116134768612,
+        "measured_write_mib_s": 835.8450477016769,
+        "measured_read_latency_ms": 1.105569,
+        "measured_write_latency_ms": 1.196394,
+        "recommended_weight": 2.9171620294146363,
+        "recommended_tier": "hot"
+      },
+      "created_at": 1777301575.5399616
+    },
+    "disk-0001": {
+      "id": "disk-0001",
+      "path": ".argosfs/devices/disk-0001",
+      "tier": "hot",
+      "weight": 3.5,
+      "status": "online",
+      "capacity_bytes": 959726878720,
+      "health": {
+        "reallocated_sectors": 0,
+        "pending_sectors": 12,
+        "crc_errors": 0,
+        "io_errors": 0,
+        "latency_ms": 0.6934963000000001,
+        "wear_percent": 0.0,
+        "temperature_c": 30.0
+      },
+      "class": "unknown",
+      "backing_device": null,
+      "sysfs_block": null,
+      "rotational": null,
+      "numa_node": null,
+      "read_latency_ewma_ms": 0.06555469601899297,
+      "write_latency_ewma_ms": 0.3602585848062283,
+      "observed_read_mib_s": 583.9009951560975,
+      "observed_write_mib_s": 127.6300728100717,
+      "io_samples": 107,
+      "last_probe": {
+        "class": "unknown",
+        "backing_device": null,
+        "sysfs_block": null,
+        "rotational": null,
+        "numa_node": null,
+        "capacity_bytes": 959726878720,
+        "available_bytes": 610606129152,
+        "measured_read_mib_s": 1786.1576355559682,
+        "measured_write_mib_s": 1074.3042537076926,
+        "measured_read_latency_ms": 0.559861,
+        "measured_write_latency_ms": 0.930835,
+        "recommended_weight": 3.5,
+        "recommended_tier": "hot"
+      },
+      "created_at": 1777301575.5399616
+    },
+    "disk-0002": {
+      "id": "disk-0002",
+      "path": ".argosfs/devices/disk-0002",
+      "tier": "hot",
+      "weight": 3.5,
+      "status": "online",
+      "capacity_bytes": 959726878720,
+      "health": {
+        "reallocated_sectors": 0,
+        "pending_sectors": 0,
+        "crc_errors": 0,
+        "io_errors": 0,
+        "latency_ms": 0.7374857,
+        "wear_percent": 0.0,
+        "temperature_c": 30.0
+      },
+      "class": "unknown",
+      "backing_device": null,
+      "sysfs_block": null,
+      "rotational": null,
+      "numa_node": null,
+      "read_latency_ewma_ms": 0.060672210439967955,
+      "write_latency_ewma_ms": 0.3584906780385373,
+      "observed_read_mib_s": 629.1896488461329,
+      "observed_write_mib_s": 125.88560579909456,
+      "io_samples": 107,
+      "last_probe": {
+        "class": "unknown",
+        "backing_device": null,
+        "sysfs_block": null,
+        "rotational": null,
+        "numa_node": null,
+        "capacity_bytes": 959726878720,
+        "available_bytes": 610606129152,
+        "measured_read_mib_s": 1410.6919161710434,
+        "measured_write_mib_s": 1111.6830102597226,
+        "measured_read_latency_ms": 0.7088720000000001,
+        "measured_write_latency_ms": 0.8995369999999999,
+        "recommended_weight": 3.5,
+        "recommended_tier": "hot"
+      },
+      "created_at": 1777301575.5399616
+    },
+    "disk-0003": {
+      "id": "disk-0003",
+      "path": ".argosfs/devices/disk-0003",
+      "tier": "hot",
+      "weight": 3.5,
+      "status": "online",
+      "capacity_bytes": 959726878720,
+      "health": {
+        "reallocated_sectors": 0,
+        "pending_sectors": 0,
+        "crc_errors": 0,
+        "io_errors": 0,
+        "latency_ms": 0.6038519999999999,
+        "wear_percent": 0.0,
+        "temperature_c": 30.0
+      },
+      "class": "unknown",
+      "backing_device": null,
+      "sysfs_block": null,
+      "rotational": null,
+      "numa_node": null,
+      "read_latency_ewma_ms": 0.06605578246249084,
+      "write_latency_ewma_ms": 0.3670624131621958,
+      "observed_read_mib_s": 545.4526125997509,
+      "observed_write_mib_s": 122.83040869602024,
+      "io_samples": 107,
+      "last_probe": {
+        "class": "unknown",
+        "backing_device": null,
+        "sysfs_block": null,
+        "rotational": null,
+        "numa_node": null,
+        "capacity_bytes": 959726878720,
+        "available_bytes": 610606129152,
+        "measured_read_mib_s": 2062.4978085960784,
+        "measured_write_mib_s": 1232.931603119317,
+        "measured_read_latency_ms": 0.484849,
+        "measured_write_latency_ms": 0.811075,
+        "recommended_weight": 3.5,
+        "recommended_tier": "hot"
+      },
+      "created_at": 1777301575.5399616
+    },
+    "disk-0004": {
+      "id": "disk-0004",
+      "path": ".argosfs/devices/disk-0004",
+      "tier": "hot",
+      "weight": 3.5,
+      "status": "online",
+      "capacity_bytes": 959726878720,
+      "health": {
+        "reallocated_sectors": 0,
+        "pending_sectors": 0,
+        "crc_errors": 0,
+        "io_errors": 0,
+        "latency_ms": 0.9935042,
+        "wear_percent": 0.0,
+        "temperature_c": 30.0
+      },
+      "class": "unknown",
+      "backing_device": null,
+      "sysfs_block": null,
+      "rotational": null,
+      "numa_node": null,
+      "read_latency_ewma_ms": 0.05985912720442732,
+      "write_latency_ewma_ms": 0.35385053977599423,
+      "observed_read_mib_s": 609.1801535389058,
+      "observed_write_mib_s": 131.72683781613853,
+      "io_samples": 107,
+      "last_probe": {
+        "class": "unknown",
+        "backing_device": null,
+        "sysfs_block": null,
+        "rotational": null,
+        "numa_node": null,
+        "capacity_bytes": 959726878720,
+        "available_bytes": 610606129152,
+        "measured_read_mib_s": 2282.8496355430557,
+        "measured_write_mib_s": 1221.529207984892,
+        "measured_read_latency_ms": 0.438049,
+        "measured_write_latency_ms": 0.818646,
+        "recommended_weight": 3.5,
+        "recommended_tier": "hot"
+      },
+      "created_at": 1777301575.5399616
+    },
+    "disk-0005": {
+      "id": "disk-0005",
+      "path": ".argosfs/devices/disk-0005",
+      "tier": "hot",
+      "weight": 3.5,
+      "status": "online",
+      "capacity_bytes": 959726878720,
+      "health": {
+        "reallocated_sectors": 0,
+        "pending_sectors": 0,
+        "crc_errors": 0,
+        "io_errors": 0,
+        "latency_ms": 0.9481725,
+        "wear_percent": 0.0,
+        "temperature_c": 30.0
+      },
+      "class": "unknown",
+      "backing_device": null,
+      "sysfs_block": null,
+      "rotational": null,
+      "numa_node": null,
+      "read_latency_ewma_ms": 0.06885559678389089,
+      "write_latency_ewma_ms": 0.3792547599728606,
+      "observed_read_mib_s": 514.7758553202391,
+      "observed_write_mib_s": 122.66719345747364,
+      "io_samples": 107,
+      "last_probe": {
+        "class": "unknown",
+        "backing_device": null,
+        "sysfs_block": null,
+        "rotational": null,
+        "numa_node": null,
+        "capacity_bytes": 959726878720,
+        "available_bytes": 610606129152,
+        "measured_read_mib_s": 1335.1758760422715,
+        "measured_write_mib_s": 1113.7420172540913,
+        "measured_read_latency_ms": 0.748965,
+        "measured_write_latency_ms": 0.897874,
+        "recommended_weight": 3.5,
+        "recommended_tier": "hot"
+      },
+      "created_at": 1777301575.5399616
+    },
+    "disk-0006": {
+      "id": "disk-0006",
+      "path": ".argosfs/devices/disk-0006",
+      "tier": "hot",
+      "weight": 3.5,
+      "status": "online",
+      "capacity_bytes": 959726878720,
+      "health": {
+        "reallocated_sectors": 0,
+        "pending_sectors": 0,
+        "crc_errors": 0,
+        "io_errors": 0,
+        "latency_ms": 0.8082866,
+        "wear_percent": 0.0,
+        "temperature_c": 0.0
+      },
+      "class": "unknown",
+      "backing_device": null,
+      "sysfs_block": null,
+      "rotational": null,
+      "numa_node": null,
+      "read_latency_ewma_ms": 0.06260261596651857,
+      "write_latency_ewma_ms": 0.34840603296678185,
+      "observed_read_mib_s": 582.4368220499135,
+      "observed_write_mib_s": 133.60899012112424,
+      "io_samples": 71,
+      "last_probe": {
+        "class": "unknown",
+        "backing_device": null,
+        "sysfs_block": null,
+        "rotational": null,
+        "numa_node": null,
+        "capacity_bytes": 959726878720,
+        "available_bytes": 610606129152,
+        "measured_read_mib_s": 1549.5131429704786,
+        "measured_write_mib_s": 1113.9194257522577,
+        "measured_read_latency_ms": 0.645364,
+        "measured_write_latency_ms": 0.8977310000000001,
+        "recommended_weight": 3.5,
+        "recommended_tier": "hot"
+      },
+      "created_at": 1777301615.2160432
+    }
+  },
+  "inodes": {
+    "1": {
+      "id": 1,
+      "kind": "directory",
+      "mode": 16877,
+      "uid": 0,
+      "gid": 0,
+      "nlink": 3,
+      "size": 0,
+      "rdev": 0,
+      "atime": 1777301575.5399616,
+      "mtime": 1777301575.719051,
+      "ctime": 1777301575.719051,
+      "entries": {
+        "data": 2
+      },
+      "target": null,
+      "blocks": [],
+      "xattrs": {},
+      "posix_acl_access": null,
+      "posix_acl_default": null,
+      "nfs4_acl": null,
+      "access_count": 0,
+      "write_count": 0,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "storage_class": "warm"
+    },
+    "2": {
+      "id": 2,
+      "kind": "directory",
+      "mode": 16877,
+      "uid": 0,
+      "gid": 0,
+      "nlink": 2,
+      "size": 0,
+      "rdev": 0,
+      "atime": 1777301575.7190242,
+      "mtime": 1777301595.2217607,
+      "ctime": 1777301595.2217607,
+      "entries": {
+        "pattern-2m.bin": 5,
+        "random-1m.bin": 6,
+        "text-small.txt": 3,
+        "zeros-1m.bin": 4
+      },
+      "target": null,
+      "blocks": [],
+      "xattrs": {},
+      "posix_acl_access": null,
+      "posix_acl_default": null,
+      "nfs4_acl": null,
+      "access_count": 0,
+      "write_count": 0,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "storage_class": "warm"
+    },
+    "3": {
+      "id": 3,
+      "kind": "file",
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "nlink": 1,
+      "size": 1536,
+      "rdev": 0,
+      "atime": 1777301674.3648093,
+      "mtime": 1777301606.8540895,
+      "ctime": 1777301655.7898977,
+      "entries": {},
+      "target": null,
+      "blocks": [
+        {
+          "stripe_id": "s0000000000000025",
+          "raw_offset": 0,
+          "raw_size": 1536,
+          "raw_sha256": "9f4b5cf807bd00ddcb48537296c35dca079f4746e59485dc2b1d676fdb5ae0c6",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "7173a7e06717b11c00e0586d0d8b791f6e2c4420d1c542c7",
+          "compressed_size": 58,
+          "shard_size": 15,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0003",
+              "relpath": "shards/25/s0000000000000025.000.blk",
+              "sha256": "b6a9c1729bbdb0b793123321004c38e7ea51dffb179f92fa739f3a78457ab8c4",
+              "size": 15
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0005",
+              "relpath": "shards/25/s0000000000000025.001.blk",
+              "sha256": "a0163ab99eddd1165bd693a0223020b8b5a36d7110e99434a84d2f26a60f5c3a",
+              "size": 15
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0004",
+              "relpath": "shards/25/s0000000000000025.002.blk",
+              "sha256": "176d069b469d231249f786a63cd9029bf7500508142cb475ccf71ea5cfea5479",
+              "size": 15
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0006",
+              "relpath": "shards/25/s0000000000000025.003.blk",
+              "sha256": "0349a701d1bd1077713631beaf40e9647d035fbb43ce3a1b209a9f656dc5c941",
+              "size": 15
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0001",
+              "relpath": "shards/25/s0000000000000025.004.blk",
+              "sha256": "f1f8c4d07a35c075011f6321d820a98fcd8f2503b2deab2ac242f6052cd9f0ed",
+              "size": 15
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0002",
+              "relpath": "shards/25/s0000000000000025.005.blk",
+              "sha256": "5ad3ae00a605ba504753bef32eded35d45ee5f07e889bfc47c9e0e5a117dcd78",
+              "size": 15
+            }
+          ],
+          "storage_class": "hot"
+        }
+      ],
+      "xattrs": {},
+      "posix_acl_access": {
+        "entries": [
+          {
+            "tag": "user-obj",
+            "id": null,
+            "perms": 6
+          },
+          {
+            "tag": "group-obj",
+            "id": null,
+            "perms": 4
+          },
+          {
+            "tag": "mask",
+            "id": null,
+            "perms": 4
+          },
+          {
+            "tag": "other",
+            "id": null,
+            "perms": 0
+          }
+        ]
+      },
+      "posix_acl_default": null,
+      "nfs4_acl": {
+        "entries": [
+          {
+            "ace_type": "allow",
+            "principal": "EVERYONE@",
+            "flags": [],
+            "permissions": [
+              "read"
+            ]
+          }
+        ]
+      },
+      "access_count": 5,
+      "write_count": 5,
+      "read_bytes": 7680,
+      "write_bytes": 7680,
+      "storage_class": "hot"
+    },
+    "4": {
+      "id": 4,
+      "kind": "file",
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "nlink": 1,
+      "size": 1048576,
+      "rdev": 0,
+      "atime": 1777301676.9106312,
+      "mtime": 1777301586.5925808,
+      "ctime": 1777301660.9177754,
+      "entries": {},
+      "target": null,
+      "blocks": [
+        {
+          "stripe_id": "s0000000000000026",
+          "raw_offset": 0,
+          "raw_size": 262144,
+          "raw_sha256": "8a39d2abd3999ab73c34db2476849cddf303ce389b35826850f9a700589b4a90",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "62e21c6d6fc8a1d51b0635cdff12c202eece9234f69c351f",
+          "compressed_size": 42,
+          "shard_size": 11,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0002",
+              "relpath": "shards/26/s0000000000000026.000.blk",
+              "sha256": "3ee6a52663fdeee8a26cf71b6cdd98b8f621ce16860b80931abafc9e130dc772",
+              "size": 11
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0006",
+              "relpath": "shards/26/s0000000000000026.001.blk",
+              "sha256": "54cd7421303956604bf2d9f503bc1612a480e483fc38039a8809ea324604f4d4",
+              "size": 11
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0004",
+              "relpath": "shards/26/s0000000000000026.002.blk",
+              "sha256": "25a8343e1e71ba66962fe309c30e58fdc9a476f21330263b873aae0c78e918b8",
+              "size": 11
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0001",
+              "relpath": "shards/26/s0000000000000026.003.blk",
+              "sha256": "f90da2392462bdc50ab21ce73a1ef7ea4d9d77d13b73bb604beb152623b55d68",
+              "size": 11
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0003",
+              "relpath": "shards/26/s0000000000000026.004.blk",
+              "sha256": "f898019d68b18bd923f6fcc02a47e1784845648583c3548b8209a4f7a3690a1b",
+              "size": 11
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0005",
+              "relpath": "shards/26/s0000000000000026.005.blk",
+              "sha256": "e5bb039066ebb149fea244ac2932724d4059921cbcef525f3a5044377071aa16",
+              "size": 11
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s0000000000000027",
+          "raw_offset": 262144,
+          "raw_size": 262144,
+          "raw_sha256": "8a39d2abd3999ab73c34db2476849cddf303ce389b35826850f9a700589b4a90",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "c131771680097d7c6a6b4aeae446892935af42dc386b496c",
+          "compressed_size": 42,
+          "shard_size": 11,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0005",
+              "relpath": "shards/27/s0000000000000027.000.blk",
+              "sha256": "84e2badd2f4ce56456d2f5c40b4a110ff8baf2a4dcec1ef46762f865fdd71b7f",
+              "size": 11
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0003",
+              "relpath": "shards/27/s0000000000000027.001.blk",
+              "sha256": "48f5b85a9667304319f6e6f4415aaed65cc1465005a6b8da92ba41e6b584f1be",
+              "size": 11
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0002",
+              "relpath": "shards/27/s0000000000000027.002.blk",
+              "sha256": "a8763e3a0735dfb75fba134e371a610e727aaac9a2d4df3d6b6fee3a4f4544b0",
+              "size": 11
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0006",
+              "relpath": "shards/27/s0000000000000027.003.blk",
+              "sha256": "9d0fa541c639a0745ef33cb9486f6355cc05650f2fec7437cac4d78e16ffac2a",
+              "size": 11
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0001",
+              "relpath": "shards/27/s0000000000000027.004.blk",
+              "sha256": "b7a1bac0b58728ada0f4e2464c6f7ee6e592ba16ac473d3332ea0ac1df71509b",
+              "size": 11
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0004",
+              "relpath": "shards/27/s0000000000000027.005.blk",
+              "sha256": "ddce93a7ac00d06ab6643a67b106f6acd5edd2f5ab2ec70c00139b0abdc6827d",
+              "size": 11
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s0000000000000028",
+          "raw_offset": 524288,
+          "raw_size": 262144,
+          "raw_sha256": "8a39d2abd3999ab73c34db2476849cddf303ce389b35826850f9a700589b4a90",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "a7f84e06e90b92cad4cca4839115a5a58f2b19bef904e873",
+          "compressed_size": 42,
+          "shard_size": 11,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0005",
+              "relpath": "shards/28/s0000000000000028.000.blk",
+              "sha256": "98cfed180c1d290d028eddc97e47290f988fc2edfdd8a95798448d0ea29cc6ad",
+              "size": 11
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0002",
+              "relpath": "shards/28/s0000000000000028.001.blk",
+              "sha256": "114860b7a6fff94e97893e9c940a004583baf01bbdc4dd084ba67a53b6b3dd22",
+              "size": 11
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0003",
+              "relpath": "shards/28/s0000000000000028.002.blk",
+              "sha256": "f09e7fd7f77d10b3720b9b997c6aef8a332c0bcd3af682b0fd794a2aea91b58e",
+              "size": 11
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0004",
+              "relpath": "shards/28/s0000000000000028.003.blk",
+              "sha256": "fc275c56169d543532f126ccbacabec7edb6c736165445e2472992b101838a78",
+              "size": 11
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0006",
+              "relpath": "shards/28/s0000000000000028.004.blk",
+              "sha256": "3a7607d3e2ec02126c7214774ff74850fa719c9e46b244556e2e877abf2bad92",
+              "size": 11
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0001",
+              "relpath": "shards/28/s0000000000000028.005.blk",
+              "sha256": "435dc0c46c2f71fe4027a13fd8f02b5c662ed250e4572e811a06b4ebee34319d",
+              "size": 11
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s0000000000000029",
+          "raw_offset": 786432,
+          "raw_size": 262144,
+          "raw_sha256": "8a39d2abd3999ab73c34db2476849cddf303ce389b35826850f9a700589b4a90",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "26a2d4008a71d8771e565610efc7504c9a823c2ba458be61",
+          "compressed_size": 42,
+          "shard_size": 11,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0003",
+              "relpath": "shards/29/s0000000000000029.000.blk",
+              "sha256": "96768a3bb20844fc874310ece8c849e7b0edf281d4e137dcbe8581bea2117445",
+              "size": 11
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0001",
+              "relpath": "shards/29/s0000000000000029.001.blk",
+              "sha256": "89a689a29976d9fdaa1b4afed0903b7099e4b3cbfb0248ef22fed18bd6997503",
+              "size": 11
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0006",
+              "relpath": "shards/29/s0000000000000029.002.blk",
+              "sha256": "6fb8aa86e71165f482883fed1ae7ac55f55f1ecb7c163f08c8f901550a480f94",
+              "size": 11
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0002",
+              "relpath": "shards/29/s0000000000000029.003.blk",
+              "sha256": "fda3d778f01c5220c48355cab1a4bb358c8c35bbd2c5670b4c69c6c71df494d9",
+              "size": 11
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0005",
+              "relpath": "shards/29/s0000000000000029.004.blk",
+              "sha256": "292137957974975f068952984fb175ba19c8f1fa963c39fc48867e90d9ad765e",
+              "size": 11
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0004",
+              "relpath": "shards/29/s0000000000000029.005.blk",
+              "sha256": "45f4a524cc1905d6144279fc69f1af8b557ff4de552e55789051f8f9f31ce103",
+              "size": 11
+            }
+          ],
+          "storage_class": "hot"
+        }
+      ],
+      "xattrs": {},
+      "posix_acl_access": null,
+      "posix_acl_default": null,
+      "nfs4_acl": null,
+      "access_count": 6,
+      "write_count": 3,
+      "read_bytes": 6291456,
+      "write_bytes": 3145728,
+      "storage_class": "hot"
+    },
+    "5": {
+      "id": 5,
+      "kind": "file",
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "nlink": 1,
+      "size": 2097152,
+      "rdev": 0,
+      "atime": 1777301679.5862257,
+      "mtime": 1777301592.4036496,
+      "ctime": 1777301666.2280922,
+      "entries": {},
+      "target": null,
+      "blocks": [
+        {
+          "stripe_id": "s000000000000002a",
+          "raw_offset": 0,
+          "raw_size": 262144,
+          "raw_sha256": "31a1f9dea0169551092d05e8bf4a446228c8c3eb4c9b713c66adcb7fd53c89be",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "bba1d169db78024df598cf99076398aa31ba1418f6a1c278",
+          "compressed_size": 301,
+          "shard_size": 76,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0002",
+              "relpath": "shards/2a/s000000000000002a.000.blk",
+              "sha256": "aa044b235701d3467906920edb352c131b5ac809f8cfd6751a2c45957e535df9",
+              "size": 76
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0003",
+              "relpath": "shards/2a/s000000000000002a.001.blk",
+              "sha256": "c74cce85b1fe99958c65f8c6f1338b1012ea2ccbd2b5ac025bdfc474d5e12dc9",
+              "size": 76
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0005",
+              "relpath": "shards/2a/s000000000000002a.002.blk",
+              "sha256": "27d3aeb7b7a1b24948b531d74ae2472dd4dac5bf3f6a75f89fb64a4d8afc312a",
+              "size": 76
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0004",
+              "relpath": "shards/2a/s000000000000002a.003.blk",
+              "sha256": "3c8f4f13cc68b1b6c478039fb6636ccd3c2b9b87141dd156349771d3a551f94d",
+              "size": 76
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0006",
+              "relpath": "shards/2a/s000000000000002a.004.blk",
+              "sha256": "da4c3f2cc5104f769115933c76315f3716e9b832c899e3638c34cc62db4181c6",
+              "size": 76
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0001",
+              "relpath": "shards/2a/s000000000000002a.005.blk",
+              "sha256": "ba4995401b71379a86e330222e12b2f4b93564ad8bd675ad653529602db033e4",
+              "size": 76
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s000000000000002b",
+          "raw_offset": 262144,
+          "raw_size": 262144,
+          "raw_sha256": "e31bdc63577fe76f6441014aaaa2226d9ffce11b44d0d510cade132b79fd7d76",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "4649301f0916324f47aad80d0aa1eab5deda4eed60844d47",
+          "compressed_size": 301,
+          "shard_size": 76,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0002",
+              "relpath": "shards/2b/s000000000000002b.000.blk",
+              "sha256": "2492906c9b6d934fa534269f8d339fcfca8a0d18dd68289d1f659d7c75afbb49",
+              "size": 76
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0001",
+              "relpath": "shards/2b/s000000000000002b.001.blk",
+              "sha256": "d5897c7f7aa2f875742869a3816f5d5a71a44e7321176e724ac13b15b9f4ab05",
+              "size": 76
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0005",
+              "relpath": "shards/2b/s000000000000002b.002.blk",
+              "sha256": "1eadbf2b24074e39f35aa456120148ca1b86ec55fef96d87e9b95f6f02275173",
+              "size": 76
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0003",
+              "relpath": "shards/2b/s000000000000002b.003.blk",
+              "sha256": "21a4ce3c5da0df0030290ebf72ebca9c87f8bfdd88d0077ce9c57ccef16b43da",
+              "size": 76
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0004",
+              "relpath": "shards/2b/s000000000000002b.004.blk",
+              "sha256": "bae84ed41f7fe935024a080646286e6cf12ef31d1817465ea298537ae0d5b4ce",
+              "size": 76
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0006",
+              "relpath": "shards/2b/s000000000000002b.005.blk",
+              "sha256": "5ccd5faa45e2ef36e4ba48851b29195784e1f3f10683acf99e6dc699ee2c7989",
+              "size": 76
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s000000000000002c",
+          "raw_offset": 524288,
+          "raw_size": 262144,
+          "raw_sha256": "c7f1bde9e1efa7d1385d51b077ea87b0c3860d28da43d5d6f221e845c4c2360f",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "6553cd6ca56f42d744e0f303ea85eb8d79bcd2a272f3977f",
+          "compressed_size": 301,
+          "shard_size": 76,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0002",
+              "relpath": "shards/2c/s000000000000002c.000.blk",
+              "sha256": "c1dae0feaffe96f8927dc52f75eb18e30e0f2c856eb9f996ce69fe1602aee66d",
+              "size": 76
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0001",
+              "relpath": "shards/2c/s000000000000002c.001.blk",
+              "sha256": "e18f0993e6b67e50d72e96557e02d176999ef6bbd2f268851e8ca39f80b1ba02",
+              "size": 76
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0005",
+              "relpath": "shards/2c/s000000000000002c.002.blk",
+              "sha256": "209df05911e1884d2a3139c9c8e8629c5471d963371365a784e5c80b47f7e413",
+              "size": 76
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0004",
+              "relpath": "shards/2c/s000000000000002c.003.blk",
+              "sha256": "c63faad554fed032a5207246ad55de446fcdd5859374cee98f0ceab58f653035",
+              "size": 76
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0003",
+              "relpath": "shards/2c/s000000000000002c.004.blk",
+              "sha256": "b466b214ef2cba127cc18e2b7199a8933171aabb491d129d0ebffd1f0ffd8700",
+              "size": 76
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0006",
+              "relpath": "shards/2c/s000000000000002c.005.blk",
+              "sha256": "06546a9c0d486ef9986e84fd5ac2b8db4411bc7f900fb881c0c1a2ff2516b3d3",
+              "size": 76
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s000000000000002d",
+          "raw_offset": 786432,
+          "raw_size": 262144,
+          "raw_sha256": "aa1444be4b64098f5dd863b5b0ac561480b3fb5c41fc07cf50a62edc94124bcc",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "97e8edc2889ada5f05b32e12f72aebb719e2a16abad8dbf9",
+          "compressed_size": 301,
+          "shard_size": 76,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0006",
+              "relpath": "shards/2d/s000000000000002d.000.blk",
+              "sha256": "140a147d657de7680b04c24fec1d513e2827a6ae09c6e9056349714dd26f5aa4",
+              "size": 76
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0004",
+              "relpath": "shards/2d/s000000000000002d.001.blk",
+              "sha256": "8b92180a4d3408b2a765b7297d0a6bfa6d1b75bbe03a732a0f25eceb286b3d76",
+              "size": 76
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0005",
+              "relpath": "shards/2d/s000000000000002d.002.blk",
+              "sha256": "cdf0e9a575dbeec803d6437dfb870bbdb14a596902b2510f7cc451eaf875bd18",
+              "size": 76
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0003",
+              "relpath": "shards/2d/s000000000000002d.003.blk",
+              "sha256": "45a27ec26bc16a0e5ab99369de5609f8f4d8ba8280c1ad2a5bb70cc9516b1df2",
+              "size": 76
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0001",
+              "relpath": "shards/2d/s000000000000002d.004.blk",
+              "sha256": "5d6426bbf0aa44adce51550e85dd3c4c8a88589027fb4967efa4d4a14390720a",
+              "size": 76
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0002",
+              "relpath": "shards/2d/s000000000000002d.005.blk",
+              "sha256": "4dd1b79f162f79babd2143570f55951d3cd36e8a56dbb8ceb6bb9bb55da5e2ad",
+              "size": 76
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s000000000000002e",
+          "raw_offset": 1048576,
+          "raw_size": 262144,
+          "raw_sha256": "2831715859f01f3f963dd0f1194dbdbb7609997423015d31f607911e1bf86402",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "91f24ceb246cf4beca0d2206fe092b6a8940dfc0d9e0c91a",
+          "compressed_size": 301,
+          "shard_size": 76,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0001",
+              "relpath": "shards/2e/s000000000000002e.000.blk",
+              "sha256": "42abaae8639f0a81eb81c115eb0eb67c43f06f12cedaf6c5fdea823c5b29135a",
+              "size": 76
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0003",
+              "relpath": "shards/2e/s000000000000002e.001.blk",
+              "sha256": "6f855c287cda27f9c2d7b347423ed9c6f973f6060065f6da753ee44686b49586",
+              "size": 76
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0005",
+              "relpath": "shards/2e/s000000000000002e.002.blk",
+              "sha256": "d0f03a9059f223805f52b3e92ab28f0d00134b40941756ef0147cc2f12f1a3ed",
+              "size": 76
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0006",
+              "relpath": "shards/2e/s000000000000002e.003.blk",
+              "sha256": "6282e3317a94022505e6a5b8585546e17e8e1cc30464a7006535db30a4c1c0e6",
+              "size": 76
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0004",
+              "relpath": "shards/2e/s000000000000002e.004.blk",
+              "sha256": "a7668319496bdc02b3336250a0287a11bf206eacd0cb95e112ea0623b9130799",
+              "size": 76
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0002",
+              "relpath": "shards/2e/s000000000000002e.005.blk",
+              "sha256": "9728263519fc569aed6eb947f54f36d153138b681b35bf440c5f32b4ba51e25e",
+              "size": 76
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s000000000000002f",
+          "raw_offset": 1310720,
+          "raw_size": 262144,
+          "raw_sha256": "1a63966eeb52014eac20e9988eac5a2f050a62c3959aa2e5b6c07cdba62bb976",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "663f00d71d73c424401b0ab58de6020c4032027e2e5442a1",
+          "compressed_size": 301,
+          "shard_size": 76,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0005",
+              "relpath": "shards/2f/s000000000000002f.000.blk",
+              "sha256": "812724d47793538dee51a35f46b670426982269ffc92ce9e238f030260dd4333",
+              "size": 76
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0003",
+              "relpath": "shards/2f/s000000000000002f.001.blk",
+              "sha256": "e1e9e94b15c7d51ddd51013b26b6c68bad91ad233af347b590213df53170b53a",
+              "size": 76
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0004",
+              "relpath": "shards/2f/s000000000000002f.002.blk",
+              "sha256": "9f57cc9d5724e2fe5ab749ca946e75ba6386eb92d8ba05cac9527908be6bbc7a",
+              "size": 76
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0006",
+              "relpath": "shards/2f/s000000000000002f.003.blk",
+              "sha256": "0f25c2c02f4172ffe947d4436b8f0bad67245e5d42ecc9199970cf43225d09a1",
+              "size": 76
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0001",
+              "relpath": "shards/2f/s000000000000002f.004.blk",
+              "sha256": "d90dd4f145353f1e076fc39388e3a06ca7143309a59b0afc3522bd80dea589cb",
+              "size": 76
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0002",
+              "relpath": "shards/2f/s000000000000002f.005.blk",
+              "sha256": "da2e3bd10e38e339feaaf37abf319a64d2557ee24754a2f7dc2d10f2efe092f2",
+              "size": 76
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s0000000000000030",
+          "raw_offset": 1572864,
+          "raw_size": 262144,
+          "raw_sha256": "938288b6937218c2508576271bfdb2392099e3d5063179a70ee334a21c4c23d1",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "ef4872a05150994f5bd0b4d6d79886df06cdc702cca9efe5",
+          "compressed_size": 301,
+          "shard_size": 76,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0001",
+              "relpath": "shards/30/s0000000000000030.000.blk",
+              "sha256": "04fa4918010b2b74d9c68fd44cfb2e6b3a59e1b9071d6de4278e4488304085a7",
+              "size": 76
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0005",
+              "relpath": "shards/30/s0000000000000030.001.blk",
+              "sha256": "e76544c23e4b18ec972e5cf8d06ad647410489893c428cc20855834d062b35a1",
+              "size": 76
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0006",
+              "relpath": "shards/30/s0000000000000030.002.blk",
+              "sha256": "52a0fe61086ee6dbaa3c33c49dac6355b75c9d5a824d2cf548b169774f4e78f9",
+              "size": 76
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0003",
+              "relpath": "shards/30/s0000000000000030.003.blk",
+              "sha256": "fa056924a3db9378f6b23844fcda6d1986417b63985d5628cde08eedceb5c09f",
+              "size": 76
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0004",
+              "relpath": "shards/30/s0000000000000030.004.blk",
+              "sha256": "aa0609d49f4d70f8df58c3d8f595b4f0b506242cf08ed9f131b207d334afa483",
+              "size": 76
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0002",
+              "relpath": "shards/30/s0000000000000030.005.blk",
+              "sha256": "76ec4b6efbad5f86b3aaecee1083e5a8a99aaca715dc620a3e49e9f56352c639",
+              "size": 76
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s0000000000000031",
+          "raw_offset": 1835008,
+          "raw_size": 262144,
+          "raw_sha256": "753dd0ac463ed46739e6a1a02277df0e53e04545f09c711636c39d7312830663",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "942c20bd12449b06f74068100111e7b0bfe0f0b7bccab88e",
+          "compressed_size": 301,
+          "shard_size": 76,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0004",
+              "relpath": "shards/31/s0000000000000031.000.blk",
+              "sha256": "866400162721834c18aeb082af34ada4d1419718fa70530554ef9c8737409d4b",
+              "size": 76
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0003",
+              "relpath": "shards/31/s0000000000000031.001.blk",
+              "sha256": "936be3b81ec81259140cae62c7d84d462e0af94fe99352ad98bbc65ced25fb2e",
+              "size": 76
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0005",
+              "relpath": "shards/31/s0000000000000031.002.blk",
+              "sha256": "89f20d8d19e9bf09910bf6f54db77987d30b96dfca8e15ad06b2d9fe7a6baed8",
+              "size": 76
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0002",
+              "relpath": "shards/31/s0000000000000031.003.blk",
+              "sha256": "18a3169f595aff0e63ac6fb47ffc047b4ea54813105fa047269cb9b85021d5dd",
+              "size": 76
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0006",
+              "relpath": "shards/31/s0000000000000031.004.blk",
+              "sha256": "00ec31db1f72e967e47be5614252fada0dd8d119799395dc54fde6e649b9d539",
+              "size": 76
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0001",
+              "relpath": "shards/31/s0000000000000031.005.blk",
+              "sha256": "1619fffc7522e3342eebeaa28907f626d60f417ab7e232521ad5d0bdd5ea5191",
+              "size": 76
+            }
+          ],
+          "storage_class": "hot"
+        }
+      ],
+      "xattrs": {},
+      "posix_acl_access": null,
+      "posix_acl_default": null,
+      "nfs4_acl": null,
+      "access_count": 6,
+      "write_count": 3,
+      "read_bytes": 12582912,
+      "write_bytes": 6291456,
+      "storage_class": "hot"
+    },
+    "6": {
+      "id": 6,
+      "kind": "file",
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "nlink": 1,
+      "size": 1048576,
+      "rdev": 0,
+      "atime": 1777301682.6868255,
+      "mtime": 1777301598.396067,
+      "ctime": 1777301671.7544065,
+      "entries": {},
+      "target": null,
+      "blocks": [
+        {
+          "stripe_id": "s0000000000000032",
+          "raw_offset": 0,
+          "raw_size": 262144,
+          "raw_sha256": "a278132096b0faa5525b7531f2a8d5b23636246677218172fc3213586bf739b7",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "7f8cbf087462f3ce611a3335779dcf3ee242e2b7130e5731",
+          "compressed_size": 262175,
+          "shard_size": 65544,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0005",
+              "relpath": "shards/32/s0000000000000032.000.blk",
+              "sha256": "322e1e4eaa1132e645520561a269404c59ea7d14bfbe710f854656e442d4e99e",
+              "size": 65544
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0004",
+              "relpath": "shards/32/s0000000000000032.001.blk",
+              "sha256": "14bf0133fa1ea23738c565e5f88315405545052583b484cc1fd93cbfeeda4cb8",
+              "size": 65544
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0002",
+              "relpath": "shards/32/s0000000000000032.002.blk",
+              "sha256": "e5ed909df41c7c4918498feda665265323e1b724543ca581f1ea88cc4395a45d",
+              "size": 65544
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0001",
+              "relpath": "shards/32/s0000000000000032.003.blk",
+              "sha256": "ab975ca3cd9106ce4ab08b8efb4bab31b10d6b6b7f5f013069dbd46fe3a9bc13",
+              "size": 65544
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0003",
+              "relpath": "shards/32/s0000000000000032.004.blk",
+              "sha256": "e851ed5f6ebd5acb1552dad9c0668bff6c2d9e5db6a89835d5f51934c5eaa6c3",
+              "size": 65544
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0006",
+              "relpath": "shards/32/s0000000000000032.005.blk",
+              "sha256": "6667d30f0147a4b5fe9fe06077112181e23fec149864dd7e3b67083be0cd44a8",
+              "size": 65544
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s0000000000000033",
+          "raw_offset": 262144,
+          "raw_size": 262144,
+          "raw_sha256": "593e62e0dc439d73d4030822507abdcacc570bce7523fb1e0e8e889e357c4166",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "474e48cf26b3eeec545d8d318ef8c22e6aa51d687dd121dc",
+          "compressed_size": 262175,
+          "shard_size": 65544,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0005",
+              "relpath": "shards/33/s0000000000000033.000.blk",
+              "sha256": "e1401857edf4122d55457593f5a72c2f5ea7c0f9b4984e410d486c045558c104",
+              "size": 65544
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0001",
+              "relpath": "shards/33/s0000000000000033.001.blk",
+              "sha256": "8c440d35ce10c7d1ed2d1e95db911c759533e54fc52ef903efdb5befa274fa29",
+              "size": 65544
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0006",
+              "relpath": "shards/33/s0000000000000033.002.blk",
+              "sha256": "e8514c8cbfa9adf466a605f89c8408217469212612d72c9c9e8d1747ccb99e46",
+              "size": 65544
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0003",
+              "relpath": "shards/33/s0000000000000033.003.blk",
+              "sha256": "56bb756146b601a7e3e358938316741500651208d3aa480ab041d3b02f5ebd46",
+              "size": 65544
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0004",
+              "relpath": "shards/33/s0000000000000033.004.blk",
+              "sha256": "e6c0eff426610279eb81a6347c84a4654e43e3eec279f21b3a25fbcc41a88415",
+              "size": 65544
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0002",
+              "relpath": "shards/33/s0000000000000033.005.blk",
+              "sha256": "1aa0a73552f66eedeb328d43406c3dcdbe797a3d670bf0d4d1fbdba8398d5e60",
+              "size": 65544
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s0000000000000034",
+          "raw_offset": 524288,
+          "raw_size": 262144,
+          "raw_sha256": "3120d56fbe2a524333c8f6fe0bff6beb6caf95936d0cc65373477bb58767b209",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "ccd38d7ae870eee19d12595c6ae9dbd9fba5b09675cbbd80",
+          "compressed_size": 262175,
+          "shard_size": 65544,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0003",
+              "relpath": "shards/34/s0000000000000034.000.blk",
+              "sha256": "ce2b5fb818fd083972601eef00bff721d23c5301978f63e786856ae94cf23493",
+              "size": 65544
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0005",
+              "relpath": "shards/34/s0000000000000034.001.blk",
+              "sha256": "7a6102361acb810af7777cf8c971a31eb9bc01b49abad255dfc14c78ba0cde13",
+              "size": 65544
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0004",
+              "relpath": "shards/34/s0000000000000034.002.blk",
+              "sha256": "fe4a2222afe20d368134912b9e2f3af1f32264089f15919a2390cea39ca7b645",
+              "size": 65544
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0006",
+              "relpath": "shards/34/s0000000000000034.003.blk",
+              "sha256": "f4da05150053e661c093cd6ae416e768f2e5af7c38a3898be0551a9395b1a36c",
+              "size": 65544
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0001",
+              "relpath": "shards/34/s0000000000000034.004.blk",
+              "sha256": "fd863b65552cec9cf9d3f3f25a7d0060a1cb59c2d08ab115527acd738ec753e1",
+              "size": 65544
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0002",
+              "relpath": "shards/34/s0000000000000034.005.blk",
+              "sha256": "b36679dc8d208d2eaddaf256ec9af318ec4dbfed9c47923052548cd77b1aa41d",
+              "size": 65544
+            }
+          ],
+          "storage_class": "hot"
+        },
+        {
+          "stripe_id": "s0000000000000035",
+          "raw_offset": 786432,
+          "raw_size": 262144,
+          "raw_sha256": "02acee82d2fe62161bde43419a9fc21d042980aa111eaf88569b56040915063a",
+          "codec": "zstd",
+          "encrypted": true,
+          "nonce_hex": "f74f7ba592339867f0c48213bcce7fca1af89f0bf534ba6f",
+          "compressed_size": 262175,
+          "shard_size": 65544,
+          "shards": [
+            {
+              "slot": 0,
+              "disk_id": "disk-0001",
+              "relpath": "shards/35/s0000000000000035.000.blk",
+              "sha256": "9c81bb7e4efdd9150fd7d9393eb390f4d82669ab23ba28cc88e18df465b4cf16",
+              "size": 65544
+            },
+            {
+              "slot": 1,
+              "disk_id": "disk-0004",
+              "relpath": "shards/35/s0000000000000035.001.blk",
+              "sha256": "347fe9ff1541b791a27321a0124b459bf5d76871c6b09c56ea5b1f4941adc107",
+              "size": 65544
+            },
+            {
+              "slot": 2,
+              "disk_id": "disk-0002",
+              "relpath": "shards/35/s0000000000000035.002.blk",
+              "sha256": "f0af8ec716092717bda397d342180d61470c702dcb7d819b87708434185a57ec",
+              "size": 65544
+            },
+            {
+              "slot": 3,
+              "disk_id": "disk-0006",
+              "relpath": "shards/35/s0000000000000035.003.blk",
+              "sha256": "b03661c8b29fea86ecc71472e95396fc46228ae688bf6f7015c71a5168387de8",
+              "size": 65544
+            },
+            {
+              "slot": 4,
+              "disk_id": "disk-0005",
+              "relpath": "shards/35/s0000000000000035.004.blk",
+              "sha256": "80328af2c7d4afdacce22ab40edecd5b08a180d025e25a0cdc8e798354c10903",
+              "size": 65544
+            },
+            {
+              "slot": 5,
+              "disk_id": "disk-0003",
+              "relpath": "shards/35/s0000000000000035.005.blk",
+              "sha256": "7dbbafefdc38781d356cd827a09544c316a374b712c64bb5137ea7125dbda846",
+              "size": 65544
+            }
+          ],
+          "storage_class": "hot"
+        }
+      ],
+      "xattrs": {},
+      "posix_acl_access": null,
+      "posix_acl_default": null,
+      "nfs4_acl": null,
+      "access_count": 6,
+      "write_count": 3,
+      "read_bytes": 6291456,
+      "write_bytes": 3145728,
+      "storage_class": "hot"
+    }
+  }
+}

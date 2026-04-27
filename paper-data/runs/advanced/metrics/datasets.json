@@ -1,0 +1,22 @@
+[
+  {
+    "name": "text-small.txt",
+    "bytes": 1536,
+    "sha256": "9f4b5cf807bd00ddcb48537296c35dca079f4746e59485dc2b1d676fdb5ae0c6"
+  },
+  {
+    "name": "zeros-1m.bin",
+    "bytes": 1048576,
+    "sha256": "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58"
+  },
+  {
+    "name": "pattern-2m.bin",
+    "bytes": 2097152,
+    "sha256": "1e075c8d478ad21844e33e830a695ef03a4d2488b69ee275bd8947618bb1be1e"
+  },
+  {
+    "name": "random-1m.bin",
+    "bytes": 1048576,
+    "sha256": "c709ce91f671061eadd7b7b3764c152bee831e7ff2b7b1ef5af4f1ab1b621440"
+  }
+]

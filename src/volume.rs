@@ -1,5 +1,8 @@
+use crate::acl;
+use crate::advanced_io;
 use crate::cache::BlockCache;
 use crate::compression::{compress, decompress};
+use crate::crypto;
 use crate::erasure::RsCodec;
 use crate::error::{ArgosError, Result};
 use crate::health::{classify_inode, probe_disk_path, refresh_smart, risk_report};
@@ -12,8 +15,7 @@ use parking_lot::Mutex;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -118,6 +120,7 @@ impl ArgosFs {
                     backing_device: probe.backing_device.clone(),
                     sysfs_block: probe.sysfs_block.clone(),
                     rotational: probe.rotational,
+                    numa_node: probe.numa_node,
                     read_latency_ewma_ms: probe.measured_read_latency_ms,
                     write_latency_ewma_ms: probe.measured_write_latency_ms,
                     observed_read_mib_s: probe.measured_read_mib_s,
@@ -146,6 +149,9 @@ impl ArgosFs {
             target: None,
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
+            posix_acl_access: None,
+            posix_acl_default: None,
+            nfs4_acl: None,
             access_count: 0,
             write_count: 0,
             read_bytes: 0,
@@ -163,6 +169,7 @@ impl ArgosFs {
             next_inode: ROOT_INO + 1,
             next_stripe: 1,
             config,
+            encryption: EncryptionConfig::default(),
             disks,
             inodes,
         };
@@ -521,6 +528,10 @@ impl ArgosFs {
             return Err(ArgosError::AlreadyExists(name));
         }
         let ino = self.alloc_inode_locked(&mut meta);
+        let inherited_acl = meta
+            .inodes
+            .get(&parent)
+            .and_then(acl::inherited_directory_acl);
         let target_string = target.to_string_lossy().to_string();
         let inode = Inode {
             id: ino,
@@ -538,6 +549,9 @@ impl ArgosFs {
             target: Some(target_string.clone()),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
+            posix_acl_access: inherited_acl,
+            posix_acl_default: None,
+            nfs4_acl: None,
             access_count: 0,
             write_count: 0,
             read_bytes: 0,
@@ -698,7 +712,27 @@ impl ArgosFs {
             .inodes
             .get_mut(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
-        inode.xattrs.insert(name.to_string(), hex::encode(value));
+        match name {
+            acl::POSIX_ACL_ACCESS_XATTR | acl::ARGOS_POSIX_ACL_ACCESS_XATTR => {
+                inode.posix_acl_access = Some(acl::parse_posix_acl_xattr(value)?);
+            }
+            acl::POSIX_ACL_DEFAULT_XATTR | acl::ARGOS_POSIX_ACL_DEFAULT_XATTR => {
+                if inode.kind != NodeKind::Directory {
+                    return Err(ArgosError::Invalid(
+                        "default ACL can only be set on directories".to_string(),
+                    ));
+                }
+                inode.posix_acl_default = Some(acl::parse_posix_acl_xattr(value)?);
+            }
+            acl::NFS4_ACL_XATTR => {
+                let text = std::str::from_utf8(value)
+                    .map_err(|err| ArgosError::Invalid(format!("invalid NFSv4 ACL JSON: {err}")))?;
+                inode.nfs4_acl = Some(acl::parse_nfs4_acl_json(text)?);
+            }
+            _ => {
+                inode.xattrs.insert(name.to_string(), hex::encode(value));
+            }
+        }
         inode.ctime = now_f64();
         self.commit_locked(
             &mut meta,
@@ -713,6 +747,44 @@ impl ArgosFs {
             .inodes
             .get(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+        match name {
+            acl::POSIX_ACL_ACCESS_XATTR => {
+                let acl = inode
+                    .posix_acl_access
+                    .as_ref()
+                    .ok_or_else(|| ArgosError::NotFound(format!("xattr {name}")))?;
+                return Ok(acl::posix_acl_to_xattr(acl));
+            }
+            acl::POSIX_ACL_DEFAULT_XATTR => {
+                let acl = inode
+                    .posix_acl_default
+                    .as_ref()
+                    .ok_or_else(|| ArgosError::NotFound(format!("xattr {name}")))?;
+                return Ok(acl::posix_acl_to_xattr(acl));
+            }
+            acl::ARGOS_POSIX_ACL_ACCESS_XATTR => {
+                let acl = inode
+                    .posix_acl_access
+                    .as_ref()
+                    .ok_or_else(|| ArgosError::NotFound(format!("xattr {name}")))?;
+                return Ok(acl::format_posix_acl(acl).into_bytes());
+            }
+            acl::ARGOS_POSIX_ACL_DEFAULT_XATTR => {
+                let acl = inode
+                    .posix_acl_default
+                    .as_ref()
+                    .ok_or_else(|| ArgosError::NotFound(format!("xattr {name}")))?;
+                return Ok(acl::format_posix_acl(acl).into_bytes());
+            }
+            acl::NFS4_ACL_XATTR => {
+                let acl = inode
+                    .nfs4_acl
+                    .as_ref()
+                    .ok_or_else(|| ArgosError::NotFound(format!("xattr {name}")))?;
+                return Ok(acl::nfs4_to_json(acl)?.into_bytes());
+            }
+            _ => {}
+        }
         let value = inode
             .xattrs
             .get(name)
@@ -726,7 +798,19 @@ impl ArgosFs {
             .inodes
             .get(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
-        Ok(inode.xattrs.keys().cloned().collect())
+        let mut names = inode.xattrs.keys().cloned().collect::<BTreeSet<_>>();
+        if inode.posix_acl_access.is_some() {
+            names.insert(acl::POSIX_ACL_ACCESS_XATTR.to_string());
+            names.insert(acl::ARGOS_POSIX_ACL_ACCESS_XATTR.to_string());
+        }
+        if inode.posix_acl_default.is_some() {
+            names.insert(acl::POSIX_ACL_DEFAULT_XATTR.to_string());
+            names.insert(acl::ARGOS_POSIX_ACL_DEFAULT_XATTR.to_string());
+        }
+        if inode.nfs4_acl.is_some() {
+            names.insert(acl::NFS4_ACL_XATTR.to_string());
+        }
+        Ok(names.into_iter().collect())
     }
 
     pub fn removexattr_inode(&self, ino: InodeId, name: &str) -> Result<()> {
@@ -735,7 +819,17 @@ impl ArgosFs {
             .inodes
             .get_mut(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
-        if inode.xattrs.remove(name).is_none() {
+        let removed = match name {
+            acl::POSIX_ACL_ACCESS_XATTR | acl::ARGOS_POSIX_ACL_ACCESS_XATTR => {
+                inode.posix_acl_access.take().is_some()
+            }
+            acl::POSIX_ACL_DEFAULT_XATTR | acl::ARGOS_POSIX_ACL_DEFAULT_XATTR => {
+                inode.posix_acl_default.take().is_some()
+            }
+            acl::NFS4_ACL_XATTR => inode.nfs4_acl.take().is_some(),
+            _ => inode.xattrs.remove(name).is_some(),
+        };
+        if !removed {
             return Err(ArgosError::NotFound(format!("xattr {name}")));
         }
         inode.ctime = now_f64();
@@ -744,6 +838,136 @@ impl ArgosFs {
             "removexattr",
             json!({"inode": ino, "name": name}),
         )
+    }
+
+    pub fn set_posix_acl_path(
+        &self,
+        path: &str,
+        default_acl: bool,
+        acl_value: PosixAcl,
+    ) -> Result<()> {
+        let ino = self.resolve_path(path, false)?;
+        let mut meta = self.meta.lock();
+        let inode = meta
+            .inodes
+            .get_mut(&ino)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+        if default_acl && inode.kind != NodeKind::Directory {
+            return Err(ArgosError::Invalid(
+                "default ACL can only be set on directories".to_string(),
+            ));
+        }
+        if default_acl {
+            inode.posix_acl_default = Some(acl_value);
+        } else {
+            inode.posix_acl_access = Some(acl_value);
+        }
+        inode.ctime = now_f64();
+        self.commit_locked(
+            &mut meta,
+            "set-posix-acl",
+            json!({"inode": ino, "path": path, "default": default_acl}),
+        )
+    }
+
+    pub fn get_posix_acl_path(&self, path: &str, default_acl: bool) -> Result<Option<PosixAcl>> {
+        let ino = self.resolve_path(path, false)?;
+        let meta = self.meta.lock();
+        let inode = meta
+            .inodes
+            .get(&ino)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+        Ok(if default_acl {
+            inode.posix_acl_default.clone()
+        } else {
+            inode.posix_acl_access.clone()
+        })
+    }
+
+    pub fn set_nfs4_acl_path(&self, path: &str, acl_value: Nfs4Acl) -> Result<()> {
+        let ino = self.resolve_path(path, false)?;
+        let mut meta = self.meta.lock();
+        let inode = meta
+            .inodes
+            .get_mut(&ino)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+        inode.nfs4_acl = Some(acl_value);
+        inode.ctime = now_f64();
+        self.commit_locked(
+            &mut meta,
+            "set-nfs4-acl",
+            json!({"inode": ino, "path": path}),
+        )
+    }
+
+    pub fn get_nfs4_acl_path(&self, path: &str) -> Result<Option<Nfs4Acl>> {
+        let ino = self.resolve_path(path, false)?;
+        let meta = self.meta.lock();
+        let inode = meta
+            .inodes
+            .get(&ino)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+        Ok(inode.nfs4_acl.clone())
+    }
+
+    pub fn check_access_inode(&self, ino: InodeId, uid: u32, gid: u32, mask: i32) -> Result<()> {
+        let meta = self.meta.lock();
+        let inode = meta
+            .inodes
+            .get(&ino)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+        if acl::evaluate_access(inode, uid, gid, mask) {
+            Ok(())
+        } else {
+            Err(ArgosError::PermissionDenied(format!(
+                "uid {uid} gid {gid} mask {mask:o} inode {ino}"
+            )))
+        }
+    }
+
+    pub fn set_io_policy(
+        &self,
+        mode: IoMode,
+        direct_io: bool,
+        zero_copy: bool,
+        numa_aware: bool,
+    ) -> Result<()> {
+        let mut meta = self.meta.lock();
+        meta.config.io_mode = mode;
+        meta.config.direct_io = direct_io;
+        meta.config.zero_copy = zero_copy;
+        meta.config.numa_aware = numa_aware;
+        self.commit_locked(
+            &mut meta,
+            "set-io-policy",
+            json!({
+                "io_mode": mode,
+                "direct_io": direct_io,
+                "zero_copy": zero_copy,
+                "numa_aware": numa_aware
+            }),
+        )
+    }
+
+    pub fn io_policy(&self) -> VolumeConfig {
+        self.meta.lock().config.clone()
+    }
+
+    pub fn enable_encryption(&self, passphrase: &str) -> Result<()> {
+        if passphrase.is_empty() {
+            return Err(ArgosError::Invalid(
+                "encryption passphrase must not be empty".to_string(),
+            ));
+        }
+        let mut meta = self.meta.lock();
+        if meta.encryption.enabled {
+            let _ =
+                crypto::derive_key_for_config(&meta.encryption, passphrase, meta.uuid.as_bytes())?;
+        } else {
+            meta.encryption = crypto::new_encryption_config(passphrase, meta.uuid.as_bytes())?;
+            self.commit_locked(&mut meta, "enable-encryption", json!({}))?;
+        }
+        Ok(())
     }
 
     pub fn add_disk(
@@ -795,6 +1019,7 @@ impl ArgosFs {
                 backing_device: probe.backing_device.clone(),
                 sysfs_block: probe.sysfs_block.clone(),
                 rotational: probe.rotational,
+                numa_node: probe.numa_node,
                 read_latency_ewma_ms: probe.measured_read_latency_ms,
                 write_latency_ewma_ms: probe.measured_write_latency_ms,
                 observed_read_mib_s: probe.measured_read_mib_s,
@@ -872,6 +1097,7 @@ impl ArgosFs {
                 disk.backing_device = probe.backing_device.clone();
                 disk.sysfs_block = probe.sysfs_block.clone();
                 disk.rotational = probe.rotational;
+                disk.numa_node = probe.numa_node;
                 disk.capacity_bytes = probe.capacity_bytes;
                 disk.weight = probe.recommended_weight;
                 disk.tier = probe.recommended_tier;
@@ -1086,6 +1312,8 @@ impl ArgosFs {
                 .count(),
             disks,
             cache: self.cache.stats(),
+            io_mode: meta.config.io_mode,
+            encryption_enabled: meta.encryption.enabled,
         }
     }
 
@@ -1112,8 +1340,10 @@ impl ArgosFs {
                             let meta = self.meta.lock();
                             let path =
                                 self.shard_path_locked(&meta, &shard.disk_id, &shard.relpath);
+                            let io_mode = meta.config.io_mode;
+                            let zero_copy = meta.config.zero_copy;
                             drop(meta);
-                            match fs::read(path) {
+                            match advanced_io::read_all(&path, shard.size, io_mode, zero_copy) {
                                 Ok(data) => {
                                     if sha256_hex(&data) != shard.sha256 {
                                         report.checksum_errors += 1;
@@ -1260,6 +1490,10 @@ impl ArgosFs {
         }
         let now = now_f64();
         let ino = self.alloc_inode_locked(meta);
+        let inherited_acl = meta
+            .inodes
+            .get(&parent)
+            .and_then(acl::inherited_directory_acl);
         let inode = Inode {
             id: ino,
             kind: NodeKind::Directory,
@@ -1276,6 +1510,9 @@ impl ArgosFs {
             target: None,
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
+            posix_acl_access: inherited_acl.clone(),
+            posix_acl_default: inherited_acl,
+            nfs4_acl: None,
             access_count: 0,
             write_count: 0,
             read_bytes: 0,
@@ -1329,6 +1566,10 @@ impl ArgosFs {
         };
         let now = now_f64();
         let ino = self.alloc_inode_locked(meta);
+        let inherited_acl = meta
+            .inodes
+            .get(&parent)
+            .and_then(acl::inherited_directory_acl);
         let normalized_mode = if kind == NodeKind::File && file_type == 0 {
             libc::S_IFREG as u32 | (mode & 0o7777)
         } else {
@@ -1350,6 +1591,9 @@ impl ArgosFs {
             target: None,
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
+            posix_acl_access: inherited_acl,
+            posix_acl_default: None,
+            nfs4_acl: None,
             access_count: 0,
             write_count: 0,
             read_bytes: 0,
@@ -1529,6 +1773,11 @@ impl ArgosFs {
     ) -> Result<(Vec<u8>, Vec<String>)> {
         let mut out = Vec::new();
         let mut damaged = Vec::new();
+        let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
+            Some(self.encryption_key_locked(meta)?)
+        } else {
+            None
+        };
         for block in &inode.blocks {
             let cache_key = format!("{}:{}:{}", meta.uuid, block.stripe_id, block.raw_sha256);
             if let Some(raw) = self.cache.get(&cache_key, Some(&block.raw_sha256)) {
@@ -1550,7 +1799,12 @@ impl ArgosFs {
                 }
                 let path = self.shard_path_locked(meta, &shard.disk_id, &shard.relpath);
                 let start = std::time::Instant::now();
-                match fs::read(path) {
+                match advanced_io::read_all(
+                    &path,
+                    shard.size,
+                    meta.config.io_mode,
+                    meta.config.zero_copy,
+                ) {
                     Ok(data) => {
                         self.update_read_latency_locked(
                             meta,
@@ -1589,6 +1843,22 @@ impl ArgosFs {
                 .flat_map(|shard| shard.iter().copied())
                 .take(block.compressed_size)
                 .collect();
+            let compressed = if block.encrypted {
+                let nonce = hex::decode(&block.nonce_hex).map_err(|err| {
+                    ArgosError::Invalid(format!("invalid encrypted block nonce: {err}"))
+                })?;
+                let key = decrypt_key.as_ref().ok_or_else(|| {
+                    ArgosError::PermissionDenied("missing ArgosFS encryption key".to_string())
+                })?;
+                crypto::decrypt_with_key(
+                    key,
+                    &nonce,
+                    &compressed,
+                    &encryption_aad(&meta.uuid, &block.stripe_id),
+                )?
+            } else {
+                compressed
+            };
             let raw = decompress(&compressed, block.codec)?;
             if raw.len() != block.raw_size || sha256_hex(&raw) != block.raw_sha256 {
                 return Err(ArgosError::UnrecoverableStripe {
@@ -1615,18 +1885,33 @@ impl ArgosFs {
         if data.is_empty() {
             return Ok(blocks);
         }
+        let encrypt_key = if meta.encryption.enabled {
+            Some(self.encryption_key_locked(meta)?)
+        } else {
+            None
+        };
         for (index, raw) in data.chunks(stripe_raw_size).enumerate() {
+            let stripe_id = format!("s{:016x}", meta.next_stripe);
+            meta.next_stripe += 1;
             let compressed = compress(raw, meta.config.compression, meta.config.compression_level)?;
-            let shard_size = compressed.len().max(1).div_ceil(meta.config.k);
-            let mut padded = compressed.clone();
+            let (payload, encrypted, nonce_hex) = if let Some(key) = encrypt_key.as_ref() {
+                let (nonce, ciphertext) = crypto::encrypt_with_key(
+                    key,
+                    &compressed,
+                    &encryption_aad(&meta.uuid, &stripe_id),
+                )?;
+                (ciphertext, true, hex::encode(nonce))
+            } else {
+                (compressed, false, String::new())
+            };
+            let shard_size = payload.len().max(1).div_ceil(meta.config.k);
+            let mut padded = payload.clone();
             padded.resize(shard_size * meta.config.k, 0);
             let data_shards = padded
                 .chunks(shard_size)
                 .map(|chunk| chunk.to_vec())
                 .collect::<Vec<_>>();
             let encoded = self.rs.encode(&data_shards)?;
-            let stripe_id = format!("s{:016x}", meta.next_stripe);
-            meta.next_stripe += 1;
             let placements = self.choose_disks_locked(
                 meta,
                 &stripe_id,
@@ -1651,7 +1936,9 @@ impl ArgosFs {
                 raw_size: raw.len(),
                 raw_sha256: sha256_hex(raw),
                 codec: meta.config.compression,
-                compressed_size: compressed.len(),
+                encrypted,
+                nonce_hex,
+                compressed_size: payload.len(),
                 shard_size,
                 shards,
                 storage_class,
@@ -1676,9 +1963,7 @@ impl ArgosFs {
         }
         self.ensure_disk_capacity_locked(meta, disk_id, data.len() as u64)?;
         let start = std::time::Instant::now();
-        let mut file = File::create(&path)?;
-        file.write_all(data)?;
-        file.sync_all()?;
+        advanced_io::write_all(&path, data, meta.config.io_mode)?;
         self.update_write_latency_locked(
             meta,
             disk_id,
@@ -1704,6 +1989,11 @@ impl ArgosFs {
         required_bytes: u64,
     ) -> Result<Vec<String>> {
         let mut scored = Vec::new();
+        let local_numa = meta
+            .config
+            .numa_aware
+            .then(advanced_io::current_numa_node)
+            .flatten();
         for (disk_id, disk) in &meta.disks {
             if exclude_disks.contains(disk_id) || disk.status != DiskStatus::Online {
                 continue;
@@ -1726,6 +2016,13 @@ impl ArgosFs {
             let latency_penalty = 1.0
                 + ((disk.read_latency_ewma_ms + disk.write_latency_ewma_ms) / 2.0 / 20.0).min(4.0);
             let mut score = (-u.ln() * latency_penalty) / (disk.weight.max(0.01) * tier_bonus);
+            if let (Some(local), Some(remote)) = (local_numa, disk.numa_node) {
+                if local == remote {
+                    score *= 0.90;
+                } else {
+                    score *= 1.10;
+                }
+            }
             if disk.capacity_bytes > 0 {
                 score += (directory_size(&disk_path.join("shards")) as f64
                     / disk.capacity_bytes as f64)
@@ -1948,6 +2245,15 @@ impl ArgosFs {
         relative_or_absolute(&self.root, &disk.path).join(relpath)
     }
 
+    fn encryption_key_locked(&self, meta: &Metadata) -> Result<[u8; 32]> {
+        let passphrase = crypto::passphrase_from_env()?.ok_or_else(|| {
+            ArgosError::PermissionDenied(
+                "set ARGOSFS_KEY or ARGOSFS_KEY_FILE to access encrypted ArgosFS data".to_string(),
+            )
+        })?;
+        crypto::derive_key_for_config(&meta.encryption, &passphrase, meta.uuid.as_bytes())
+    }
+
     fn commit_locked(
         &self,
         meta: &mut Metadata,
@@ -1994,6 +2300,10 @@ impl ArgosFs {
             blksize: chunk_size as u32,
         }
     }
+}
+
+fn encryption_aad(volume_uuid: &str, stripe_id: &str) -> Vec<u8> {
+    format!("{volume_uuid}:{stripe_id}").into_bytes()
 }
 
 fn current_uid() -> u32 {

@@ -1,0 +1,138 @@
+# HELP argosfs_txid Volume metadata transaction id
+# TYPE argosfs_txid gauge
+argosfs_txid 51
+# HELP argosfs_files Number of regular files
+# TYPE argosfs_files gauge
+argosfs_files 4
+# HELP argosfs_encryption_enabled Whether built-in encryption is enabled
+# TYPE argosfs_encryption_enabled gauge
+argosfs_encryption_enabled 1
+# HELP argosfs_io_uring_available Whether io_uring can be initialized
+# TYPE argosfs_io_uring_available gauge
+argosfs_io_uring_available 1
+# HELP argosfs_disk_used_bytes Used shard bytes
+# TYPE argosfs_disk_used_bytes gauge
+argosfs_disk_used_bytes{disk="disk-0000"} 0
+# HELP argosfs_disk_capacity_bytes Recorded disk capacity bytes
+# TYPE argosfs_disk_capacity_bytes gauge
+argosfs_disk_capacity_bytes{disk="disk-0000"} 959726878720
+# HELP argosfs_disk_risk_score Self-driving disk risk score
+# TYPE argosfs_disk_risk_score gauge
+argosfs_disk_risk_score{disk="disk-0000"} 1
+# HELP argosfs_disk_online Disk online status
+# TYPE argosfs_disk_online gauge
+argosfs_disk_online{disk="disk-0000"} 0
+# HELP argosfs_disk_read_latency_ms Disk read latency EWMA
+# TYPE argosfs_disk_read_latency_ms gauge
+argosfs_disk_read_latency_ms{disk="disk-0000"} 1.105569
+# HELP argosfs_disk_write_latency_ms Disk write latency EWMA
+# TYPE argosfs_disk_write_latency_ms gauge
+argosfs_disk_write_latency_ms{disk="disk-0000"} 1.196394
+# HELP argosfs_disk_used_bytes Used shard bytes
+# TYPE argosfs_disk_used_bytes gauge
+argosfs_disk_used_bytes{disk="disk-0001"} 262843
+# HELP argosfs_disk_capacity_bytes Recorded disk capacity bytes
+# TYPE argosfs_disk_capacity_bytes gauge
+argosfs_disk_capacity_bytes{disk="disk-0001"} 959726878720
+# HELP argosfs_disk_risk_score Self-driving disk risk score
+# TYPE argosfs_disk_risk_score gauge
+argosfs_disk_risk_score{disk="disk-0001"} 0.12
+# HELP argosfs_disk_online Disk online status
+# TYPE argosfs_disk_online gauge
+argosfs_disk_online{disk="disk-0001"} 1
+# HELP argosfs_disk_read_latency_ms Disk read latency EWMA
+# TYPE argosfs_disk_read_latency_ms gauge
+argosfs_disk_read_latency_ms{disk="disk-0001"} 0.06414615414838341
+# HELP argosfs_disk_write_latency_ms Disk write latency EWMA
+# TYPE argosfs_disk_write_latency_ms gauge
+argosfs_disk_write_latency_ms{disk="disk-0001"} 0.3602585848062283
+# HELP argosfs_disk_used_bytes Used shard bytes
+# TYPE argosfs_disk_used_bytes gauge
+argosfs_disk_used_bytes{disk="disk-0002"} 262843
+# HELP argosfs_disk_capacity_bytes Recorded disk capacity bytes
+# TYPE argosfs_disk_capacity_bytes gauge
+argosfs_disk_capacity_bytes{disk="disk-0002"} 959726878720
+# HELP argosfs_disk_risk_score Self-driving disk risk score
+# TYPE argosfs_disk_risk_score gauge
+argosfs_disk_risk_score{disk="disk-0002"} 0
+# HELP argosfs_disk_online Disk online status
+# TYPE argosfs_disk_online gauge
+argosfs_disk_online{disk="disk-0002"} 1
+# HELP argosfs_disk_read_latency_ms Disk read latency EWMA
+# TYPE argosfs_disk_read_latency_ms gauge
+argosfs_disk_read_latency_ms{disk="disk-0002"} 0.06478900260092431
+# HELP argosfs_disk_write_latency_ms Disk write latency EWMA
+# TYPE argosfs_disk_write_latency_ms gauge
+argosfs_disk_write_latency_ms{disk="disk-0002"} 0.3584906780385373
+# HELP argosfs_disk_used_bytes Used shard bytes
+# TYPE argosfs_disk_used_bytes gauge
+argosfs_disk_used_bytes{disk="disk-0003"} 262843
+# HELP argosfs_disk_capacity_bytes Recorded disk capacity bytes
+# TYPE argosfs_disk_capacity_bytes gauge
+argosfs_disk_capacity_bytes{disk="disk-0003"} 959726878720
+# HELP argosfs_disk_risk_score Self-driving disk risk score
+# TYPE argosfs_disk_risk_score gauge
+argosfs_disk_risk_score{disk="disk-0003"} 0
+# HELP argosfs_disk_online Disk online status
+# TYPE argosfs_disk_online gauge
+argosfs_disk_online{disk="disk-0003"} 1
+# HELP argosfs_disk_read_latency_ms Disk read latency EWMA
+# TYPE argosfs_disk_read_latency_ms gauge
+argosfs_disk_read_latency_ms{disk="disk-0003"} 0.06147601582398087
+# HELP argosfs_disk_write_latency_ms Disk write latency EWMA
+# TYPE argosfs_disk_write_latency_ms gauge
+argosfs_disk_write_latency_ms{disk="disk-0003"} 0.3670624131621958
+# HELP argosfs_disk_used_bytes Used shard bytes
+# TYPE argosfs_disk_used_bytes gauge
+argosfs_disk_used_bytes{disk="disk-0004"} 262843
+# HELP argosfs_disk_capacity_bytes Recorded disk capacity bytes
+# TYPE argosfs_disk_capacity_bytes gauge
+argosfs_disk_capacity_bytes{disk="disk-0004"} 959726878720
+# HELP argosfs_disk_risk_score Self-driving disk risk score
+# TYPE argosfs_disk_risk_score gauge
+argosfs_disk_risk_score{disk="disk-0004"} 0
+# HELP argosfs_disk_online Disk online status
+# TYPE argosfs_disk_online gauge
+argosfs_disk_online{disk="disk-0004"} 1
+# HELP argosfs_disk_read_latency_ms Disk read latency EWMA
+# TYPE argosfs_disk_read_latency_ms gauge
+argosfs_disk_read_latency_ms{disk="disk-0004"} 0.05904277267735954
+# HELP argosfs_disk_write_latency_ms Disk write latency EWMA
+# TYPE argosfs_disk_write_latency_ms gauge
+argosfs_disk_write_latency_ms{disk="disk-0004"} 0.35385053977599423
+# HELP argosfs_disk_used_bytes Used shard bytes
+# TYPE argosfs_disk_used_bytes gauge
+argosfs_disk_used_bytes{disk="disk-0005"} 262843
+# HELP argosfs_disk_capacity_bytes Recorded disk capacity bytes
+# TYPE argosfs_disk_capacity_bytes gauge
+argosfs_disk_capacity_bytes{disk="disk-0005"} 959726878720
+# HELP argosfs_disk_risk_score Self-driving disk risk score
+# TYPE argosfs_disk_risk_score gauge
+argosfs_disk_risk_score{disk="disk-0005"} 0
+# HELP argosfs_disk_online Disk online status
+# TYPE argosfs_disk_online gauge
+argosfs_disk_online{disk="disk-0005"} 1
+# HELP argosfs_disk_read_latency_ms Disk read latency EWMA
+# TYPE argosfs_disk_read_latency_ms gauge
+argosfs_disk_read_latency_ms{disk="disk-0005"} 0.07314557851263145
+# HELP argosfs_disk_write_latency_ms Disk write latency EWMA
+# TYPE argosfs_disk_write_latency_ms gauge
+argosfs_disk_write_latency_ms{disk="disk-0005"} 0.3792547599728606
+# HELP argosfs_disk_used_bytes Used shard bytes
+# TYPE argosfs_disk_used_bytes gauge
+argosfs_disk_used_bytes{disk="disk-0006"} 262843
+# HELP argosfs_disk_capacity_bytes Recorded disk capacity bytes
+# TYPE argosfs_disk_capacity_bytes gauge
+argosfs_disk_capacity_bytes{disk="disk-0006"} 959726878720
+# HELP argosfs_disk_risk_score Self-driving disk risk score
+# TYPE argosfs_disk_risk_score gauge
+argosfs_disk_risk_score{disk="disk-0006"} 0
+# HELP argosfs_disk_online Disk online status
+# TYPE argosfs_disk_online gauge
+argosfs_disk_online{disk="disk-0006"} 1
+# HELP argosfs_disk_read_latency_ms Disk read latency EWMA
+# TYPE argosfs_disk_read_latency_ms gauge
+argosfs_disk_read_latency_ms{disk="disk-0006"} 0.0626713161002708
+# HELP argosfs_disk_write_latency_ms Disk write latency EWMA
+# TYPE argosfs_disk_write_latency_ms gauge
+argosfs_disk_write_latency_ms{disk="disk-0006"} 0.34840603296678185

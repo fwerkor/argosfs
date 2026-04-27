@@ -1,4 +1,5 @@
-use argosfs::types::{Compression, DiskStatus, StorageTier, VolumeConfig};
+use argosfs::acl;
+use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
 use argosfs::ArgosFs;
 use std::fs;
 use tempfile::TempDir;
@@ -12,6 +13,7 @@ fn config(k: usize, m: usize) -> VolumeConfig {
         compression_level: 0,
         l2_cache_bytes: 0,
         fsname: "argosfs-test".to_string(),
+        ..VolumeConfig::default()
     }
 }
 
@@ -150,4 +152,114 @@ fn auto_probe_latency_feedback_and_hard_capacity_limit() {
         .write_file("/too-large", b"this cannot fit", 0o644)
         .unwrap_err();
     assert_eq!(err.errno(), libc::ENOSPC);
+}
+
+#[test]
+fn posix_and_nfs4_acl_are_enforced_and_exposed_as_xattrs() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/secure", b"acl", 0o640).unwrap();
+
+    let acl_value =
+        acl::parse_posix_acl("user::rw-,user:1234:---,group::---,mask::---,other::---").unwrap();
+    fs.set_posix_acl_path("/secure", false, acl_value.clone())
+        .unwrap();
+    let ino = fs.resolve_path("/secure", false).unwrap();
+    assert_eq!(
+        fs.check_access_inode(ino, 1234, 1234, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+
+    let encoded = acl::posix_acl_to_xattr(&acl_value);
+    fs.setxattr_inode(ino, acl::POSIX_ACL_ACCESS_XATTR, &encoded)
+        .unwrap();
+    assert_eq!(
+        fs.getxattr_inode(ino, acl::POSIX_ACL_ACCESS_XATTR).unwrap(),
+        encoded
+    );
+    assert!(String::from_utf8(
+        fs.getxattr_inode(ino, acl::ARGOS_POSIX_ACL_ACCESS_XATTR)
+            .unwrap()
+    )
+    .unwrap()
+    .contains("user:1234:---"));
+
+    fs.set_nfs4_acl_path(
+        "/secure",
+        acl::parse_nfs4_acl_json(
+            r#"{"entries":[{"ace_type":"deny","principal":"EVERYONE@","flags":[],"permissions":["read"]}]}"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs.check_access_inode(ino, 9999, 9999, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+}
+
+#[test]
+fn encryption_requires_key_and_encrypts_shards_at_rest() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    let key = "correct horse battery staple";
+    fs.enable_encryption(key).unwrap();
+    std::env::set_var("ARGOSFS_KEY", key);
+    fs.write_file("/secret", b"paper-grade secret payload", 0o600)
+        .unwrap();
+    std::env::remove_var("ARGOSFS_KEY");
+
+    assert_eq!(
+        fs.read_file("/secret", true).unwrap_err().errno(),
+        libc::EACCES
+    );
+    std::env::set_var("ARGOSFS_KEY", key);
+    assert_eq!(
+        fs.read_file("/secret", true).unwrap(),
+        b"paper-grade secret payload"
+    );
+
+    let meta = fs.metadata_snapshot();
+    let inode = meta.inodes.values().find(|inode| inode.size > 0).unwrap();
+    assert!(inode.blocks.iter().all(|block| block.encrypted));
+    let shard = &inode.blocks[0].shards[0];
+    let shard_bytes = fs::read(shard_abs(&fs, &shard.disk_id, &shard.relpath)).unwrap();
+    assert!(!shard_bytes
+        .windows("paper-grade secret payload".len())
+        .any(|window| window == b"paper-grade secret payload"));
+    std::env::remove_var("ARGOSFS_KEY");
+}
+
+#[test]
+fn advanced_io_policy_and_prometheus_metrics_are_live() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.set_io_policy(IoMode::Direct, true, true, true).unwrap();
+    assert_eq!(fs.metadata_snapshot().config.io_mode, IoMode::Direct);
+    fs.write_file("/direct", b"direct mode falls back safely", 0o644)
+        .unwrap();
+    assert_eq!(
+        fs.read_file("/direct", true).unwrap(),
+        b"direct mode falls back safely"
+    );
+
+    fs.set_io_policy(IoMode::IoUring, false, true, true)
+        .unwrap();
+    fs.write_file("/uring", b"uring mode falls back safely", 0o644)
+        .unwrap();
+    assert_eq!(
+        fs.read_file("/uring", true).unwrap(),
+        b"uring mode falls back safely"
+    );
+
+    let report = fs.health_report();
+    assert_eq!(report.io_mode, IoMode::IoUring);
+    let metrics = argosfs::metrics::render(&fs);
+    assert!(metrics.contains("argosfs_txid"));
+    assert!(metrics.contains("argosfs_disk_read_latency_ms"));
+    assert!(metrics.contains("argosfs_io_uring_available"));
 }

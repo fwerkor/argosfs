@@ -11,6 +11,8 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
 - `reed-solomon-erasure` for configurable `k+m` Reed-Solomon layouts.
 - `fuser`/libfuse3 for the Linux filesystem mount frontend.
 - `zstd` and `lz4_flex` for transparent block compression.
+- `chacha20poly1305` and `argon2` for built-in authenticated encryption.
+- `io-uring`, `O_DIRECT`, and mmap-backed zero-copy reads for advanced I/O.
 - `serde_json` with copy-on-write replacement for durable metadata commits.
 
 ## Implemented Features
@@ -20,6 +22,13 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
   `statfs`, xattrs, `readdir`, `access`, `create`, and `fsync`.
 - Rootfs-critical inode types: regular files, directories, symlinks, hardlinks,
   character devices, block devices, FIFOs, and sockets.
+- POSIX ACL support through native Linux `system.posix_acl_access` and
+  `system.posix_acl_default` xattrs, text ACL CLI helpers, inheritance from
+  directory default ACLs, and daemon-side FUSE permission enforcement.
+- NFSv4 ACL support through JSON ACLs stored as `system.argosfs.nfs4_acl`; NFSv4
+  allow/deny ACEs are evaluated before POSIX ACLs and mode bits.
+- Built-in per-stripe authenticated encryption using Argon2id-derived keys and
+  XChaCha20-Poly1305. Missing or invalid keys fail reads/writes with `EACCES`.
 - Reed-Solomon erasure coding with configurable `k+m` redundancy; layouts such
   as `4+2` tolerate two failed shards/disks per stripe.
 - Per-shard SHA-256 verification and raw-stripe SHA-256 validation.
@@ -37,7 +46,12 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
   available; SMART counters feed the same health and autopilot risk model.
 - Dynamic I/O latency feedback: shard reads/writes update per-disk latency EWMA
   and observed throughput, and placement penalizes slow disks automatically.
+- Advanced I/O policy controls: buffered I/O, `O_DIRECT` with safe buffered
+  fallback for unaligned requests, `io_uring` with buffered fallback when the
+  kernel denies setup, mmap zero-copy read staging, FUSE direct-I/O open flags,
+  and NUMA-aware placement preference when sysfs exposes disk node locality.
 - Transparent per-stripe compression with `zstd`, `lz4`, or `none`.
+- Built-in Prometheus exporter at `/metrics`.
 - Persistent metadata with copy-on-write JSON commits, journal, audit-friendly
   operation records, and named metadata snapshots.
 - RAM + persistent L2 block cache.
@@ -52,6 +66,8 @@ Install the required system packages:
 
 ```bash
 sudo apt-get install -y build-essential pkg-config libfuse3-dev fuse3 smartmontools
+curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
 ```
 
 Build and test:
@@ -123,11 +139,26 @@ argosfs scrub ROOT
 argosfs rebalance ROOT
 argosfs autopilot ROOT --interval 60
 argosfs snapshot ROOT before-upgrade
+argosfs enable-encryption ROOT --key-file /etc/argosfs.key --reencrypt
+argosfs encryption-status ROOT
+argosfs set-io-mode ROOT --mode io-uring
+argosfs set-io-mode ROOT --mode direct --direct-io
+argosfs prometheus ROOT --listen 127.0.0.1:9108
+argosfs set-posix-acl ROOT /etc/shadow 'user::rw-,group::---,mask::---,other::---'
+argosfs get-posix-acl ROOT /etc/shadow
+argosfs set-nfs4-acl ROOT /srv/data @nfs4-acl.json
+argosfs get-nfs4-acl ROOT /srv/data
 ```
 
 `add-disk` defaults to automatic probing. Pass `--tier`, `--weight`, or
 `--capacity-bytes` only when you want to override the probe result. Modes accept
 decimal, octal (`755` or `0o755`), and hex (`0x...`) syntax.
+
+Encryption reads the key from `ARGOSFS_KEY` or `ARGOSFS_KEY_FILE` during normal
+operation. `enable-encryption --reencrypt` rewrites existing file stripes so
+old data becomes encrypted at rest; new writes are encrypted immediately after
+encryption is enabled. `set-io-mode` persists the data-plane policy in volume
+metadata, and `--direct-io` also asks FUSE clients to use direct I/O handles.
 
 ## Root Filesystem Use
 

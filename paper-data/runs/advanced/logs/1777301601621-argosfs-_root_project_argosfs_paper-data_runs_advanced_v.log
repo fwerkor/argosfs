@@ -1,0 +1,11 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "encryption-status",
+    "/root/project/argosfs/paper-data/runs/advanced/volume"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.01363033289089799,
+  "stdout": "{\n  \"enabled\": true,\n  \"encrypted_blocks\": 17,\n  \"kdf\": \"argon2id\"\n}\n",
+  "stderr": ""
+}

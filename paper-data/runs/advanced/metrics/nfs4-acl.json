@@ -1,0 +1,12 @@
+{
+  "entries": [
+    {
+      "ace_type": "allow",
+      "principal": "EVERYONE@",
+      "flags": [],
+      "permissions": [
+        "read"
+      ]
+    }
+  ]
+}

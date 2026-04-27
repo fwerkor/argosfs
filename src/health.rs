@@ -76,6 +76,7 @@ pub fn risk_report(disk: &Disk, disk_path: &Path) -> HealthDiskReport {
         class: disk.class,
         backing_device: disk.backing_device.clone(),
         rotational: disk.rotational,
+        numa_node: disk.numa_node,
         read_latency_ewma_ms: disk.read_latency_ewma_ms,
         write_latency_ewma_ms: disk.write_latency_ewma_ms,
         observed_read_mib_s: disk.observed_read_mib_s,
@@ -121,6 +122,12 @@ pub fn probe_disk_path(path: &Path, benchmark_bytes: usize) -> DiskProbe {
                     .join(&block)
                     .join("queue/rotational"),
             );
+            probe.numa_node = read_i32(
+                &Path::new("/sys/block")
+                    .join(&block)
+                    .join("device/numa_node"),
+            )
+            .filter(|node| *node >= 0);
             probe.capacity_bytes = read_u64(&Path::new("/sys/block").join(&block).join("size"))
                 .map(|sectors| sectors.saturating_mul(512))
                 .unwrap_or(0);
@@ -334,6 +341,12 @@ fn read_u64(path: &Path) -> Option<u64> {
     fs::read_to_string(path)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn read_i32(path: &Path) -> Option<i32> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
 }
 
 fn statvfs_capacity(path: &Path) -> Result<(u64, u64)> {

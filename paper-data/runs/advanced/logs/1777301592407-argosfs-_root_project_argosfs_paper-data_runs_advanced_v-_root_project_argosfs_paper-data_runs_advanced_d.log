@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "put",
+    "/root/project/argosfs/paper-data/runs/advanced/volume",
+    "/root/project/argosfs/paper-data/runs/advanced/datasets/pattern-2m.bin",
+    "/data/pattern-2m.bin"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 2.99499026639387,
+  "stdout": "",
+  "stderr": ""
+}
