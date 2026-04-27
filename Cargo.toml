@@ -1,0 +1,42 @@
+[package]
+name = "argosfs"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "ArgosFS self-driving erasure-coded root filesystem"
+authors = ["FWERKOR"]
+repository = "https://github.com/fwerkor/argosfs"
+homepage = "https://github.com/fwerkor/argosfs"
+
+[lib]
+name = "argosfs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "argosfs"
+path = "src/bin/argosfs.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+fuser = "0.14"
+hex = "0.4"
+libc = "0.2"
+lz4_flex = "0.11"
+parking_lot = "0.12"
+reed-solomon-erasure = "6.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "1.0"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+walkdir = "2.5"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

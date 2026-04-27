@@ -1,0 +1,15 @@
+[Unit]
+Description=Mount ArgosFS root volume
+After=local-fs.target
+
+[Service]
+Type=simple
+Environment=ARGOSFS_ROOT=/var/lib/argosfs/root
+Environment=ARGOSFS_MOUNT=/mnt/argos-root
+ExecStartPre=/usr/local/sbin/argosfs fsck ${ARGOSFS_ROOT} --repair --remove-orphans
+ExecStart=/usr/local/sbin/argosfs mount ${ARGOSFS_ROOT} ${ARGOSFS_MOUNT} --foreground -o allow_other
+ExecStop=/bin/fusermount3 -u ${ARGOSFS_MOUNT}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

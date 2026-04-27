@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "mark-disk",
+    "/root/project/argosfs/paper-data/runs/smoke/volume",
+    "disk-0000",
+    "failed"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.02012954093515873,
+  "stdout": "",
+  "stderr": ""
+}

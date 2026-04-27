@@ -1,0 +1,12 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "add-disk",
+    "/root/project/argosfs/paper-data/runs/smoke/volume",
+    "--rebalance"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 1.0361366290599108,
+  "stdout": "disk-0006\n",
+  "stderr": ""
+}

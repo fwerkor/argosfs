@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "get",
+    "/root/project/argosfs/paper-data/runs/smoke/volume",
+    "/data/random-1m.bin",
+    "/root/project/argosfs/paper-data/runs/smoke/recovered/random-1m.bin"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.23604558873921633,
+  "stdout": "",
+  "stderr": ""
+}

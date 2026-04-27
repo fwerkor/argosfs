@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "put",
+    "/root/project/argosfs/paper-data/runs/smoke/volume",
+    "/root/project/argosfs/paper-data/runs/smoke/datasets/text-small.txt",
+    "/data/text-small.txt"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.016591260209679604,
+  "stdout": "",
+  "stderr": ""
+}

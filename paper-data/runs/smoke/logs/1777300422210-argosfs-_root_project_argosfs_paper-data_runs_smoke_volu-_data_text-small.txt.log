@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "get",
+    "/root/project/argosfs/paper-data/runs/smoke/volume",
+    "/data/text-small.txt",
+    "/root/project/argosfs/paper-data/runs/smoke/recovered/text-small.txt"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.01352719683200121,
+  "stdout": "",
+  "stderr": ""
+}

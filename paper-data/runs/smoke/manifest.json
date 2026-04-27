@@ -1,0 +1,237 @@
+{
+  "started_at": 1777300421.6246953,
+  "platform": "Linux-6.8.0-106-generic-x86_64-with-glibc2.36",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "repo": "/root/project/argosfs",
+  "steps": [
+    {
+      "cmd": [
+        "/root/.cargo/bin/cargo",
+        "build"
+      ],
+      "elapsed_sec": 0.10938154114410281,
+      "stdout": "",
+      "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s\n",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300421738-cargo.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "mkfs",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "--force",
+        "--disks",
+        "6",
+        "--k",
+        "4",
+        "--m",
+        "2",
+        "--chunk-size",
+        "65536",
+        "--compression",
+        "zstd"
+      ],
+      "elapsed_sec": 0.1691544158384204,
+      "stdout": "{\n  \"volume_uuid\": \"2431c980-1047-4d27-822a-9c9a7f8c1acc\",\n  \"txid\": 0,\n  \"files\": 0,\n  \"directories\": 1,\n  \"symlinks\": 0,\n  \"specials\": 0,\n  \"disks\": [\n    {\n      \"id\": \"disk-0000\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.2482352516410073,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.990506,\n      \"write_latency_ewma_ms\": 1.031838,\n      \"observed_read_mib_s\": 1009.5849999899042,\n      \"observed_write_mib_s\": 969.1443811916212,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0001\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.620172,\n      \"write_latency_ewma_ms\": 0.932098,\n      \"observed_read_mib_s\": 1612.4558993311532,\n      \"observed_write_mib_s\": 1072.8485631339197,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0002\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.471319,\n      \"write_latency_ewma_ms\": 0.796481,\n      \"observed_read_mib_s\": 2121.705256949115,\n      \"observed_write_mib_s\": 1255.5227306112763,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0003\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.451398,\n      \"write_latency_ewma_ms\": 0.818936,\n      \"observed_read_mib_s\": 2215.339899600796,\n      \"observed_write_mib_s\": 1221.096642472672,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0004\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.451734,\n      \"write_latency_ewma_ms\": 0.8104790000000001,\n      \"observed_read_mib_s\": 2213.692128553529,\n      \"observed_write_mib_s\": 1233.8382610777082,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0005\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.461665,\n      \"write_latency_ewma_ms\": 0.787759,\n      \"observed_read_mib_s\": 2166.0728017068654,\n      \"observed_write_mib_s\": 1269.4237704678717,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.0,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    }\n  ],\n  \"cache\": {\n    \"hit_ratio\": 0.0,\n    \"hits\": 0,\n    \"l2_hits\": 0,\n    \"l2_writes\": 0,\n    \"memory_bytes\": 0,\n    \"memory_items\": 0,\n    \"misses\": 0\n  }\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300422165-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu---force.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "mkdir",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "/data",
+        "--mode",
+        "755"
+      ],
+      "elapsed_sec": 0.01302024396136403,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300422178-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-_data.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "put",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "/root/project/argosfs/paper-data/runs/smoke/datasets/text-small.txt",
+        "/data/text-small.txt"
+      ],
+      "elapsed_sec": 0.016591260209679604,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300422196-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-_root_project_argosfs_paper-data_runs_smoke_data.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "get",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "/data/text-small.txt",
+        "/root/project/argosfs/paper-data/runs/smoke/recovered/text-small.txt"
+      ],
+      "elapsed_sec": 0.01352719683200121,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300422210-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-_data_text-small.txt.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "put",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "/root/project/argosfs/paper-data/runs/smoke/datasets/zeros-1m.bin",
+        "/data/zeros-1m.bin"
+      ],
+      "elapsed_sec": 0.10167135391384363,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300422312-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-_root_project_argosfs_paper-data_runs_smoke_data.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "get",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "/data/zeros-1m.bin",
+        "/root/project/argosfs/paper-data/runs/smoke/recovered/zeros-1m.bin"
+      ],
+      "elapsed_sec": 0.10748273599892855,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300422420-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-_data_zeros-1m.bin.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "put",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "/root/project/argosfs/paper-data/runs/smoke/datasets/pattern-2m.bin",
+        "/data/pattern-2m.bin"
+      ],
+      "elapsed_sec": 0.25485879788175225,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300422687-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-_root_project_argosfs_paper-data_runs_smoke_data.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "get",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "/data/pattern-2m.bin",
+        "/root/project/argosfs/paper-data/runs/smoke/recovered/pattern-2m.bin"
+      ],
+      "elapsed_sec": 0.19003729987889528,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300422878-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-_data_pattern-2m.bin.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "put",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "/root/project/argosfs/paper-data/runs/smoke/datasets/random-1m.bin",
+        "/data/random-1m.bin"
+      ],
+      "elapsed_sec": 0.2558710011653602,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300423150-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-_root_project_argosfs_paper-data_runs_smoke_data.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "get",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "/data/random-1m.bin",
+        "/root/project/argosfs/paper-data/runs/smoke/recovered/random-1m.bin"
+      ],
+      "elapsed_sec": 0.23604558873921633,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300423386-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-_data_random-1m.bin.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "fsck",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "--repair",
+        "--remove-orphans"
+      ],
+      "elapsed_sec": 0.5013003516942263,
+      "stdout": "{\n  \"files_checked\": 4,\n  \"directories_checked\": 2,\n  \"damaged_files\": 1,\n  \"repaired_files\": 1,\n  \"unrecoverable_files\": 0,\n  \"missing_shards\": 0,\n  \"checksum_errors\": 1,\n  \"orphan_shards\": 0,\n  \"removed_orphans\": 0,\n  \"errors\": []\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300423898-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu---repair.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "mark-disk",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "disk-0000",
+        "failed"
+      ],
+      "elapsed_sec": 0.02012954093515873,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300423919-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-disk-0000.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "add-disk",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "--rebalance"
+      ],
+      "elapsed_sec": 1.0361366290599108,
+      "stdout": "disk-0006\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300424956-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu---rebalance.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "set-health",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "disk-0001",
+        "--pending-sectors",
+        "12"
+      ],
+      "elapsed_sec": 0.019715295173227787,
+      "stdout": "",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300424976-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu-disk-0001.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "autopilot",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "--once"
+      ],
+      "elapsed_sec": 1.7418004260398448,
+      "stdout": "{\n  \"actions\": [\n    {\n      \"action\": \"smart-refresh-skipped\",\n      \"error\": \"unsupported operation: SMART refresh failed for all selected disks: [{\\\"disk_id\\\":\\\"disk-0000\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0000 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0001\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0001 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0002\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0002 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0003\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0003 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0004\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0004 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0005\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0005 has no probed backing device\\\"},{\\\"disk_id\\\":\\\"disk-0006\\\",\\\"error\\\":\\\"unsupported operation: disk disk-0006 has no probed backing device\\\"}]\"\n    },\n    {\n      \"action\": \"skip-drain-predicted-failure\",\n      \"disk_id\": \"disk-0001\",\n      \"error\": \"not enough online disks: need 6, have 5\",\n      \"risk\": 0.12\n    },\n    {\n      \"action\": \"scrub\",\n      \"report\": {\n        \"checksum_errors\": 0,\n        \"damaged_files\": 0,\n        \"directories_checked\": 2,\n        \"errors\": [],\n        \"files_checked\": 4,\n        \"missing_shards\": 0,\n        \"orphan_shards\": 0,\n        \"removed_orphans\": 0,\n        \"repaired_files\": 0,\n        \"unrecoverable_files\": 0\n      }\n    },\n    {\n      \"action\": \"rebalance\",\n      \"rewritten_files\": 4\n    }\n  ],\n  \"health\": {\n    \"cache\": {\n      \"hit_ratio\": 0.5,\n      \"hits\": 17,\n      \"l2_hits\": 0,\n      \"l2_writes\": 17,\n      \"memory_bytes\": 0,\n      \"memory_items\": 0,\n      \"misses\": 17\n    },\n    \"directories\": 2,\n    \"disks\": [\n      {\n        \"available_bytes\": 959726878720,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.9252384,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0000\",\n        \"observed_read_mib_s\": 1669.3181002492292,\n        \"observed_write_mib_s\": 826.9068886305265,\n        \"predicted_failure\": true,\n        \"read_latency_ewma_ms\": 0.599047,\n        \"reasons\": [\n          \"failed\"\n        ],\n        \"risk_score\": 1.0,\n        \"rotational\": null,\n        \"status\": \"failed\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 0,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 1.209326\n      },\n      {\n        \"available_bytes\": 959726615945,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.7306665,\n          \"pending_sectors\": 12,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0001\",\n        \"observed_read_mib_s\": 2041.3790999618202,\n        \"observed_write_mib_s\": 157.14177394744314,\n        \"predicted_failure\": true,\n        \"read_latency_ewma_ms\": 0.025279536227877597,\n        \"reasons\": [\n          \"pending-sectors\"\n        ],\n        \"risk_score\": 0.12,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262775,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.25064301747203616\n      },\n      {\n        \"available_bytes\": 959726615945,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.5928265,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0002\",\n        \"observed_read_mib_s\": 2045.3591796343633,\n        \"observed_write_mib_s\": 163.56049567141832,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.024380757614943925,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262775,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.2509963429782106\n      },\n      {\n        \"available_bytes\": 959726615945,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.748327,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0003\",\n        \"observed_read_mib_s\": 2048.211382710433,\n        \"observed_write_mib_s\": 152.8850720834627,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.03134560994926419,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262775,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.2610399317795424\n      },\n      {\n        \"available_bytes\": 959726615945,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.5832322000000001,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0004\",\n        \"observed_read_mib_s\": 2108.6985109101165,\n        \"observed_write_mib_s\": 162.23078859206657,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.023815536125785536,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262775,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.2474103378063073\n      },\n      {\n        \"available_bytes\": 959726615945,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.5878650000000001,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 30.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0005\",\n        \"observed_read_mib_s\": 2083.0710337940336,\n        \"observed_write_mib_s\": 159.85710589310634,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.024565994684080928,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262775,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.24762647966793971\n      },\n      {\n        \"available_bytes\": 959726615945,\n        \"backing_device\": null,\n        \"capacity_bytes\": 959726878720,\n        \"class\": \"unknown\",\n        \"health\": {\n          \"crc_errors\": 0,\n          \"io_errors\": 0,\n          \"latency_ms\": 0.7808657,\n          \"pending_sectors\": 0,\n          \"reallocated_sectors\": 0,\n          \"temperature_c\": 0.0,\n          \"wear_percent\": 0.0\n        },\n        \"id\": \"disk-0006\",\n        \"observed_read_mib_s\": 2091.1490524882256,\n        \"observed_write_mib_s\": 163.51344442586188,\n        \"predicted_failure\": false,\n        \"read_latency_ewma_ms\": 0.023917488467576017,\n        \"reasons\": [],\n        \"risk_score\": 0.0,\n        \"rotational\": null,\n        \"status\": \"online\",\n        \"tier\": \"hot\",\n        \"used_bytes\": 262775,\n        \"weight\": 3.5,\n        \"write_latency_ewma_ms\": 0.246806733752651\n      }\n    ],\n    \"files\": 4,\n    \"specials\": 0,\n    \"symlinks\": 0,\n    \"txid\": 46,\n    \"volume_uuid\": \"2431c980-1047-4d27-822a-9c9a7f8c1acc\"\n  }\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300426718-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu---once.log"
+    },
+    {
+      "cmd": [
+        "/root/project/argosfs/target/debug/argosfs",
+        "health",
+        "/root/project/argosfs/paper-data/runs/smoke/volume",
+        "--json"
+      ],
+      "elapsed_sec": 0.02204759605228901,
+      "stdout": "{\n  \"volume_uuid\": \"2431c980-1047-4d27-822a-9c9a7f8c1acc\",\n  \"txid\": 47,\n  \"files\": 4,\n  \"directories\": 2,\n  \"symlinks\": 0,\n  \"specials\": 0,\n  \"disks\": [\n    {\n      \"id\": \"disk-0000\",\n      \"status\": \"failed\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 0,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726878720,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.599047,\n      \"write_latency_ewma_ms\": 1.209326,\n      \"observed_read_mib_s\": 1669.3181002492292,\n      \"observed_write_mib_s\": 826.9068886305265,\n      \"risk_score\": 1.0,\n      \"predicted_failure\": true,\n      \"reasons\": [\n        \"failed\"\n      ],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.9252384,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0001\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262775,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615945,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.025279536227877597,\n      \"write_latency_ewma_ms\": 0.25064301747203616,\n      \"observed_read_mib_s\": 2041.37909996182,\n      \"observed_write_mib_s\": 157.14177394744314,\n      \"risk_score\": 0.12,\n      \"predicted_failure\": true,\n      \"reasons\": [\n        \"pending-sectors\"\n      ],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 12,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.7306665,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0002\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262775,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615945,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.024380757614943925,\n      \"write_latency_ewma_ms\": 0.2509963429782106,\n      \"observed_read_mib_s\": 2045.3591796343633,\n      \"observed_write_mib_s\": 163.56049567141832,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.5928265,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0003\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262775,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615945,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.03134560994926419,\n      \"write_latency_ewma_ms\": 0.2610399317795424,\n      \"observed_read_mib_s\": 2048.211382710433,\n      \"observed_write_mib_s\": 152.8850720834627,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.748327,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0004\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262775,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615945,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.023815536125785536,\n      \"write_latency_ewma_ms\": 0.2474103378063073,\n      \"observed_read_mib_s\": 2108.6985109101165,\n      \"observed_write_mib_s\": 162.23078859206657,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.5832322000000001,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0005\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262775,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615945,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.024565994684080928,\n      \"write_latency_ewma_ms\": 0.24762647966793971,\n      \"observed_read_mib_s\": 2083.0710337940336,\n      \"observed_write_mib_s\": 159.85710589310634,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.5878650000000001,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 30.0\n      }\n    },\n    {\n      \"id\": \"disk-0006\",\n      \"status\": \"online\",\n      \"tier\": \"hot\",\n      \"weight\": 3.5,\n      \"used_bytes\": 262775,\n      \"capacity_bytes\": 959726878720,\n      \"available_bytes\": 959726615945,\n      \"class\": \"unknown\",\n      \"backing_device\": null,\n      \"rotational\": null,\n      \"read_latency_ewma_ms\": 0.023917488467576017,\n      \"write_latency_ewma_ms\": 0.246806733752651,\n      \"observed_read_mib_s\": 2091.1490524882256,\n      \"observed_write_mib_s\": 163.51344442586188,\n      \"risk_score\": 0.0,\n      \"predicted_failure\": false,\n      \"reasons\": [],\n      \"health\": {\n        \"reallocated_sectors\": 0,\n        \"pending_sectors\": 0,\n        \"crc_errors\": 0,\n        \"io_errors\": 0,\n        \"latency_ms\": 0.7808657,\n        \"wear_percent\": 0.0,\n        \"temperature_c\": 0.0\n      }\n    }\n  ],\n  \"cache\": {\n    \"hit_ratio\": 0.0,\n    \"hits\": 0,\n    \"l2_hits\": 0,\n    \"l2_writes\": 0,\n    \"memory_bytes\": 0,\n    \"memory_items\": 0,\n    \"misses\": 0\n  }\n}\n",
+      "stderr": "",
+      "log": "/root/project/argosfs/paper-data/runs/smoke/logs/1777300426741-argosfs-_root_project_argosfs_paper-data_runs_smoke_volu---json.log"
+    }
+  ],
+  "corrupted_shard": "/root/project/argosfs/paper-data/runs/smoke/volume/.argosfs/devices/disk-0001/shards/01/s0000000000000001.000.blk",
+  "finished_at": 1777300427.3936732,
+  "duration_sec": 5.768977880477905
+}

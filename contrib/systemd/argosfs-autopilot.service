@@ -1,0 +1,13 @@
+[Unit]
+Description=ArgosFS Autopilot
+After=local-fs.target
+
+[Service]
+Type=simple
+Environment=ARGOSFS_ROOT=/var/lib/argosfs/root
+ExecStart=/usr/local/sbin/argosfs autopilot ${ARGOSFS_ROOT} --interval 60
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

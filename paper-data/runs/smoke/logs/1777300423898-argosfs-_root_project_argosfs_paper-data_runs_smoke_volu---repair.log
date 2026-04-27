@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "fsck",
+    "/root/project/argosfs/paper-data/runs/smoke/volume",
+    "--repair",
+    "--remove-orphans"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.5013003516942263,
+  "stdout": "{\n  \"files_checked\": 4,\n  \"directories_checked\": 2,\n  \"damaged_files\": 1,\n  \"repaired_files\": 1,\n  \"unrecoverable_files\": 0,\n  \"missing_shards\": 0,\n  \"checksum_errors\": 1,\n  \"orphan_shards\": 0,\n  \"removed_orphans\": 0,\n  \"errors\": []\n}\n",
+  "stderr": ""
+}

@@ -1,0 +1,14 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "mkdir",
+    "/root/project/argosfs/paper-data/runs/smoke/volume",
+    "/data",
+    "--mode",
+    "755"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.01302024396136403,
+  "stdout": "",
+  "stderr": ""
+}
