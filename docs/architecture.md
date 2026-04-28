@@ -6,7 +6,8 @@ implemented as a Rust core with a real FUSE frontend.
 ## Layers
 
 - Metadata service: JSON metadata committed with copy-on-write replacement,
-  append-only journal records, audit log, and point-in-time metadata snapshots.
+  triple metadata copies, hash-chained journal records with full metadata
+  snapshots, replay on open, audit log, and point-in-time metadata snapshots.
 - Data plane: block compression, optional authenticated encryption,
   Reed-Solomon erasure coding, weighted placement, shard checksum verification,
   hard capacity enforcement, repair, and migration.
@@ -61,6 +62,25 @@ for zero-copy staging before returning data to the reconstruction pipeline.
 The Prometheus exporter serves `/metrics` and reports volume transaction IDs,
 file counts, encryption state, io_uring availability, disk capacity, disk usage,
 risk scores, online status, and latency EWMA values.
+
+## Crash Consistency
+
+Every metadata transaction is written to `journal.jsonl` before metadata copies
+are updated. A journal record contains the transaction id, action details, the
+previous record hash, the previous metadata hash, the new metadata hash, and a
+full metadata snapshot. The record itself is hashed with its `record_hash` field
+cleared, forming a verifiable chain.
+
+Metadata is then written to `meta.primary.json`, `meta.secondary.json`, and the
+compatibility `meta.json`. On open, ArgosFS validates all copies, detects
+double-write divergence or corrupt copies, chooses the newest valid generation,
+replays a newer journal snapshot if present, and rewrites the copies to a
+consistent state.
+
+Crash injection is available through `ARGOSFS_CRASH_POINT`, with injection
+points before/after journal append and after each metadata copy. The integration
+suite covers replay after `after-journal`, corrupt metadata-copy repair, and bad
+journal-tail detection.
 
 ## Failure Model
 

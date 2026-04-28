@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "get",
+    "/root/project/argosfs/paper-data/runs/recovery/volume",
+    "/data/pattern-2m.bin",
+    "/root/project/argosfs/paper-data/runs/recovery/recovered/pattern-2m.bin"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 3.2643127562478185,
+  "stdout": "",
+  "stderr": ""
+}

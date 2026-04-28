@@ -1,7 +1,9 @@
 use argosfs::acl;
+use argosfs::journal;
 use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
 use argosfs::ArgosFs;
 use std::fs;
+use std::io::Write;
 use tempfile::TempDir;
 
 fn config(k: usize, m: usize) -> VolumeConfig {
@@ -262,4 +264,73 @@ fn advanced_io_policy_and_prometheus_metrics_are_live() {
     assert!(metrics.contains("argosfs_txid"));
     assert!(metrics.contains("argosfs_disk_read_latency_ms"));
     assert!(metrics.contains("argosfs_io_uring_available"));
+}
+
+#[test]
+fn journal_replay_recovers_transaction_after_power_loss_point() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/crash", b"old", 0o644).unwrap();
+
+    journal::set_thread_crash_point(Some("after-journal"));
+    let err = fs
+        .write_file("/crash", b"new-after-journal", 0o644)
+        .unwrap_err();
+    journal::set_thread_crash_point(None);
+    assert_eq!(err.errno(), libc::EIO);
+    drop(fs);
+
+    let report = ArgosFs::audit_transactions(tmp.path()).unwrap();
+    assert!(report.replayed);
+    assert_eq!(report.invalid_entries, 0);
+
+    let fs = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(fs.read_file("/crash", true).unwrap(), b"new-after-journal");
+}
+
+#[test]
+fn double_write_metadata_detection_repairs_corrupt_copy() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/safe", b"metadata mirrors", 0o644).unwrap();
+    drop(fs);
+
+    fs::write(tmp.path().join(".argosfs/meta.primary.json"), b"{not-json").unwrap();
+    let report = ArgosFs::audit_transactions(tmp.path()).unwrap();
+    assert!(report.double_write_mismatches >= 1);
+    assert!(report
+        .metadata_candidates
+        .iter()
+        .any(|candidate| candidate.present && !candidate.valid));
+
+    let fs = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(fs.read_file("/safe", true).unwrap(), b"metadata mirrors");
+    assert_eq!(
+        ArgosFs::audit_transactions(tmp.path())
+            .unwrap()
+            .double_write_mismatches,
+        0
+    );
+}
+
+#[test]
+fn transaction_verifier_flags_bad_journal_tail_without_losing_data() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/journal", b"hash chain", 0o644).unwrap();
+    drop(fs);
+
+    let mut journal = fs::OpenOptions::new()
+        .append(true)
+        .open(tmp.path().join(".argosfs/journal.jsonl"))
+        .unwrap();
+    writeln!(journal, "{{bad-json").unwrap();
+    journal.sync_all().unwrap();
+
+    let report = ArgosFs::audit_transactions(tmp.path()).unwrap();
+    assert!(report.invalid_entries >= 1);
+    assert!(report.valid_entries >= 2);
+
+    let fs = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(fs.read_file("/journal", true).unwrap(), b"hash chain");
 }

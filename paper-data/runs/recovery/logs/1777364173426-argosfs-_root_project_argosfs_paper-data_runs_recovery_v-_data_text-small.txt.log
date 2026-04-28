@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "set-nfs4-acl",
+    "/root/project/argosfs/paper-data/runs/recovery/volume",
+    "/data/text-small.txt",
+    "@/root/project/argosfs/paper-data/runs/recovery/metrics/nfs4-acl.json"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.70584134478122,
+  "stdout": "",
+  "stderr": ""
+}

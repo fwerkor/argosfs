@@ -6,10 +6,11 @@ use crate::crypto;
 use crate::erasure::RsCodec;
 use crate::error::{ArgosError, Result};
 use crate::health::{classify_inode, probe_disk_path, refresh_smart, risk_report};
+use crate::journal;
 use crate::types::*;
 use crate::util::{
     append_json_line, atomic_write, clean_path, directory_size, ensure_dir, now_f64, parent_name,
-    read_to_vec, relative_or_absolute, sha256_hex, split_path, stable_u01,
+    relative_or_absolute, sha256_hex, split_path, stable_u01,
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -170,25 +171,19 @@ impl ArgosFs {
             next_stripe: 1,
             config,
             encryption: EncryptionConfig::default(),
+            integrity: MetadataIntegrity::default(),
             disks,
             inodes,
         };
-        atomic_write(
-            &system.join("meta.json"),
-            serde_json::to_vec_pretty(&meta)?.as_slice(),
-        )?;
-        append_json_line(
-            &system.join("journal.jsonl"),
-            &json!({"time": created_at, "action": "mkfs", "txid": 0}),
-        )?;
+        let mut meta = meta;
+        journal::initialize_volume(&root, &mut meta, created_at)?;
         Self::open(root)
     }
 
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
-        let meta_path = root.join(".argosfs/meta.json");
-        let data = read_to_vec(&meta_path)?;
-        let meta: Metadata = serde_json::from_slice(&data)?;
+        let recovered = journal::load_or_recover(&root)?;
+        let meta = recovered.metadata;
         if meta.format != FORMAT_VERSION {
             return Err(ArgosError::Invalid(format!(
                 "unsupported format {}",
@@ -215,6 +210,14 @@ impl ArgosFs {
 
     pub fn metadata_snapshot(&self) -> Metadata {
         self.meta.lock().clone()
+    }
+
+    pub fn transaction_report(&self) -> Result<TransactionReport> {
+        journal::scan(&self.root)
+    }
+
+    pub fn audit_transactions(root: impl AsRef<Path>) -> Result<TransactionReport> {
+        journal::load_or_recover(root.as_ref()).map(|recovered| recovered.report)
     }
 
     pub fn snapshot(&self, name: &str) -> Result<PathBuf> {
@@ -2260,11 +2263,19 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
+        let previous_meta_hash = if meta.integrity.meta_hash.is_empty() {
+            journal::canonical_metadata_hash(meta)?
+        } else {
+            meta.integrity.meta_hash.clone()
+        };
         meta.txid += 1;
         meta.updated_at = now_f64();
-        let meta_path = self.root.join(".argosfs/meta.json");
-        self.journal_locked(meta, action, json!({"txid": meta.txid, "details": details}))?;
-        atomic_write(&meta_path, serde_json::to_vec_pretty(meta)?.as_slice())
+        journal::append_transaction(
+            &self.root,
+            meta,
+            action,
+            json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details}),
+        )
     }
 
     fn journal_locked(
@@ -2273,10 +2284,7 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
-        append_json_line(
-            &self.root.join(".argosfs/journal.jsonl"),
-            &json!({"time": now_f64(), "txid": meta.txid, "action": action, "details": details}),
-        )
+        journal::append_event(&self.root, meta, action, details)
     }
 
     fn attr_from_inode(inode: &Inode, chunk_size: usize) -> NodeAttr {

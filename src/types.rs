@@ -368,8 +368,45 @@ pub struct Metadata {
     pub config: VolumeConfig,
     #[serde(default)]
     pub encryption: EncryptionConfig,
+    #[serde(default)]
+    pub integrity: MetadataIntegrity,
     pub disks: BTreeMap<String, Disk>,
     pub inodes: BTreeMap<InodeId, Inode>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MetadataIntegrity {
+    pub generation: u64,
+    pub previous_meta_hash: String,
+    pub meta_hash: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct MetadataCandidateReport {
+    pub path: String,
+    pub present: bool,
+    pub valid: bool,
+    pub txid: u64,
+    pub generation: u64,
+    pub meta_hash: String,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct TransactionReport {
+    pub valid_entries: u64,
+    pub legacy_entries: u64,
+    pub invalid_entries: u64,
+    pub last_valid_txid: u64,
+    pub last_valid_generation: u64,
+    pub last_valid_record_hash: String,
+    pub latest_snapshot_txid: u64,
+    pub latest_snapshot_generation: u64,
+    pub replayed: bool,
+    pub selected_metadata_source: String,
+    pub double_write_mismatches: u64,
+    pub metadata_candidates: Vec<MetadataCandidateReport>,
+    pub errors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

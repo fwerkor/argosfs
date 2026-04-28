@@ -7,6 +7,7 @@ pub mod erasure;
 pub mod error;
 pub mod fusefs;
 pub mod health;
+pub mod journal;
 pub mod metrics;
 pub mod types;
 pub mod util;

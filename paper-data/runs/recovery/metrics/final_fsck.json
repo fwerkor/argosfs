@@ -1,0 +1,12 @@
+{
+  "files_checked": 5,
+  "directories_checked": 2,
+  "damaged_files": 0,
+  "repaired_files": 0,
+  "unrecoverable_files": 0,
+  "missing_shards": 0,
+  "checksum_errors": 0,
+  "orphan_shards": 0,
+  "removed_orphans": 0,
+  "errors": []
+}

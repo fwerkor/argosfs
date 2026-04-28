@@ -16,6 +16,8 @@ Each run stores:
 - JSON summaries for recovery, rebalance, health, cache, and benchmark phases,
 - ACL, encryption, advanced-I/O, and Prometheus behavior can be captured by
   adding CLI command logs beside the generated JSON summaries,
+- transaction verification and crash-recovery artifacts through
+  `argosfs verify-journal` logs and the integration power-loss tests,
 - CSV latency/throughput samples,
 - a validation-only encryption key file when encryption is enabled for the run,
 - a manifest with software and configuration details.

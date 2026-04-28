@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "set-io-mode",
+    "/root/project/argosfs/paper-data/runs/recovery/volume",
+    "--mode",
+    "io-uring"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.09478461602702737,
+  "stdout": "{\n  \"k\": 4,\n  \"m\": 2,\n  \"chunk_size\": 65536,\n  \"compression\": \"zstd\",\n  \"compression_level\": 3,\n  \"l2_cache_bytes\": 4294967296,\n  \"fsname\": \"argosfs\",\n  \"io_mode\": \"io-uring\",\n  \"direct_io\": false,\n  \"zero_copy\": true,\n  \"numa_aware\": true\n}\n",
+  "stderr": ""
+}

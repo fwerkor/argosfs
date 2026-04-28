@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "put",
+    "/root/project/argosfs/paper-data/runs/recovery/volume",
+    "/root/project/argosfs/paper-data/runs/recovery/datasets/random-1m.bin",
+    "/data/random-1m.bin"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 3.924892921000719,
+  "stdout": "",
+  "stderr": ""
+}

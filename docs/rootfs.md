@@ -66,6 +66,9 @@ exec switch_root /newroot /sbin/init
   performance, and recommended tier/weight unless overridden.
 - Use `argosfs refresh-smart ROOT` when `smartctl` is available to import real
   SMART/NVMe health counters.
+- Use `argosfs verify-journal ROOT` before boot handoff or after unclean
+  shutdowns to validate the metadata hash chain and trigger replay/metadata-copy
+  repair.
 - Use `argosfs prometheus ROOT --listen 127.0.0.1:9108` for node-local
   Prometheus scraping.
 - Use `argosfs set-posix-acl` and `argosfs set-nfs4-acl` to pre-seed rootfs ACL

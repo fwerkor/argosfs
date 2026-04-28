@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "put",
+    "/root/project/argosfs/paper-data/runs/recovery/volume",
+    "/root/project/argosfs/paper-data/runs/recovery/datasets/crash-new.txt",
+    "/data/crash.txt"
+  ],
+  "returncode": 1,
+  "elapsed_sec": 3.355035266838968,
+  "stdout": "",
+  "stderr": "Error: injected crash point: after-journal\n"
+}

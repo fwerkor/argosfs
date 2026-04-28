@@ -251,6 +251,9 @@ enum Command {
         root: PathBuf,
         path: String,
     },
+    VerifyJournal {
+        root: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -595,6 +598,10 @@ fn main() -> Result<()> {
             let fs = ArgosFs::open(root)?;
             let acl = fs.get_nfs4_acl_path(&path)?.unwrap_or_default();
             println!("{}", acl::nfs4_to_json(&acl)?);
+        }
+        Command::VerifyJournal { root } => {
+            let report = ArgosFs::audit_transactions(root)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
     }
     Ok(())

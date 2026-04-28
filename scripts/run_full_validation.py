@@ -19,7 +19,13 @@ import urllib.request
 from pathlib import Path
 
 
-def run(cmd: list[str], cwd: Path, log_dir: Path, env: dict[str, str] | None = None) -> dict:
+def run(
+    cmd: list[str],
+    cwd: Path,
+    log_dir: Path,
+    env: dict[str, str] | None = None,
+    expect_failure: bool = False,
+) -> dict:
     started = time.perf_counter()
     child_env = os.environ.copy()
     if env:
@@ -42,7 +48,9 @@ def run(cmd: list[str], cwd: Path, log_dir: Path, env: dict[str, str] | None = N
         + "\n",
         encoding="utf-8",
     )
-    if proc.returncode != 0:
+    if expect_failure and proc.returncode == 0:
+        raise RuntimeError(f"command unexpectedly succeeded: {' '.join(cmd)}")
+    if proc.returncode != 0 and not expect_failure:
         raise RuntimeError(f"command failed: {' '.join(cmd)}\n{proc.stderr}")
     return {
         "cmd": cmd,
@@ -51,6 +59,7 @@ def run(cmd: list[str], cwd: Path, log_dir: Path, env: dict[str, str] | None = N
         "stderr": proc.stderr,
         "log": str(log_path),
         "env": sorted(env.keys()) if env else [],
+        "expected_failure": expect_failure,
     }
 
 
@@ -299,6 +308,39 @@ def main() -> int:
         run([str(binary), "encryption-status", str(volume)], repo, out / "logs", secure_env)
     )
 
+    crash_old = dataset / "crash-old.txt"
+    crash_new = dataset / "crash-new.txt"
+    crash_old.write_text("before injected crash\n", encoding="utf-8")
+    crash_new.write_text("after injected crash\n", encoding="utf-8")
+    manifest["steps"].append(
+        run(
+            [str(binary), "put", str(volume), str(crash_old), "/data/crash.txt"],
+            repo,
+            out / "logs",
+            secure_env,
+        )
+    )
+    crash_env = {**secure_env, "ARGOSFS_CRASH_POINT": "after-journal"}
+    manifest["steps"].append(
+        run(
+            [str(binary), "put", str(volume), str(crash_new), "/data/crash.txt"],
+            repo,
+            out / "logs",
+            crash_env,
+            expect_failure=True,
+        )
+    )
+    manifest["steps"].append(run([str(binary), "verify-journal", str(volume)], repo, out / "logs", secure_env))
+    manifest["steps"].append(
+        run(
+            [str(binary), "get", str(volume), "/data/crash.txt", str(recovered / "crash.txt")],
+            repo,
+            out / "logs",
+            secure_env,
+        )
+    )
+    manifest["crash_replay_sha256"] = sha256(recovered / "crash.txt")
+
     corrupt_path = corrupt_first_shard(volume)
     manifest["corrupted_shard"] = str(corrupt_path)
     manifest["steps"].append(run([str(binary), "fsck", str(volume), "--repair", "--remove-orphans"], repo, out / "logs", secure_env))
@@ -307,6 +349,7 @@ def main() -> int:
     manifest["steps"].append(run([str(binary), "set-health", str(volume), "disk-0001", "--pending-sectors", "12"], repo, out / "logs", secure_env))
     manifest["steps"].append(run([str(binary), "autopilot", str(volume), "--once"], repo, out / "logs", secure_env))
     manifest["steps"].append(run([str(binary), "health", str(volume), "--json"], repo, out / "logs", secure_env))
+    manifest["steps"].append(run([str(binary), "verify-journal", str(volume)], repo, out / "logs", secure_env))
     manifest["steps"].append(capture_prometheus(binary, volume, metrics, secure_env))
 
     final_health = subprocess.check_output(

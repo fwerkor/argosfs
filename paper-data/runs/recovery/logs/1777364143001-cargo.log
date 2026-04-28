@@ -1,0 +1,10 @@
+{
+  "cmd": [
+    "/root/.cargo/bin/cargo",
+    "build"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.13147561764344573,
+  "stdout": "",
+  "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s\n"
+}

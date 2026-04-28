@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "enable-encryption",
+    "/root/project/argosfs/paper-data/runs/recovery/volume",
+    "--key-file",
+    "/root/project/argosfs/paper-data/runs/recovery/metrics/argosfs-validation.key"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 2.8409496769309044,
+  "stdout": "{\n  \"encryption_enabled\": true,\n  \"rewritten_files\": 0\n}\n",
+  "stderr": ""
+}

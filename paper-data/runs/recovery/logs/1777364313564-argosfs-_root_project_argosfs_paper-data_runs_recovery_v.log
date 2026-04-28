@@ -1,0 +1,11 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "verify-journal",
+    "/root/project/argosfs/paper-data/runs/recovery/volume"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 2.6869403356686234,
+  "stdout": "{\n  \"valid_entries\": 62,\n  \"legacy_entries\": 0,\n  \"invalid_entries\": 0,\n  \"last_valid_txid\": 61,\n  \"last_valid_generation\": 61,\n  \"last_valid_record_hash\": \"0aa75c887a1ace8104984eeb41e5414327041fb628a713747742f934d2a7c012\",\n  \"latest_snapshot_txid\": 61,\n  \"latest_snapshot_generation\": 61,\n  \"replayed\": false,\n  \"selected_metadata_source\": \"secondary\",\n  \"double_write_mismatches\": 0,\n  \"metadata_candidates\": [\n    {\n      \"path\": \"/root/project/argosfs/paper-data/runs/recovery/volume/.argosfs/meta.json\",\n      \"present\": true,\n      \"valid\": true,\n      \"txid\": 61,\n      \"generation\": 61,\n      \"meta_hash\": \"33c73121dc5f5ff732d14b9de95e53fe6d421c4145b5dd291eb1f45ea9707de6\",\n      \"error\": null\n    },\n    {\n      \"path\": \"/root/project/argosfs/paper-data/runs/recovery/volume/.argosfs/meta.primary.json\",\n      \"present\": true,\n      \"valid\": true,\n      \"txid\": 61,\n      \"generation\": 61,\n      \"meta_hash\": \"33c73121dc5f5ff732d14b9de95e53fe6d421c4145b5dd291eb1f45ea9707de6\",\n      \"error\": null\n    },\n    {\n      \"path\": \"/root/project/argosfs/paper-data/runs/recovery/volume/.argosfs/meta.secondary.json\",\n      \"present\": true,\n      \"valid\": true,\n      \"txid\": 61,\n      \"generation\": 61,\n      \"meta_hash\": \"33c73121dc5f5ff732d14b9de95e53fe6d421c4145b5dd291eb1f45ea9707de6\",\n      \"error\": null\n    }\n  ],\n  \"errors\": []\n}\n",
+  "stderr": ""
+}

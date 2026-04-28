@@ -52,8 +52,10 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
   and NUMA-aware placement preference when sysfs exposes disk node locality.
 - Transparent per-stripe compression with `zstd`, `lz4`, or `none`.
 - Built-in Prometheus exporter at `/metrics`.
-- Persistent metadata with copy-on-write JSON commits, journal, audit-friendly
-  operation records, and named metadata snapshots.
+- Persistent metadata with copy-on-write JSON commits, triple metadata copies
+  (`meta.json`, `meta.primary.json`, and `meta.secondary.json`), hash-checked
+  transaction journal snapshots, automatic journal replay, double-write
+  mismatch detection, and named metadata snapshots.
 - RAM + persistent L2 block cache.
 - Health scoring from SMART-like counters, predicted failure detection, disk
   draining, repair, rebalancing, and `autopilot`.
@@ -148,6 +150,7 @@ argosfs set-posix-acl ROOT /etc/shadow 'user::rw-,group::---,mask::---,other::--
 argosfs get-posix-acl ROOT /etc/shadow
 argosfs set-nfs4-acl ROOT /srv/data @nfs4-acl.json
 argosfs get-nfs4-acl ROOT /srv/data
+argosfs verify-journal ROOT
 ```
 
 `add-disk` defaults to automatic probing. Pass `--tier`, `--weight`, or
@@ -159,6 +162,17 @@ operation. `enable-encryption --reencrypt` rewrites existing file stripes so
 old data becomes encrypted at rest; new writes are encrypted immediately after
 encryption is enabled. `set-io-mode` persists the data-plane policy in volume
 metadata, and `--direct-io` also asks FUSE clients to use direct I/O handles.
+
+`verify-journal` validates the transaction hash chain, metadata snapshot hashes,
+and all metadata copies. Opening a volume also performs recovery: ArgosFS picks
+the newest valid metadata copy, replays a newer journal snapshot when needed,
+and rewrites inconsistent metadata copies.
+
+For crash testing, set `ARGOSFS_CRASH_POINT` to one of
+`before-journal`, `after-journal`, `after-primary-metadata`,
+`after-secondary-metadata`, or `after-compatible-metadata`. Set
+`ARGOSFS_CRASH_ABORT=1` to abort the process instead of returning an injected
+I/O error.
 
 ## Root Filesystem Use
 
@@ -196,5 +210,4 @@ ArgosFS is a complete research filesystem project with a real FUSE frontend, but
 it is not yet a production-certified kernel filesystem. The current metadata
 store is a single-node COW JSON database. That makes experiments transparent and
 auditable; a production version should replace it with a page/B-tree store and
-add journal replay fuzzing, xfstests coverage, and long-duration power-failure
-testing.
+add xfstests coverage and long-duration hardware power-failure testing.

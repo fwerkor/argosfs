@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "get",
+    "/root/project/argosfs/paper-data/runs/recovery/volume",
+    "/data/crash.txt",
+    "/root/project/argosfs/paper-data/runs/recovery/recovered/crash.txt"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 3.4055376490578055,
+  "stdout": "",
+  "stderr": ""
+}

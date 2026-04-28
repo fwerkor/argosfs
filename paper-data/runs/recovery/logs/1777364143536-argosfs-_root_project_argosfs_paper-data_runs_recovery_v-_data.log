@@ -1,0 +1,14 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "mkdir",
+    "/root/project/argosfs/paper-data/runs/recovery/volume",
+    "/data",
+    "--mode",
+    "755"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 0.054144665133208036,
+  "stdout": "",
+  "stderr": ""
+}

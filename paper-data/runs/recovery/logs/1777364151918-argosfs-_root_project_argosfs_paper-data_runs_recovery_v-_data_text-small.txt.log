@@ -1,0 +1,13 @@
+{
+  "cmd": [
+    "/root/project/argosfs/target/debug/argosfs",
+    "get",
+    "/root/project/argosfs/paper-data/runs/recovery/volume",
+    "/data/text-small.txt",
+    "/root/project/argosfs/paper-data/runs/recovery/recovered/text-small.txt"
+  ],
+  "returncode": 0,
+  "elapsed_sec": 2.6649389369413257,
+  "stdout": "",
+  "stderr": ""
+}
