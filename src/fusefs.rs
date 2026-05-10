@@ -50,8 +50,7 @@ pub fn mount(
     for option in options {
         mount_options.push(MountOption::CUSTOM(option));
     }
-    fuser::mount2(ArgosFuse::new(volume), mountpoint, &mount_options)
-        .map_err(|err| ArgosError::Io(err))
+    fuser::mount2(ArgosFuse::new(volume), mountpoint, &mount_options).map_err(ArgosError::Io)
 }
 
 impl Filesystem for ArgosFuse {
@@ -148,14 +147,22 @@ impl Filesystem for ArgosFuse {
         parent: u64,
         name: &OsStr,
         mode: u32,
-        _umask: u32,
+        umask: u32,
         rdev: u32,
         reply: ReplyEntry,
     ) {
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.mknod_at(parent, name, mode, rdev))
-        {
+            .and_then(|()| {
+                self.volume.mknod_at_with_owner(
+                    parent,
+                    name,
+                    mode & !umask,
+                    rdev,
+                    req.uid(),
+                    req.gid(),
+                )
+            }) {
             Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), 0),
             Err(err) => reply.error(err.errno()),
         }
@@ -167,13 +174,15 @@ impl Filesystem for ArgosFuse {
         parent: u64,
         name: &OsStr,
         mode: u32,
-        _umask: u32,
+        umask: u32,
         reply: ReplyEntry,
     ) {
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.mkdir_at(parent, name, mode))
-        {
+            .and_then(|()| {
+                self.volume
+                    .mkdir_at_with_owner(parent, name, mode & !umask, req.uid(), req.gid())
+            }) {
             Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), 0),
             Err(err) => reply.error(err.errno()),
         }
@@ -209,8 +218,10 @@ impl Filesystem for ArgosFuse {
     ) {
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.symlink_at(parent, name, link))
-        {
+            .and_then(|()| {
+                self.volume
+                    .symlink_at_with_owner(parent, name, link, req.uid(), req.gid())
+            }) {
             Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), 0),
             Err(err) => reply.error(err.errno()),
         }
@@ -464,14 +475,21 @@ impl Filesystem for ArgosFuse {
         parent: u64,
         name: &OsStr,
         mode: u32,
-        _umask: u32,
+        umask: u32,
         _flags: i32,
         reply: ReplyCreate,
     ) {
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.create_file_at(parent, name, mode))
-        {
+            .and_then(|()| {
+                self.volume.create_file_at_with_owner(
+                    parent,
+                    name,
+                    mode & !umask,
+                    req.uid(),
+                    req.gid(),
+                )
+            }) {
             Ok(attr) => reply.created(
                 &TTL,
                 &to_file_attr(&attr),
@@ -539,11 +557,11 @@ fn file_type_from_attr(attr: &NodeAttr) -> FileType {
         NodeKind::Directory => FileType::Directory,
         NodeKind::File => FileType::RegularFile,
         NodeKind::Symlink => FileType::Symlink,
-        NodeKind::Special => match attr.mode & libc::S_IFMT as u32 {
-            value if value == libc::S_IFCHR as u32 => FileType::CharDevice,
-            value if value == libc::S_IFBLK as u32 => FileType::BlockDevice,
-            value if value == libc::S_IFIFO as u32 => FileType::NamedPipe,
-            value if value == libc::S_IFSOCK as u32 => FileType::Socket,
+        NodeKind::Special => match attr.mode & libc::S_IFMT {
+            value if value == libc::S_IFCHR => FileType::CharDevice,
+            value if value == libc::S_IFBLK => FileType::BlockDevice,
+            value if value == libc::S_IFIFO => FileType::NamedPipe,
+            value if value == libc::S_IFSOCK => FileType::Socket,
             _ => FileType::RegularFile,
         },
     }

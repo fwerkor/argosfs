@@ -36,18 +36,13 @@ impl std::str::FromStr for Compression {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageTier {
     Hot,
+    #[default]
     Warm,
     Cold,
-}
-
-impl Default for StorageTier {
-    fn default() -> Self {
-        Self::Warm
-    }
 }
 
 impl std::str::FromStr for StorageTier {
@@ -63,21 +58,16 @@ impl std::str::FromStr for StorageTier {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DiskStatus {
+    #[default]
     Online,
     Degraded,
     Draining,
     Failed,
     Offline,
     Removed,
-}
-
-impl Default for DiskStatus {
-    fn default() -> Self {
-        Self::Online
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

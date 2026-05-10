@@ -137,7 +137,7 @@ impl ArgosFs {
         let root_inode = Inode {
             id: ROOT_INO,
             kind: NodeKind::Directory,
-            mode: libc::S_IFDIR as u32 | 0o755,
+            mode: libc::S_IFDIR | 0o755,
             uid: current_uid(),
             gid: current_gid(),
             nlink: 2,
@@ -279,12 +279,30 @@ impl ArgosFs {
         let (parent, name) = parent_name(path)?;
         let mut meta = self.meta.lock();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
-        self.mkdir_locked(&mut meta, parent_ino, &name, mode)
+        self.mkdir_locked(
+            &mut meta,
+            parent_ino,
+            &name,
+            mode,
+            current_uid(),
+            current_gid(),
+        )
     }
 
     pub fn mkdir_at(&self, parent: InodeId, name: &OsStr, mode: u32) -> Result<NodeAttr> {
+        self.mkdir_at_with_owner(parent, name, mode, current_uid(), current_gid())
+    }
+
+    pub fn mkdir_at_with_owner(
+        &self,
+        parent: InodeId,
+        name: &OsStr,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<NodeAttr> {
         let mut meta = self.meta.lock();
-        let ino = self.mkdir_locked(&mut meta, parent, &name.to_string_lossy(), mode)?;
+        let ino = self.mkdir_locked(&mut meta, parent, &name.to_string_lossy(), mode, uid, gid)?;
         let inode = meta.inodes.get(&ino).unwrap();
         Ok(Self::attr_from_inode(inode, meta.config.chunk_size))
     }
@@ -293,7 +311,15 @@ impl ArgosFs {
         let (parent, name) = parent_name(path)?;
         let mut meta = self.meta.lock();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
-        self.mknod_locked(&mut meta, parent_ino, &name, mode, rdev)
+        self.mknod_locked(
+            &mut meta,
+            parent_ino,
+            &name,
+            mode,
+            rdev,
+            current_uid(),
+            current_gid(),
+        )
     }
 
     pub fn mknod_at(
@@ -303,8 +329,28 @@ impl ArgosFs {
         mode: u32,
         rdev: u32,
     ) -> Result<NodeAttr> {
+        self.mknod_at_with_owner(parent, name, mode, rdev, current_uid(), current_gid())
+    }
+
+    pub fn mknod_at_with_owner(
+        &self,
+        parent: InodeId,
+        name: &OsStr,
+        mode: u32,
+        rdev: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<NodeAttr> {
         let mut meta = self.meta.lock();
-        let ino = self.mknod_locked(&mut meta, parent, &name.to_string_lossy(), mode, rdev)?;
+        let ino = self.mknod_locked(
+            &mut meta,
+            parent,
+            &name.to_string_lossy(),
+            mode,
+            rdev,
+            uid,
+            gid,
+        )?;
         let inode = meta.inodes.get(&ino).unwrap();
         Ok(Self::attr_from_inode(inode, meta.config.chunk_size))
     }
@@ -317,19 +363,34 @@ impl ArgosFs {
             &mut meta,
             parent_ino,
             &name,
-            libc::S_IFREG as u32 | (mode & 0o7777),
+            libc::S_IFREG | (mode & 0o7777),
             0,
+            current_uid(),
+            current_gid(),
         )
     }
 
     pub fn create_file_at(&self, parent: InodeId, name: &OsStr, mode: u32) -> Result<NodeAttr> {
+        self.create_file_at_with_owner(parent, name, mode, current_uid(), current_gid())
+    }
+
+    pub fn create_file_at_with_owner(
+        &self,
+        parent: InodeId,
+        name: &OsStr,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<NodeAttr> {
         let mut meta = self.meta.lock();
         let ino = self.mknod_locked(
             &mut meta,
             parent,
             &name.to_string_lossy(),
-            libc::S_IFREG as u32 | (mode & 0o7777),
+            libc::S_IFREG | (mode & 0o7777),
             0,
+            uid,
+            gid,
         )?;
         let inode = meta.inodes.get(&ino).unwrap();
         Ok(Self::attr_from_inode(inode, meta.config.chunk_size))
@@ -408,18 +469,20 @@ impl ArgosFs {
     }
 
     pub fn write_inode_range(&self, ino: InodeId, offset: u64, data: &[u8]) -> Result<usize> {
-        let current = self
-            .read_inode(ino, 0, u64::MAX as usize, true)
-            .unwrap_or_default();
-        let start = offset as usize;
+        let current = self.read_inode(ino, 0, u64::MAX as usize, true)?;
+        let start = usize::try_from(offset)
+            .map_err(|_| ArgosError::Invalid("write offset is too large".to_string()))?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or_else(|| ArgosError::Invalid("write range is too large".to_string()))?;
         let mut updated = current;
         if start > updated.len() {
             updated.resize(start, 0);
         }
-        if start + data.len() > updated.len() {
-            updated.resize(start + data.len(), 0);
+        if end > updated.len() {
+            updated.resize(end, 0);
         }
-        updated[start..start + data.len()].copy_from_slice(data);
+        updated[start..end].copy_from_slice(data);
         self.replace_inode_data(
             ino,
             &updated,
@@ -520,6 +583,17 @@ impl ArgosFs {
     }
 
     pub fn symlink_at(&self, parent: InodeId, name: &OsStr, target: &Path) -> Result<NodeAttr> {
+        self.symlink_at_with_owner(parent, name, target, current_uid(), current_gid())
+    }
+
+    pub fn symlink_at_with_owner(
+        &self,
+        parent: InodeId,
+        name: &OsStr,
+        target: &Path,
+        uid: u32,
+        gid: u32,
+    ) -> Result<NodeAttr> {
         let mut meta = self.meta.lock();
         let now = now_f64();
         let name = name.to_string_lossy().to_string();
@@ -539,11 +613,11 @@ impl ArgosFs {
         let inode = Inode {
             id: ino,
             kind: NodeKind::Symlink,
-            mode: libc::S_IFLNK as u32 | 0o777,
-            uid: current_uid(),
-            gid: current_gid(),
+            mode: libc::S_IFLNK | 0o777,
+            uid,
+            gid,
             nlink: 1,
-            size: target_string.as_bytes().len() as u64,
+            size: target_string.len() as u64,
             rdev: 0,
             atime: now,
             mtime: now,
@@ -599,6 +673,12 @@ impl ArgosFs {
     pub fn link_at(&self, ino: InodeId, new_parent: InodeId, new_name: &OsStr) -> Result<NodeAttr> {
         let mut meta = self.meta.lock();
         let name = new_name.to_string_lossy().to_string();
+        let inode_kind = meta
+            .inodes
+            .get(&ino)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?
+            .kind
+            .clone();
         if self
             .dir_inode_locked(&meta, new_parent)?
             .entries
@@ -606,12 +686,7 @@ impl ArgosFs {
         {
             return Err(ArgosError::AlreadyExists(name));
         }
-        if meta
-            .inodes
-            .get(&ino)
-            .map(|inode| inode.kind == NodeKind::Directory)
-            .unwrap_or(false)
-        {
+        if inode_kind == NodeKind::Directory {
             return Err(ArgosError::Unsupported(
                 "cannot hard link a directory".to_string(),
             ));
@@ -630,7 +705,9 @@ impl ArgosFs {
             json!({"inode": ino, "new_parent": new_parent, "name": name}),
         )?;
         Ok(Self::attr_from_inode(
-            meta.inodes.get(&ino).unwrap(),
+            meta.inodes
+                .get(&ino)
+                .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?,
             meta.config.chunk_size,
         ))
     }
@@ -1483,6 +1560,8 @@ impl ArgosFs {
         parent: InodeId,
         name: &str,
         mode: u32,
+        uid: u32,
+        gid: u32,
     ) -> Result<InodeId> {
         if self
             .dir_inode_locked(meta, parent)?
@@ -1500,9 +1579,9 @@ impl ArgosFs {
         let inode = Inode {
             id: ino,
             kind: NodeKind::Directory,
-            mode: libc::S_IFDIR as u32 | (mode & 0o7777),
-            uid: current_uid(),
-            gid: current_gid(),
+            mode: libc::S_IFDIR | (mode & 0o7777),
+            uid,
+            gid,
             nlink: 2,
             size: 0,
             rdev: 0,
@@ -1538,6 +1617,7 @@ impl ArgosFs {
         Ok(ino)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mknod_locked(
         &self,
         meta: &mut Metadata,
@@ -1545,6 +1625,8 @@ impl ArgosFs {
         name: &str,
         mode: u32,
         rdev: u32,
+        uid: u32,
+        gid: u32,
     ) -> Result<InodeId> {
         if self
             .dir_inode_locked(meta, parent)?
@@ -1553,13 +1635,13 @@ impl ArgosFs {
         {
             return Err(ArgosError::AlreadyExists(name.to_string()));
         }
-        let file_type = mode & libc::S_IFMT as u32;
-        let kind = if file_type == libc::S_IFREG as u32 || file_type == 0 {
+        let file_type = mode & libc::S_IFMT;
+        let kind = if file_type == libc::S_IFREG || file_type == 0 {
             NodeKind::File
-        } else if file_type == libc::S_IFCHR as u32
-            || file_type == libc::S_IFBLK as u32
-            || file_type == libc::S_IFIFO as u32
-            || file_type == libc::S_IFSOCK as u32
+        } else if file_type == libc::S_IFCHR
+            || file_type == libc::S_IFBLK
+            || file_type == libc::S_IFIFO
+            || file_type == libc::S_IFSOCK
         {
             NodeKind::Special
         } else {
@@ -1574,7 +1656,7 @@ impl ArgosFs {
             .get(&parent)
             .and_then(acl::inherited_directory_acl);
         let normalized_mode = if kind == NodeKind::File && file_type == 0 {
-            libc::S_IFREG as u32 | (mode & 0o7777)
+            libc::S_IFREG | (mode & 0o7777)
         } else {
             file_type | (mode & 0o7777)
         };
@@ -1582,8 +1664,8 @@ impl ArgosFs {
             id: ino,
             kind,
             mode: normalized_mode,
-            uid: current_uid(),
-            gid: current_gid(),
+            uid,
+            gid,
             nlink: 1,
             size: 0,
             rdev,
@@ -1676,26 +1758,75 @@ impl ArgosFs {
         new_parent: InodeId,
         new_name: &str,
     ) -> Result<()> {
+        if old_parent == new_parent && old_name == new_name {
+            return Ok(());
+        }
         let child = *self
             .dir_inode_locked(meta, old_parent)?
             .entries
             .get(old_name)
             .ok_or_else(|| ArgosError::NotFound(old_name.to_string()))?;
-        if let Some(existing) = self
+        let child_inode = meta
+            .inodes
+            .get(&child)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {child}")))?
+            .clone();
+        let child_is_dir = child_inode.kind == NodeKind::Directory;
+        self.dir_inode_locked(meta, new_parent)?;
+        if child_is_dir && Self::directory_contains_inode(meta, child, new_parent) {
+            return Err(ArgosError::Invalid(
+                "cannot move a directory into itself".to_string(),
+            ));
+        }
+        let existing = self
             .dir_inode_locked(meta, new_parent)?
             .entries
             .get(new_name)
-            .copied()
-        {
-            let existing_inode = meta.inodes.get(&existing).cloned().unwrap();
-            if existing_inode.kind == NodeKind::Directory && !existing_inode.entries.is_empty() {
-                return Err(ArgosError::DirectoryNotEmpty(new_name.to_string()));
+            .copied();
+        if existing == Some(child) {
+            return Ok(());
+        }
+        let existing_inode = if let Some(existing) = existing {
+            let inode = meta
+                .inodes
+                .get(&existing)
+                .ok_or_else(|| ArgosError::NotFound(format!("inode {existing}")))?
+                .clone();
+            match (&child_inode.kind, &inode.kind) {
+                (NodeKind::Directory, NodeKind::Directory) if !inode.entries.is_empty() => {
+                    return Err(ArgosError::DirectoryNotEmpty(new_name.to_string()));
+                }
+                (NodeKind::Directory, NodeKind::Directory) => {}
+                (NodeKind::Directory, _) => {
+                    return Err(ArgosError::NotDirectory(new_name.to_string()));
+                }
+                (_, NodeKind::Directory) => {
+                    return Err(ArgosError::IsDirectory(new_name.to_string()));
+                }
+                _ => {}
             }
+            Some((existing, inode))
+        } else {
+            None
+        };
+        let mut blocks_to_delete = Vec::new();
+        if let Some((existing, existing_inode)) = existing_inode {
             self.dir_inode_mut_locked(meta, new_parent)?
                 .entries
                 .remove(new_name);
-            self.delete_blocks_locked(meta, &existing_inode.blocks);
-            meta.inodes.remove(&existing);
+            if existing_inode.kind == NodeKind::Directory {
+                meta.inodes.remove(&existing);
+                if let Some(parent_inode) = meta.inodes.get_mut(&new_parent) {
+                    parent_inode.nlink = parent_inode.nlink.saturating_sub(1).max(2);
+                }
+            } else if let Some(live) = meta.inodes.get_mut(&existing) {
+                live.nlink = live.nlink.saturating_sub(1);
+                live.ctime = now_f64();
+                if live.nlink == 0 {
+                    blocks_to_delete = live.blocks.clone();
+                    meta.inodes.remove(&existing);
+                }
+            }
         }
         self.dir_inode_mut_locked(meta, old_parent)?
             .entries
@@ -1703,6 +1834,14 @@ impl ArgosFs {
         self.dir_inode_mut_locked(meta, new_parent)?
             .entries
             .insert(new_name.to_string(), child);
+        if child_is_dir && old_parent != new_parent {
+            if let Some(parent_inode) = meta.inodes.get_mut(&old_parent) {
+                parent_inode.nlink = parent_inode.nlink.saturating_sub(1).max(2);
+            }
+            if let Some(parent_inode) = meta.inodes.get_mut(&new_parent) {
+                parent_inode.nlink = parent_inode.nlink.saturating_add(1);
+            }
+        }
         self.touch_inode_locked(meta, old_parent, true, true);
         self.touch_inode_locked(meta, new_parent, true, true);
         self.touch_inode_locked(meta, child, false, true);
@@ -1710,7 +1849,9 @@ impl ArgosFs {
             meta,
             "rename",
             json!({"old_parent": old_parent, "old_name": old_name, "new_parent": new_parent, "new_name": new_name, "inode": child}),
-        )
+        )?;
+        self.delete_blocks_locked(meta, &blocks_to_delete);
+        Ok(())
     }
 
     fn replace_inode_data(
@@ -1732,6 +1873,7 @@ impl ArgosFs {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn replace_inode_data_locked(
         &self,
         meta: &mut Metadata,
@@ -2225,6 +2367,22 @@ impl ArgosFs {
         Ok(inode)
     }
 
+    fn directory_contains_inode(meta: &Metadata, ancestor: InodeId, needle: InodeId) -> bool {
+        if ancestor == needle {
+            return true;
+        }
+        let Some(inode) = meta.inodes.get(&ancestor) else {
+            return false;
+        };
+        if inode.kind != NodeKind::Directory {
+            return false;
+        }
+        inode
+            .entries
+            .values()
+            .any(|child| Self::directory_contains_inode(meta, *child, needle))
+    }
+
     fn touch_inode_locked(&self, meta: &mut Metadata, ino: InodeId, mtime: bool, ctime: bool) {
         if let Some(inode) = meta.inodes.get_mut(&ino) {
             let now = now_f64();
@@ -2301,7 +2459,7 @@ impl ArgosFs {
             mtime: inode.mtime,
             ctime: inode.ctime,
             blocks: if inode.kind == NodeKind::File {
-                (inode.size.max(1) + 511) / 512
+                inode.size.max(1).div_ceil(512)
             } else {
                 0
             },

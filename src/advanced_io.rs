@@ -89,7 +89,7 @@ fn write_iouring(path: &Path, data: &[u8]) -> Result<()> {
         .mode(0o600)
         .open(path)?;
     let fd = file.as_raw_fd();
-    let mut ring = IoUring::new(2).map_err(|err| ArgosError::Io(err))?;
+    let mut ring = IoUring::new(2).map_err(ArgosError::Io)?;
     let entry = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as _)
         .offset(0)
         .build()
@@ -152,7 +152,7 @@ fn read_iouring(path: &Path, expected_size: usize) -> Result<Vec<u8>> {
 }
 
 fn write_direct(path: &Path, data: &[u8]) -> Result<()> {
-    if data.is_empty() || data.len() % ALIGN != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(ALIGN) {
         return Err(ArgosError::Unsupported(
             "O_DIRECT requires aligned length".to_string(),
         ));
@@ -181,7 +181,7 @@ fn write_direct(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 fn read_direct(path: &Path, expected_size: usize) -> Result<Vec<u8>> {
-    if expected_size == 0 || expected_size % ALIGN != 0 {
+    if expected_size == 0 || !expected_size.is_multiple_of(ALIGN) {
         return Err(ArgosError::Unsupported(
             "O_DIRECT requires aligned length".to_string(),
         ));

@@ -161,9 +161,9 @@ pub fn evaluate_access(inode: &Inode, uid: u32, gid: u32, mask: i32) -> bool {
     if uid == 0 {
         return true;
     }
-    let requested = ((mask & libc::R_OK) != 0) as u16 * ACL_READ
-        | ((mask & libc::W_OK) != 0) as u16 * ACL_WRITE
-        | ((mask & libc::X_OK) != 0) as u16 * ACL_EXECUTE;
+    let requested = (((mask & libc::R_OK) != 0) as u16 * ACL_READ)
+        | (((mask & libc::W_OK) != 0) as u16 * ACL_WRITE)
+        | (((mask & libc::X_OK) != 0) as u16 * ACL_EXECUTE);
     if requested == 0 {
         return true;
     }
@@ -292,9 +292,9 @@ fn parse_perm_bits(value: &str) -> Result<u16> {
             "invalid permission bits: {value}"
         )));
     }
-    Ok((matches!(chars[0], 'r') as u16) * ACL_READ
-        | (matches!(chars[1], 'w') as u16) * ACL_WRITE
-        | (matches!(chars[2], 'x') as u16) * ACL_EXECUTE)
+    Ok(((matches!(chars[0], 'r') as u16) * ACL_READ)
+        | ((matches!(chars[1], 'w') as u16) * ACL_WRITE)
+        | ((matches!(chars[2], 'x') as u16) * ACL_EXECUTE))
 }
 
 fn format_perm_bits(bits: u16) -> String {
