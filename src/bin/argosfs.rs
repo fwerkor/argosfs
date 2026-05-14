@@ -635,7 +635,7 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
     }
     let dest = normalize_dest(dest);
     if dest != "/" {
-        let _ = volume.mkdir(&dest, 0o755);
+        ensure_virtual_dir(volume, &dest, 0o755)?;
     }
     for entry in walkdir::WalkDir::new(source)
         .follow_links(false)
@@ -656,7 +656,7 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
         let ft = meta.file_type();
         let mode = meta.mode();
         if ft.is_dir() {
-            let _ = volume.mkdir(&virtual_path, mode & 0o7777);
+            ensure_virtual_dir(volume, &virtual_path, mode & 0o7777)?;
         } else if ft.is_file() {
             volume.write_file(&virtual_path, &fs::read(path)?, mode & 0o7777)?;
             let ino = volume.resolve_path(&virtual_path, false)?;
@@ -666,6 +666,29 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
             volume.symlink_path(&target.to_string_lossy(), &virtual_path)?;
         } else if ft.is_char_device() || ft.is_block_device() || ft.is_fifo() || ft.is_socket() {
             volume.mknod_path(&virtual_path, mode, meta.rdev() as u32)?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_virtual_dir(volume: &ArgosFs, path: &str, mode: u32) -> Result<()> {
+    let path = normalize_dest(path);
+    if path == "/" {
+        return Ok(());
+    }
+    let mut current = String::new();
+    for part in path.trim_start_matches('/').split('/') {
+        current.push('/');
+        current.push_str(part);
+        match volume.mkdir(&current, if current == path { mode } else { 0o755 }) {
+            Ok(_) => {}
+            Err(ArgosError::AlreadyExists(_)) => {
+                let attr = volume.attr_path(&current, true)?;
+                if attr.kind != argosfs::types::NodeKind::Directory {
+                    bail!("import target exists but is not a directory: {current}");
+                }
+            }
+            Err(err) => return Err(err.into()),
         }
     }
     Ok(())
@@ -686,18 +709,22 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
         }
         match attr.kind {
             argosfs::types::NodeKind::Directory => {
+                prepare_export_target(&target, &attr.kind)?;
                 fs::create_dir_all(&target)?;
                 fs::set_permissions(&target, fs::Permissions::from_mode(attr.mode & 0o7777))?;
             }
             argosfs::types::NodeKind::File => {
+                prepare_export_target(&target, &attr.kind)?;
                 fs::write(&target, volume.read_inode(ino, 0, u64::MAX as usize, true)?)?;
                 fs::set_permissions(&target, fs::Permissions::from_mode(attr.mode & 0o7777))?;
             }
             argosfs::types::NodeKind::Symlink => {
+                prepare_export_target(&target, &attr.kind)?;
                 let link = volume.readlink_inode(ino)?;
-                let _ = std::os::unix::fs::symlink(link, &target);
+                std::os::unix::fs::symlink(link, &target)?;
             }
             argosfs::types::NodeKind::Special => {
+                prepare_export_target(&target, &attr.kind)?;
                 let c_path = CString::new(target.as_os_str().as_bytes())?;
                 let rc = unsafe {
                     libc::mknod(
@@ -714,6 +741,30 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn prepare_export_target(target: &Path, kind: &argosfs::types::NodeKind) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(target) else {
+        return Ok(());
+    };
+    let file_type = metadata.file_type();
+    match kind {
+        argosfs::types::NodeKind::Directory => {
+            if file_type.is_dir() && !file_type.is_symlink() {
+                Ok(())
+            } else {
+                fs::remove_file(target).with_context(|| format!("replace {}", target.display()))
+            }
+        }
+        argosfs::types::NodeKind::File
+        | argosfs::types::NodeKind::Symlink
+        | argosfs::types::NodeKind::Special => {
+            if file_type.is_dir() && !file_type.is_symlink() {
+                bail!("export target exists as a directory: {}", target.display());
+            }
+            fs::remove_file(target).with_context(|| format!("replace {}", target.display()))
+        }
+    }
 }
 
 fn normalize_dest(dest: &str) -> String {

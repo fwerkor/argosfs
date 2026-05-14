@@ -122,6 +122,18 @@ impl BlockCache {
         }
     }
 
+    pub fn remove(&self, key: &str) {
+        let mut inner = self.inner.lock();
+        if let Some(value) = inner.items.remove(key) {
+            inner.bytes = inner.bytes.saturating_sub(value.len());
+        }
+        inner.order.retain(|candidate| candidate != key);
+        drop(inner);
+        if self.l2_limit > 0 {
+            let _ = std::fs::remove_file(self.l2_path(key));
+        }
+    }
+
     pub fn stats(&self) -> BTreeMap<String, serde_json::Value> {
         let inner = self.inner.lock();
         let total = inner.hits + inner.misses + inner.l2_hits;

@@ -1941,7 +1941,9 @@ impl ArgosFs {
         };
         for block in &inode.blocks {
             let cache_key = format!("{}:{}:{}", meta.uuid, block.stripe_id, block.raw_sha256);
-            if let Some(raw) = self.cache.get(&cache_key, Some(&block.raw_sha256)) {
+            if block.encrypted {
+                self.cache.remove(&cache_key);
+            } else if let Some(raw) = self.cache.get(&cache_key, Some(&block.raw_sha256)) {
                 out.extend(raw);
                 continue;
             }
@@ -2027,7 +2029,9 @@ impl ArgosFs {
                     reason: "raw checksum mismatch".to_string(),
                 });
             }
-            self.cache.put(&cache_key, &raw)?;
+            if !block.encrypted {
+                self.cache.put(&cache_key, &raw)?;
+            }
             out.extend(raw);
         }
         let logical_size = usize::try_from(inode.size)

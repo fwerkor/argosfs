@@ -270,12 +270,20 @@ impl Filesystem for ArgosFuse {
     }
 
     fn open(&mut self, req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        let result = self
-            .require_access(req, ino, open_mask(flags))
-            .and_then(|()| self.volume.attr_inode(ino));
+        let result = (|| -> Result<NodeAttr> {
+            self.require_access(req, ino, open_mask(flags))?;
+            let mut attr = self.volume.attr_inode(ino)?;
+            if attr.kind != NodeKind::File {
+                return Err(ArgosError::IsDirectory(format!("inode {ino}")));
+            }
+            if flags & libc::O_TRUNC != 0 {
+                self.volume.truncate_inode(ino, 0)?;
+                attr = self.volume.attr_inode(ino)?;
+            }
+            Ok(attr)
+        })();
         match result {
-            Ok(attr) if attr.kind == NodeKind::File => reply.opened(ino, self.open_reply_flags()),
-            Ok(_) => reply.error(libc::EISDIR),
+            Ok(_) => reply.opened(ino, self.open_reply_flags()),
             Err(err) => reply.error(err.errno()),
         }
     }

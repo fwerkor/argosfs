@@ -8,6 +8,7 @@ use argosfs::ArgosFs;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
@@ -37,6 +38,30 @@ fn shard_abs(fs: &ArgosFs, disk_id: &str, rel: &std::path::Path) -> std::path::P
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
+fn argosfs_binary() -> String {
+    std::env::var("CARGO_BIN_EXE_argosfs").unwrap_or_else(|_| {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        if path.ends_with("deps") {
+            path.pop();
+        }
+        path.push("argosfs");
+        path.to_string_lossy().to_string()
+    })
+}
+
+fn tree_contains_bytes(root: &std::path::Path, needle: &[u8]) -> bool {
+    root.exists()
+        && walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .any(|entry| {
+                fs::read(entry.path())
+                    .is_ok_and(|data| data.windows(needle.len()).any(|window| window == needle))
+            })
 }
 
 #[test]
@@ -393,6 +418,28 @@ fn encryption_requires_key_and_encrypts_shards_at_rest() {
 }
 
 #[test]
+fn encrypted_reads_do_not_persist_plaintext_in_l2_cache() {
+    let _env_guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(2, 2);
+    cfg.l2_cache_bytes = 1024 * 1024;
+    let fs = ArgosFs::create(tmp.path(), cfg, 4, false).unwrap();
+    let key = "cache safety key";
+    let payload = b"argosfs encrypted payload must not be cached in plaintext";
+
+    fs.enable_encryption(key).unwrap();
+    std::env::set_var("ARGOSFS_KEY", key);
+    fs.write_file("/secret", payload, 0o600).unwrap();
+    assert_eq!(fs.read_file("/secret", true).unwrap(), payload);
+    std::env::remove_var("ARGOSFS_KEY");
+
+    assert!(!tree_contains_bytes(
+        &tmp.path().join(".argosfs/cache/l2"),
+        payload
+    ));
+}
+
+#[test]
 fn key_files_accept_crlf_line_endings() {
     let _env_guard = env_lock();
     let tmp = TempDir::new().unwrap();
@@ -448,6 +495,65 @@ fn l2_cache_enforces_limit_and_evicts_bad_entries() {
     assert!(cache.get("bad", Some(&sha256_hex(b"fresh"))).is_none());
     assert_eq!(cache.stats()["memory_items"], serde_json::json!(0));
     assert_eq!(directory_size(&corrupt_root), 0);
+}
+
+#[test]
+fn export_tree_replaces_existing_leaf_symlink_without_following_it() {
+    let tmp = TempDir::new().unwrap();
+    let volume = tmp.path().join("volume");
+    let export = tmp.path().join("export");
+    let outside = tmp.path().join("outside.txt");
+    let binary = argosfs_binary();
+
+    let fs = ArgosFs::create(&volume, config(2, 2), 4, false).unwrap();
+    fs.mkdir("/data", 0o755).unwrap();
+    fs.write_file("/data/file.txt", b"inside export", 0o644)
+        .unwrap();
+    drop(fs);
+
+    fs::create_dir_all(export.join("data")).unwrap();
+    fs::write(&outside, b"outside sentinel").unwrap();
+    std::os::unix::fs::symlink(&outside, export.join("data/file.txt")).unwrap();
+
+    let status = Command::new(binary)
+        .arg("export-tree")
+        .arg(&volume)
+        .arg(&export)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(fs::read(&outside).unwrap(), b"outside sentinel");
+    assert_eq!(
+        fs::read(export.join("data/file.txt")).unwrap(),
+        b"inside export"
+    );
+}
+
+#[test]
+fn import_tree_creates_nested_destination_directories() {
+    let tmp = TempDir::new().unwrap();
+    let volume = tmp.path().join("volume");
+    let source = tmp.path().join("source");
+    let binary = argosfs_binary();
+
+    ArgosFs::create(&volume, config(2, 2), 4, false).unwrap();
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("file.txt"), b"nested import").unwrap();
+
+    let status = Command::new(binary)
+        .arg("import-tree")
+        .arg(&volume)
+        .arg(&source)
+        .arg("/nested/dest")
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let fs = ArgosFs::open(&volume).unwrap();
+    assert_eq!(
+        fs.read_file("/nested/dest/file.txt", true).unwrap(),
+        b"nested import"
+    );
 }
 
 #[test]
