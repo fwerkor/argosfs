@@ -13,7 +13,9 @@ pub const SALT_LEN: usize = 16;
 pub fn passphrase_from_env() -> Result<Option<String>> {
     if let Ok(path) = std::env::var("ARGOSFS_KEY_FILE") {
         return Ok(Some(
-            fs::read_to_string(path)?.trim_end_matches('\n').to_string(),
+            fs::read_to_string(path)?
+                .trim_end_matches(['\r', '\n'])
+                .to_string(),
         ));
     }
     Ok(std::env::var("ARGOSFS_KEY").ok())
@@ -39,8 +41,20 @@ pub fn derive_key_for_config(
     passphrase: &str,
     aad: &[u8],
 ) -> Result<[u8; 32]> {
+    if config.kdf != "argon2id" {
+        return Err(ArgosError::Invalid(format!(
+            "unsupported encryption KDF: {}",
+            config.kdf
+        )));
+    }
     let salt = hex::decode(&config.salt_hex)
         .map_err(|err| ArgosError::Invalid(format!("invalid encryption salt: {err}")))?;
+    if salt.len() != SALT_LEN {
+        return Err(ArgosError::Invalid(format!(
+            "invalid encryption salt length: {}",
+            salt.len()
+        )));
+    }
     let key = derive_key(passphrase, &salt)?;
     let nonce = hex::decode(&config.key_check_nonce_hex)
         .map_err(|err| ArgosError::Invalid(format!("invalid key-check nonce: {err}")))?;

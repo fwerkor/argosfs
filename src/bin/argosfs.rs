@@ -4,7 +4,7 @@ use argosfs::crypto;
 use argosfs::fusefs;
 use argosfs::metrics;
 use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
-use argosfs::ArgosFs;
+use argosfs::{ArgosError, ArgosFs};
 use clap::{Parser, Subcommand};
 use std::ffi::CString;
 use std::fs;
@@ -340,7 +340,8 @@ fn main() -> Result<()> {
             let fs = ArgosFs::open(root)?;
             match fs.unlink_path(&path) {
                 Ok(()) => {}
-                Err(_) => fs.rmdir_path(&path)?,
+                Err(ArgosError::IsDirectory(_)) => fs.rmdir_path(&path)?,
+                Err(err) => return Err(err.into()),
             }
         }
         Command::Mkdir { root, path, mode } => {
@@ -612,7 +613,9 @@ fn load_passphrase(passphrase: Option<String>, key_file: Option<PathBuf>) -> Res
         return Ok(passphrase);
     }
     if let Some(path) = key_file {
-        return Ok(fs::read_to_string(path)?.trim_end_matches('\n').to_string());
+        return Ok(fs::read_to_string(path)?
+            .trim_end_matches(['\r', '\n'])
+            .to_string());
     }
     crypto::passphrase_from_env()?
         .context("provide --passphrase, --key-file, ARGOSFS_KEY, or ARGOSFS_KEY_FILE")

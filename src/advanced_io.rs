@@ -121,7 +121,9 @@ fn write_iouring(path: &Path, data: &[u8]) -> Result<()> {
 
 fn read_iouring(path: &Path, expected_size: usize) -> Result<Vec<u8>> {
     let file = File::open(path)?;
-    let size = expected_size.max(file.metadata()?.len() as usize);
+    let file_size = usize::try_from(file.metadata()?.len())
+        .map_err(|_| ArgosError::Invalid("file is too large to read".to_string()))?;
+    let size = expected_size.max(file_size);
     let mut data = vec![0u8; size];
     if size == 0 {
         return Ok(data);

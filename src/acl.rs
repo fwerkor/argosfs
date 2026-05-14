@@ -56,6 +56,7 @@ pub fn parse_posix_acl(spec: &str) -> Result<PosixAcl> {
                     .map_err(|err| ArgosError::Invalid(format!("invalid ACL id: {err}")))?,
             )
         };
+        validate_acl_id(&tag, id)?;
         entries.push(PosixAclEntry {
             tag,
             id,
@@ -132,7 +133,13 @@ fn parse_posix_acl_binary(value: &[u8]) -> Result<PosixAcl> {
     let mut entries = Vec::new();
     for chunk in value[4..].chunks_exact(8) {
         let raw_tag = u16::from_le_bytes([chunk[0], chunk[1]]);
-        let perms = u16::from_le_bytes([chunk[2], chunk[3]]) & 0o7;
+        let raw_perms = u16::from_le_bytes([chunk[2], chunk[3]]);
+        if raw_perms & !0o7 != 0 {
+            return Err(ArgosError::Invalid(format!(
+                "invalid POSIX ACL xattr perms: {raw_perms:o}"
+            )));
+        }
+        let perms = raw_perms;
         let raw_id = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
         let tag = match raw_tag {
             ACL_USER_OBJ_TAG => PosixAclTag::UserObj,
@@ -148,6 +155,7 @@ fn parse_posix_acl_binary(value: &[u8]) -> Result<PosixAcl> {
             }
         };
         let id = (raw_id != ACL_UNDEFINED_ID).then_some(raw_id);
+        validate_acl_id(&tag, id)?;
         entries.push(PosixAclEntry { tag, id, perms });
     }
     Ok(PosixAcl { entries })
@@ -292,9 +300,32 @@ fn parse_perm_bits(value: &str) -> Result<u16> {
             "invalid permission bits: {value}"
         )));
     }
+    if !matches!(chars[0], 'r' | '-')
+        || !matches!(chars[1], 'w' | '-')
+        || !matches!(chars[2], 'x' | '-')
+    {
+        return Err(ArgosError::Invalid(format!(
+            "invalid permission bits: {value}"
+        )));
+    }
     Ok(((matches!(chars[0], 'r') as u16) * ACL_READ)
         | ((matches!(chars[1], 'w') as u16) * ACL_WRITE)
         | ((matches!(chars[2], 'x') as u16) * ACL_EXECUTE))
+}
+
+fn validate_acl_id(tag: &PosixAclTag, id: Option<u32>) -> Result<()> {
+    match (tag, id) {
+        (PosixAclTag::User | PosixAclTag::Group, None) => Err(ArgosError::Invalid(
+            "named POSIX ACL user/group entries require an id".to_string(),
+        )),
+        (
+            PosixAclTag::UserObj | PosixAclTag::GroupObj | PosixAclTag::Mask | PosixAclTag::Other,
+            Some(_),
+        ) => Err(ArgosError::Invalid(
+            "POSIX ACL owner/group/mask/other entries must not carry an id".to_string(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn format_perm_bits(bits: u16) -> String {

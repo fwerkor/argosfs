@@ -46,6 +46,9 @@ impl BlockCache {
                 inner.order.retain(|candidate| candidate != key);
                 inner.order.push_back(key.to_string());
                 return Some(value);
+            } else if let Some(old) = inner.items.remove(key) {
+                inner.bytes = inner.bytes.saturating_sub(old.len());
+                inner.order.retain(|candidate| candidate != key);
             }
         }
         drop(inner);
@@ -61,6 +64,8 @@ impl BlockCache {
                     drop(inner);
                     let _ = self.put(key, &value);
                     return Some(value);
+                } else {
+                    let _ = std::fs::remove_file(&path);
                 }
             }
         }
@@ -94,6 +99,7 @@ impl BlockCache {
         if self.l2_limit > 0 {
             let path = self.l2_path(key);
             atomic_write(&path, data)?;
+            self.prune_l2()?;
             let mut inner = self.inner.lock();
             inner.l2_writes += 1;
         }
@@ -140,5 +146,42 @@ impl BlockCache {
     fn l2_path(&self, key: &str) -> PathBuf {
         let digest = sha256_hex(key.as_bytes());
         self.root.join(&digest[..2]).join(format!("{digest}.blk"))
+    }
+
+    fn prune_l2(&self) -> Result<()> {
+        let mut files = Vec::new();
+        let mut total = 0u64;
+        for entry in walkdir::WalkDir::new(&self.root)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let len = metadata.len();
+            total = total.saturating_add(len);
+            files.push((metadata.modified().ok(), entry.path().to_path_buf(), len));
+        }
+        if total <= self.l2_limit {
+            return Ok(());
+        }
+        files.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        for (_, path, len) in files {
+            if total <= self.l2_limit {
+                break;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => total = total.saturating_sub(len),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    total = total.saturating_sub(len);
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Ok(())
     }
 }

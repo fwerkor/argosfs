@@ -1,6 +1,9 @@
 use argosfs::acl;
+use argosfs::cache::BlockCache;
+use argosfs::crypto;
 use argosfs::journal;
 use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
+use argosfs::util::{directory_size, sha256_hex};
 use argosfs::ArgosFs;
 use std::ffi::OsStr;
 use std::fs;
@@ -284,6 +287,17 @@ fn auto_probe_latency_feedback_and_hard_capacity_limit() {
 }
 
 #[test]
+fn oversized_stripe_config_returns_error_instead_of_panicking() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(2, 1);
+    cfg.chunk_size = usize::MAX;
+    let fs = ArgosFs::create(tmp.path(), cfg, 3, false).unwrap();
+
+    let err = fs.write_file("/oversized", b"x", 0o644).unwrap_err();
+    assert_eq!(err.errno(), libc::EINVAL);
+}
+
+#[test]
 fn posix_and_nfs4_acl_are_enforced_and_exposed_as_xattrs() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
@@ -332,6 +346,20 @@ fn posix_and_nfs4_acl_are_enforced_and_exposed_as_xattrs() {
 }
 
 #[test]
+fn posix_acl_parser_rejects_malformed_entries() {
+    assert!(acl::parse_posix_acl("user::r-q").is_err());
+    assert!(acl::parse_posix_acl("mask:7:rwx").is_err());
+    assert!(acl::parse_posix_acl("other:99:---").is_err());
+
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(&0x0002u32.to_le_bytes());
+    encoded.extend_from_slice(&0x02u16.to_le_bytes());
+    encoded.extend_from_slice(&0o7u16.to_le_bytes());
+    encoded.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert!(acl::parse_posix_acl_xattr(&encoded).is_err());
+}
+
+#[test]
 fn encryption_requires_key_and_encrypts_shards_at_rest() {
     let _env_guard = env_lock();
     let tmp = TempDir::new().unwrap();
@@ -365,6 +393,18 @@ fn encryption_requires_key_and_encrypts_shards_at_rest() {
 }
 
 #[test]
+fn key_files_accept_crlf_line_endings() {
+    let _env_guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let key_file = tmp.path().join("key");
+    fs::write(&key_file, b"secret\r\n").unwrap();
+
+    std::env::set_var("ARGOSFS_KEY_FILE", &key_file);
+    assert_eq!(crypto::passphrase_from_env().unwrap().unwrap(), "secret");
+    std::env::remove_var("ARGOSFS_KEY_FILE");
+}
+
+#[test]
 fn advanced_io_policy_and_prometheus_metrics_are_live() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
@@ -392,6 +432,22 @@ fn advanced_io_policy_and_prometheus_metrics_are_live() {
     assert!(metrics.contains("argosfs_txid"));
     assert!(metrics.contains("argosfs_disk_read_latency_ms"));
     assert!(metrics.contains("argosfs_io_uring_available"));
+}
+
+#[test]
+fn l2_cache_enforces_limit_and_evicts_bad_entries() {
+    let tmp = TempDir::new().unwrap();
+    let cache = BlockCache::new(tmp.path(), 0, 6);
+    cache.put("a", b"1234").unwrap();
+    cache.put("b", b"5678").unwrap();
+    assert!(directory_size(tmp.path()) <= 6);
+
+    let corrupt_root = tmp.path().join("corrupt");
+    let cache = BlockCache::new(&corrupt_root, 16, 128);
+    cache.put("bad", b"stale").unwrap();
+    assert!(cache.get("bad", Some(&sha256_hex(b"fresh"))).is_none());
+    assert_eq!(cache.stats()["memory_items"], serde_json::json!(0));
+    assert_eq!(directory_size(&corrupt_root), 0);
 }
 
 #[test]

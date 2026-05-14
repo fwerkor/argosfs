@@ -499,8 +499,16 @@ impl ArgosFs {
 
     pub fn truncate_inode(&self, ino: InodeId, size: u64) -> Result<()> {
         let mut data = self.read_inode(ino, 0, u64::MAX as usize, true)?;
-        data.resize(size as usize, 0);
-        self.replace_inode_data(ino, &data, "truncate", json!({"inode": ino, "size": size}))
+        let requested_size = size;
+        let size = usize::try_from(requested_size)
+            .map_err(|_| ArgosError::Invalid("truncate size is too large".to_string()))?;
+        data.resize(size, 0);
+        self.replace_inode_data(
+            ino,
+            &data,
+            "truncate",
+            json!({"inode": ino, "size": requested_size}),
+        )
     }
 
     pub fn readdir(&self, ino: InodeId) -> Result<Vec<DirEntry>> {
@@ -1418,8 +1426,16 @@ impl ArgosFs {
                     for block in &inode.blocks {
                         for shard in &block.shards {
                             let meta = self.meta.lock();
-                            let path =
-                                self.shard_path_locked(&meta, &shard.disk_id, &shard.relpath);
+                            let Some(path) = self.shard_path_if_disk_exists_locked(
+                                &meta,
+                                &shard.disk_id,
+                                &shard.relpath,
+                            ) else {
+                                drop(meta);
+                                report.missing_shards += 1;
+                                damaged = true;
+                                continue;
+                            };
                             let io_mode = meta.config.io_mode;
                             let zero_copy = meta.config.zero_copy;
                             drop(meta);
@@ -2014,7 +2030,9 @@ impl ArgosFs {
             self.cache.put(&cache_key, &raw)?;
             out.extend(raw);
         }
-        out.truncate(inode.size as usize);
+        let logical_size = usize::try_from(inode.size)
+            .map_err(|_| ArgosError::Invalid("inode logical size is too large".to_string()))?;
+        out.truncate(logical_size);
         Ok((out, damaged))
     }
 
@@ -2026,7 +2044,16 @@ impl ArgosFs {
         exclude_disks: &BTreeSet<String>,
     ) -> Result<Vec<FileBlock>> {
         let mut blocks = Vec::new();
-        let stripe_raw_size = meta.config.chunk_size * meta.config.k;
+        let stripe_raw_size = meta
+            .config
+            .chunk_size
+            .checked_mul(meta.config.k)
+            .ok_or_else(|| ArgosError::Invalid("stripe size overflow".to_string()))?;
+        if stripe_raw_size == 0 {
+            return Err(ArgosError::Invalid(
+                "stripe size must be positive".to_string(),
+            ));
+        }
         if data.is_empty() {
             return Ok(blocks);
         }
@@ -2037,7 +2064,10 @@ impl ArgosFs {
         };
         for (index, raw) in data.chunks(stripe_raw_size).enumerate() {
             let stripe_id = format!("s{:016x}", meta.next_stripe);
-            meta.next_stripe += 1;
+            meta.next_stripe = meta
+                .next_stripe
+                .checked_add(1)
+                .ok_or_else(|| ArgosError::Invalid("stripe id overflow".to_string()))?;
             let compressed = compress(raw, meta.config.compression, meta.config.compression_level)?;
             let (payload, encrypted, nonce_hex) = if let Some(key) = encrypt_key.as_ref() {
                 let (nonce, ciphertext) = crypto::encrypt_with_key(
@@ -2051,7 +2081,10 @@ impl ArgosFs {
             };
             let shard_size = payload.len().max(1).div_ceil(meta.config.k);
             let mut padded = payload.clone();
-            padded.resize(shard_size * meta.config.k, 0);
+            let padded_len = shard_size
+                .checked_mul(meta.config.k)
+                .ok_or_else(|| ArgosError::Invalid("encoded shard size overflow".to_string()))?;
+            padded.resize(padded_len, 0);
             let data_shards = padded
                 .chunks(shard_size)
                 .map(|chunk| chunk.to_vec())
@@ -2075,9 +2108,13 @@ impl ArgosFs {
                     shard_data,
                 )?);
             }
+            let raw_offset = index
+                .checked_mul(stripe_raw_size)
+                .and_then(|offset| u64::try_from(offset).ok())
+                .ok_or_else(|| ArgosError::Invalid("raw block offset overflow".to_string()))?;
             blocks.push(FileBlock {
                 stripe_id,
-                raw_offset: (index * stripe_raw_size) as u64,
+                raw_offset,
                 raw_size: raw.len(),
                 raw_sha256: sha256_hex(raw),
                 codec: meta.config.compression,
@@ -2265,8 +2302,11 @@ impl ArgosFs {
             self.cache
                 .invalidate_prefix(&format!("{}:{}:", meta.uuid, block.stripe_id));
             for shard in &block.shards {
-                let path = self.shard_path_locked(meta, &shard.disk_id, &shard.relpath);
-                let _ = fs::remove_file(path);
+                if let Some(path) =
+                    self.shard_path_if_disk_exists_locked(meta, &shard.disk_id, &shard.relpath)
+                {
+                    let _ = fs::remove_file(path);
+                }
             }
         }
     }
@@ -2406,6 +2446,16 @@ impl ArgosFs {
         relative_or_absolute(&self.root, &disk.path).join(relpath)
     }
 
+    fn shard_path_if_disk_exists_locked(
+        &self,
+        meta: &Metadata,
+        disk_id: &str,
+        relpath: &Path,
+    ) -> Option<PathBuf> {
+        let disk = meta.disks.get(disk_id)?;
+        Some(relative_or_absolute(&self.root, &disk.path).join(relpath))
+    }
+
     fn encryption_key_locked(&self, meta: &Metadata) -> Result<[u8; 32]> {
         let passphrase = crypto::passphrase_from_env()?.ok_or_else(|| {
             ArgosError::PermissionDenied(
@@ -2463,7 +2513,7 @@ impl ArgosFs {
             } else {
                 0
             },
-            blksize: chunk_size as u32,
+            blksize: u32::try_from(chunk_size).unwrap_or(u32::MAX),
         }
     }
 }

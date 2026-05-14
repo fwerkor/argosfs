@@ -134,9 +134,22 @@ fn metric(out: &mut String, name: &str, help: &str, value: f64, labels: &[(&str,
             if idx > 0 {
                 out.push(',');
             }
-            out.push_str(&format!("{key}=\"{}\"", value.replace('"', "\\\"")));
+            out.push_str(&format!("{key}=\"{}\"", escape_label_value(value)));
         }
         out.push('}');
     }
     out.push_str(&format!(" {value}\n"));
+}
+
+fn escape_label_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
