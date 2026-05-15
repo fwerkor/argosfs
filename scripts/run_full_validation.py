@@ -254,6 +254,9 @@ def main() -> int:
                 "sha256_ok": sha256(recovered / row["name"]) == row["sha256"],
             }
         )
+    failed_samples = [sample["name"] for sample in samples if not sample["sha256_ok"]]
+    if failed_samples:
+        raise RuntimeError(f"dataset round-trip checksum failed: {failed_samples}")
 
     with (metrics / "io_samples.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
@@ -366,6 +369,9 @@ def main() -> int:
         env={**os.environ, **secure_env},
     )
     (metrics / "final_fsck.json").write_text(final_fsck, encoding="utf-8")
+    final_fsck_report = json.loads(final_fsck)
+    if final_fsck_report.get("unrecoverable_files", 0) or final_fsck_report.get("errors"):
+        raise RuntimeError(f"final fsck failed: {final_fsck_report}")
     shutil.rmtree(volume / ".argosfs" / "cache", ignore_errors=True)
 
     manifest["finished_at"] = time.time()

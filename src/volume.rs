@@ -73,15 +73,16 @@ impl ArgosFs {
         if config.chunk_size == 0 {
             config.chunk_size = VolumeConfig::default().chunk_size;
         }
+        let _ = RsCodec::new(config.k, config.m)?;
         let root = root.as_ref().to_path_buf();
-        if force && root.join(".argosfs/meta.json").exists() {
-            fs::remove_dir_all(root.join(".argosfs"))?;
+        let system = root.join(".argosfs");
+        if force && system.exists() {
+            fs::remove_dir_all(&system)?;
         }
         ensure_dir(&root)?;
-        if root.join(".argosfs/meta.json").exists() {
+        if system.exists() {
             return Err(ArgosError::AlreadyExists(root.display().to_string()));
         }
-        let system = root.join(".argosfs");
         ensure_dir(&system.join("devices"))?;
         ensure_dir(&system.join("snapshots"))?;
         ensure_dir(&system.join("cache"))?;
@@ -263,11 +264,11 @@ impl ArgosFs {
     pub fn lookup(&self, parent: InodeId, name: &OsStr) -> Result<NodeAttr> {
         let meta = self.meta.lock();
         let parent_inode = self.dir_inode_locked(&meta, parent)?;
-        let name = name.to_string_lossy();
+        let name = entry_name_from_os(name)?;
         let child = parent_inode
             .entries
-            .get(name.as_ref())
-            .ok_or_else(|| ArgosError::NotFound(name.to_string()))?;
+            .get(name.as_str())
+            .ok_or_else(|| ArgosError::NotFound(name.clone()))?;
         let inode = meta
             .inodes
             .get(child)
@@ -301,8 +302,9 @@ impl ArgosFs {
         uid: u32,
         gid: u32,
     ) -> Result<NodeAttr> {
+        let name = entry_name_from_os(name)?;
         let mut meta = self.meta.lock();
-        let ino = self.mkdir_locked(&mut meta, parent, &name.to_string_lossy(), mode, uid, gid)?;
+        let ino = self.mkdir_locked(&mut meta, parent, &name, mode, uid, gid)?;
         let inode = meta.inodes.get(&ino).unwrap();
         Ok(Self::attr_from_inode(inode, meta.config.chunk_size))
     }
@@ -341,16 +343,9 @@ impl ArgosFs {
         uid: u32,
         gid: u32,
     ) -> Result<NodeAttr> {
+        let name = entry_name_from_os(name)?;
         let mut meta = self.meta.lock();
-        let ino = self.mknod_locked(
-            &mut meta,
-            parent,
-            &name.to_string_lossy(),
-            mode,
-            rdev,
-            uid,
-            gid,
-        )?;
+        let ino = self.mknod_locked(&mut meta, parent, &name, mode, rdev, uid, gid)?;
         let inode = meta.inodes.get(&ino).unwrap();
         Ok(Self::attr_from_inode(inode, meta.config.chunk_size))
     }
@@ -382,11 +377,12 @@ impl ArgosFs {
         uid: u32,
         gid: u32,
     ) -> Result<NodeAttr> {
+        let name = entry_name_from_os(name)?;
         let mut meta = self.meta.lock();
         let ino = self.mknod_locked(
             &mut meta,
             parent,
-            &name.to_string_lossy(),
+            &name,
             libc::S_IFREG | (mode & 0o7777),
             0,
             uid,
@@ -515,6 +511,7 @@ impl ArgosFs {
         let mut meta = self.meta.lock();
         let chunk = meta.config.chunk_size;
         let inode = self.dir_inode_locked(&meta, ino)?.clone();
+        let parent_ino = self.parent_inode_locked(&meta, ino)?;
         if let Some(live) = meta.inodes.get_mut(&ino) {
             live.access_count = live.access_count.saturating_add(1);
             live.atime = now_f64();
@@ -527,7 +524,7 @@ impl ArgosFs {
         });
         entries.push(DirEntry {
             name: "..".to_string(),
-            attr: Self::attr_from_inode(meta.inodes.get(&ino).unwrap(), chunk),
+            attr: Self::attr_from_inode(meta.inodes.get(&parent_ino).unwrap(), chunk),
         });
         for (name, child) in inode.entries {
             if let Some(child_inode) = meta.inodes.get(&child) {
@@ -548,8 +545,9 @@ impl ArgosFs {
     }
 
     pub fn unlink_at(&self, parent: InodeId, name: &OsStr) -> Result<()> {
+        let name = entry_name_from_os(name)?;
         let mut meta = self.meta.lock();
-        self.unlink_locked(&mut meta, parent, &name.to_string_lossy(), false)
+        self.unlink_locked(&mut meta, parent, &name, false)
     }
 
     pub fn rmdir_path(&self, path: &str) -> Result<()> {
@@ -560,8 +558,9 @@ impl ArgosFs {
     }
 
     pub fn rmdir_at(&self, parent: InodeId, name: &OsStr) -> Result<()> {
+        let name = entry_name_from_os(name)?;
         let mut meta = self.meta.lock();
-        self.unlink_locked(&mut meta, parent, &name.to_string_lossy(), true)
+        self.unlink_locked(&mut meta, parent, &name, true)
     }
 
     pub fn rename_path(&self, old: &str, new: &str) -> Result<()> {
@@ -580,14 +579,10 @@ impl ArgosFs {
         new_parent: InodeId,
         new_name: &OsStr,
     ) -> Result<()> {
+        let old_name = entry_name_from_os(old_name)?;
+        let new_name = entry_name_from_os(new_name)?;
         let mut meta = self.meta.lock();
-        self.rename_locked(
-            &mut meta,
-            old_parent,
-            &old_name.to_string_lossy(),
-            new_parent,
-            &new_name.to_string_lossy(),
-        )
+        self.rename_locked(&mut meta, old_parent, &old_name, new_parent, &new_name)
     }
 
     pub fn symlink_at(&self, parent: InodeId, name: &OsStr, target: &Path) -> Result<NodeAttr> {
@@ -602,9 +597,9 @@ impl ArgosFs {
         uid: u32,
         gid: u32,
     ) -> Result<NodeAttr> {
+        let name = entry_name_from_os(name)?;
         let mut meta = self.meta.lock();
         let now = now_f64();
-        let name = name.to_string_lossy().to_string();
         if self
             .dir_inode_locked(&meta, parent)?
             .entries
@@ -679,8 +674,8 @@ impl ArgosFs {
     }
 
     pub fn link_at(&self, ino: InodeId, new_parent: InodeId, new_name: &OsStr) -> Result<NodeAttr> {
+        let name = entry_name_from_os(new_name)?;
         let mut meta = self.meta.lock();
-        let name = new_name.to_string_lossy().to_string();
         let inode_kind = meta
             .inodes
             .get(&ino)
@@ -740,7 +735,7 @@ impl ArgosFs {
     }
 
     pub fn chmod_path(&self, path: &str, mode: u32) -> Result<()> {
-        let ino = self.resolve_path(path, false)?;
+        let ino = self.resolve_path(path, true)?;
         self.chmod_inode(ino, mode)?;
         Ok(())
     }
@@ -1078,6 +1073,15 @@ impl ArgosFs {
         let stored = path.unwrap_or_else(|| PathBuf::from(format!(".argosfs/devices/{id}")));
         let disk_root = relative_or_absolute(&self.root, &stored);
         ensure_dir(&disk_root.join("shards"))?;
+        let disk_root_canonical = canonical_or_self(&disk_root);
+        if meta.disks.values().any(|disk| {
+            canonical_or_self(&relative_or_absolute(&self.root, &disk.path)) == disk_root_canonical
+        }) {
+            return Err(ArgosError::AlreadyExists(format!(
+                "disk path {}",
+                disk_root.display()
+            )));
+        }
         let probe = probe_disk_path(&disk_root, 1024 * 1024);
         let final_tier = tier.unwrap_or(probe.recommended_tier);
         let final_weight = weight.unwrap_or(probe.recommended_weight).max(0.01);
@@ -1579,6 +1583,7 @@ impl ArgosFs {
         uid: u32,
         gid: u32,
     ) -> Result<InodeId> {
+        validate_entry_name(name)?;
         if self
             .dir_inode_locked(meta, parent)?
             .entries
@@ -1644,6 +1649,7 @@ impl ArgosFs {
         uid: u32,
         gid: u32,
     ) -> Result<InodeId> {
+        validate_entry_name(name)?;
         if self
             .dir_inode_locked(meta, parent)?
             .entries
@@ -1721,6 +1727,7 @@ impl ArgosFs {
         name: &str,
         dir: bool,
     ) -> Result<()> {
+        validate_entry_name(name)?;
         let child = *self
             .dir_inode_locked(meta, parent)?
             .entries
@@ -1774,6 +1781,8 @@ impl ArgosFs {
         new_parent: InodeId,
         new_name: &str,
     ) -> Result<()> {
+        validate_entry_name(old_name)?;
+        validate_entry_name(new_name)?;
         if old_parent == new_parent && old_name == new_name {
             return Ok(());
         }
@@ -1905,8 +1914,14 @@ impl ArgosFs {
                 .inodes
                 .get(&ino)
                 .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
-            if inode.kind != NodeKind::File {
-                return Err(ArgosError::Unsupported("not a regular file".to_string()));
+            match inode.kind {
+                NodeKind::File => {}
+                NodeKind::Directory => {
+                    return Err(ArgosError::IsDirectory(format!("inode {ino}")));
+                }
+                NodeKind::Symlink | NodeKind::Special => {
+                    return Err(ArgosError::Unsupported("not a regular file".to_string()));
+                }
             }
             inode.storage_class
         };
@@ -2104,13 +2119,22 @@ impl ArgosFs {
             )?;
             let mut shards = Vec::new();
             for (slot, shard_data) in encoded.iter().enumerate() {
-                shards.push(self.write_shard_locked(
-                    meta,
-                    &placements[slot],
-                    &stripe_id,
-                    slot,
-                    shard_data,
-                )?);
+                match self.write_shard_locked(meta, &placements[slot], &stripe_id, slot, shard_data)
+                {
+                    Ok(shard) => shards.push(shard),
+                    Err(err) => {
+                        for shard in &shards {
+                            if let Some(path) = self.shard_path_if_disk_exists_locked(
+                                meta,
+                                &shard.disk_id,
+                                &shard.relpath,
+                            ) {
+                                let _ = fs::remove_file(path);
+                            }
+                        }
+                        return Err(err);
+                    }
+                }
             }
             let raw_offset = index
                 .checked_mul(stripe_raw_size)
@@ -2303,8 +2327,10 @@ impl ArgosFs {
 
     fn delete_blocks_locked(&self, meta: &Metadata, blocks: &[FileBlock]) {
         for block in blocks {
-            self.cache
-                .invalidate_prefix(&format!("{}:{}:", meta.uuid, block.stripe_id));
+            self.cache.remove(&format!(
+                "{}:{}:{}",
+                meta.uuid, block.stripe_id, block.raw_sha256
+            ));
             for shard in &block.shards {
                 if let Some(path) =
                     self.shard_path_if_disk_exists_locked(meta, &shard.disk_id, &shard.relpath)
@@ -2411,6 +2437,20 @@ impl ArgosFs {
         Ok(inode)
     }
 
+    fn parent_inode_locked(&self, meta: &Metadata, ino: InodeId) -> Result<InodeId> {
+        if ino == ROOT_INO {
+            return Ok(ROOT_INO);
+        }
+        meta.inodes
+            .iter()
+            .find_map(|(parent, inode)| {
+                (inode.kind == NodeKind::Directory
+                    && inode.entries.values().any(|child| *child == ino))
+                .then_some(*parent)
+            })
+            .ok_or_else(|| ArgosError::NotFound(format!("parent of inode {ino}")))
+    }
+
     fn directory_contains_inode(meta: &Metadata, ancestor: InodeId, needle: InodeId) -> bool {
         if ancestor == needle {
             return true;
@@ -2513,13 +2553,35 @@ impl ArgosFs {
             mtime: inode.mtime,
             ctime: inode.ctime,
             blocks: if inode.kind == NodeKind::File {
-                inode.size.max(1).div_ceil(512)
+                inode.size.div_ceil(512)
             } else {
                 0
             },
             blksize: u32::try_from(chunk_size).unwrap_or(u32::MAX),
         }
     }
+}
+
+fn entry_name_from_os(name: &OsStr) -> Result<String> {
+    let name = name
+        .to_str()
+        .ok_or_else(|| ArgosError::Invalid("entry name must be valid UTF-8".to_string()))?;
+    validate_entry_name(name)?;
+    Ok(name.to_string())
+}
+
+fn validate_entry_name(name: &str) -> Result<()> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(ArgosError::Invalid(format!("invalid entry name: {name:?}")));
+    }
+    if name.contains('/') || name.contains('\0') {
+        return Err(ArgosError::Invalid(format!("invalid entry name: {name:?}")));
+    }
+    Ok(())
+}
+
+fn canonical_or_self(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn encryption_aad(volume_uuid: &str, stripe_id: &str) -> Vec<u8> {

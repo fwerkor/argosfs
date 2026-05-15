@@ -4,6 +4,7 @@ use argosfs::crypto;
 use argosfs::fusefs;
 use argosfs::metrics;
 use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
+use argosfs::util::clean_path;
 use argosfs::{ArgosError, ArgosFs};
 use clap::{Parser, Subcommand};
 use std::ffi::CString;
@@ -603,6 +604,13 @@ fn main() -> Result<()> {
         Command::VerifyJournal { root } => {
             let report = ArgosFs::audit_transactions(root)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+            if report.invalid_entries > 0 || report.double_write_mismatches > 0 {
+                bail!(
+                    "journal verification failed: invalid_entries={} double_write_mismatches={}",
+                    report.invalid_entries,
+                    report.double_write_mismatches
+                );
+            }
         }
     }
     Ok(())
@@ -768,17 +776,7 @@ fn prepare_export_target(target: &Path, kind: &argosfs::types::NodeKind) -> Resu
 }
 
 fn normalize_dest(dest: &str) -> String {
-    let mut value = dest.trim().to_string();
-    if value.is_empty() {
-        value = "/".to_string();
-    }
-    if !value.starts_with('/') {
-        value.insert(0, '/');
-    }
-    while value.len() > 1 && value.ends_with('/') {
-        value.pop();
-    }
-    value
+    clean_path(dest.trim())
 }
 
 fn kind_name(kind: &argosfs::types::NodeKind) -> &'static str {

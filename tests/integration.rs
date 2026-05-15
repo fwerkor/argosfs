@@ -8,7 +8,7 @@ use argosfs::ArgosFs;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
@@ -121,6 +121,137 @@ fn create_entry_owner_can_come_from_fuse_request() {
         .unwrap();
     assert_eq!(link.uid, 3456);
     assert_eq!(link.gid, 7890);
+}
+
+#[test]
+fn invalid_entry_names_are_rejected_before_metadata_changes() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    assert_eq!(
+        fs.create_file_at(1, OsStr::new("."), 0o644)
+            .unwrap_err()
+            .errno(),
+        libc::EINVAL
+    );
+    assert_eq!(
+        fs.mkdir_at(1, OsStr::new("bad/name"), 0o755)
+            .unwrap_err()
+            .errno(),
+        libc::EINVAL
+    );
+    assert_eq!(
+        fs.symlink_at(1, OsStr::new(""), std::path::Path::new("/target"))
+            .unwrap_err()
+            .errno(),
+        libc::EINVAL
+    );
+    assert!(fs.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn readdir_reports_real_parent_for_dotdot() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.mkdir("/parent", 0o755).unwrap();
+    fs.mkdir("/parent/child", 0o755).unwrap();
+    let parent = fs.resolve_path("/parent", false).unwrap();
+    let child = fs.resolve_path("/parent/child", false).unwrap();
+
+    let child_entries = fs.readdir(child).unwrap();
+    assert_eq!(
+        child_entries
+            .iter()
+            .find(|entry| entry.name == "..")
+            .unwrap()
+            .attr
+            .ino,
+        parent
+    );
+
+    let root_entries = fs.readdir(1).unwrap();
+    assert_eq!(
+        root_entries
+            .iter()
+            .find(|entry| entry.name == "..")
+            .unwrap()
+            .attr
+            .ino,
+        1
+    );
+}
+
+#[test]
+fn empty_files_report_zero_blocks_and_directories_reject_stream_writes() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    let empty = fs.create_file_at(1, OsStr::new("empty"), 0o644).unwrap();
+    assert_eq!(empty.size, 0);
+    assert_eq!(empty.blocks, 0);
+
+    fs.mkdir("/dir", 0o755).unwrap();
+    assert_eq!(
+        fs.write_file("/dir", b"not a file", 0o644)
+            .unwrap_err()
+            .errno(),
+        libc::EISDIR
+    );
+}
+
+#[test]
+fn chmod_path_follows_final_symlink_like_posix_chmod() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/target", b"mode", 0o644).unwrap();
+    fs.symlink_path("/target", "/link").unwrap();
+
+    fs.chmod_path("/link", 0o600).unwrap();
+
+    assert_eq!(fs.attr_path("/target", false).unwrap().mode & 0o7777, 0o600);
+    assert_eq!(fs.attr_path("/link", false).unwrap().mode & 0o7777, 0o777);
+}
+
+#[test]
+fn mkfs_force_cleans_partial_system_directory() {
+    let tmp = TempDir::new().unwrap();
+    let partial = tmp.path().join(".argosfs");
+    fs::create_dir_all(&partial).unwrap();
+    fs::write(partial.join("stale"), b"stale").unwrap();
+
+    let err = match ArgosFs::create(tmp.path(), config(2, 2), 4, false) {
+        Ok(_) => panic!("mkfs unexpectedly accepted a partial .argosfs directory"),
+        Err(err) => err,
+    };
+    assert_eq!(err.errno(), libc::EEXIST);
+
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, true).unwrap();
+    assert!(!tmp.path().join(".argosfs/stale").exists());
+    assert_eq!(fs.health_report().disks.len(), 4);
+}
+
+#[test]
+fn add_disk_rejects_duplicate_storage_path() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    let existing = fs
+        .metadata_snapshot()
+        .disks
+        .get("disk-0000")
+        .unwrap()
+        .path
+        .clone();
+
+    let err = fs
+        .add_disk(
+            Some(existing),
+            Some(StorageTier::Warm),
+            Some(1.0),
+            Some(0),
+            false,
+        )
+        .unwrap_err();
+    assert_eq!(err.errno(), libc::EEXIST);
 }
 
 #[test]
@@ -440,6 +571,34 @@ fn encrypted_reads_do_not_persist_plaintext_in_l2_cache() {
 }
 
 #[test]
+fn reencrypt_removes_old_plaintext_l2_cache_entries() {
+    let _env_guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(2, 2);
+    cfg.l2_cache_bytes = 1024 * 1024;
+    let fs = ArgosFs::create(tmp.path(), cfg, 4, false).unwrap();
+    let payload = b"plaintext cached before encryption";
+
+    fs.write_file("/plain", payload, 0o600).unwrap();
+    assert_eq!(fs.read_file("/plain", true).unwrap(), payload);
+    assert!(tree_contains_bytes(
+        &tmp.path().join(".argosfs/cache/l2"),
+        payload
+    ));
+
+    let key = "reencrypt cache cleanup key";
+    fs.enable_encryption(key).unwrap();
+    std::env::set_var("ARGOSFS_KEY", key);
+    fs.rebalance().unwrap();
+    std::env::remove_var("ARGOSFS_KEY");
+
+    assert!(!tree_contains_bytes(
+        &tmp.path().join(".argosfs/cache/l2"),
+        payload
+    ));
+}
+
+#[test]
 fn key_files_accept_crlf_line_endings() {
     let _env_guard = env_lock();
     let tmp = TempDir::new().unwrap();
@@ -557,6 +716,34 @@ fn import_tree_creates_nested_destination_directories() {
 }
 
 #[test]
+fn import_tree_canonicalizes_dotdot_destination_components() {
+    let tmp = TempDir::new().unwrap();
+    let volume = tmp.path().join("volume");
+    let source = tmp.path().join("source");
+    let binary = argosfs_binary();
+
+    ArgosFs::create(&volume, config(2, 2), 4, false).unwrap();
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("file.txt"), b"clean import").unwrap();
+
+    let status = Command::new(binary)
+        .arg("import-tree")
+        .arg(&volume)
+        .arg(&source)
+        .arg("/nested/../clean/./dest/")
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let fs = ArgosFs::open(&volume).unwrap();
+    assert_eq!(
+        fs.read_file("/clean/dest/file.txt", true).unwrap(),
+        b"clean import"
+    );
+    assert!(fs.resolve_path("/nested", false).is_err());
+}
+
+#[test]
 fn journal_replay_recovers_transaction_after_power_loss_point() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
@@ -623,4 +810,28 @@ fn transaction_verifier_flags_bad_journal_tail_without_losing_data() {
 
     let fs = ArgosFs::open(tmp.path()).unwrap();
     assert_eq!(fs.read_file("/journal", true).unwrap(), b"hash chain");
+}
+
+#[test]
+fn verify_journal_cli_exits_nonzero_for_invalid_journal() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/journal", b"hash chain", 0o644).unwrap();
+    drop(fs);
+
+    let mut journal = fs::OpenOptions::new()
+        .append(true)
+        .open(tmp.path().join(".argosfs/journal.jsonl"))
+        .unwrap();
+    writeln!(journal, "{{bad-json").unwrap();
+    journal.sync_all().unwrap();
+
+    let status = Command::new(argosfs_binary())
+        .arg("verify-journal")
+        .arg(tmp.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success());
 }
