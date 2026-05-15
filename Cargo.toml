@@ -22,7 +22,7 @@ argon2 = "0.5"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
-fuser = "0.14"
+fuser = { version = "0.17", features = ["libfuse3"] }
 hex = "0.4"
 io-uring = "0.7"
 libc = "0.2"
@@ -30,7 +30,7 @@ lz4_flex = "0.11"
 memmap2 = "0.9"
 parking_lot = "0.12"
 rand = "0.8"
-reed-solomon-erasure = "6.0"
+erase = "4.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

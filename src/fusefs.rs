@@ -2,16 +2,16 @@ use crate::error::{ArgosError, Result};
 use crate::types::NodeKind;
 use crate::volume::{ArgosFs, NodeAttr};
 use fuser::{
-    FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr,
-    Request, TimeOrNow,
+    AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
+    FopenFlags, Generation, INodeNo, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags,
+    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_secs(1);
-const FOPEN_DIRECT_IO: u32 = 1;
 
 pub struct ArgosFuse {
     volume: ArgosFs,
@@ -22,16 +22,16 @@ impl ArgosFuse {
         Self { volume }
     }
 
-    fn require_access(&self, req: &Request<'_>, ino: u64, mask: i32) -> Result<()> {
+    fn require_access(&self, req: &Request, ino: INodeNo, mask: i32) -> Result<()> {
         self.volume
-            .check_access_inode(ino, req.uid(), req.gid(), mask)
+            .check_access_inode(ino.0, req.uid(), req.gid(), mask)
     }
 
-    fn open_reply_flags(&self) -> u32 {
+    fn open_reply_flags(&self) -> FopenFlags {
         if self.volume.io_policy().direct_io {
-            FOPEN_DIRECT_IO
+            FopenFlags::FOPEN_DIRECT_IO
         } else {
-            0
+            FopenFlags::empty()
         }
     }
 }
@@ -50,41 +50,43 @@ pub fn mount(
     for option in options {
         mount_options.push(MountOption::CUSTOM(option));
     }
-    fuser::mount2(ArgosFuse::new(volume), mountpoint, &mount_options).map_err(ArgosError::Io)
+    let mut config = Config::default();
+    config.mount_options = mount_options;
+    fuser::mount2(ArgosFuse::new(volume), mountpoint, &config).map_err(ArgosError::Io)
 }
 
 impl Filesystem for ArgosFuse {
     fn init(
         &mut self,
-        _req: &Request<'_>,
+        _req: &Request,
         config: &mut KernelConfig,
-    ) -> std::result::Result<(), libc::c_int> {
+    ) -> std::result::Result<(), std::io::Error> {
         let _ = config;
         Ok(())
     }
 
-    fn lookup(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         match self
             .require_access(req, parent, libc::X_OK)
-            .and_then(|()| self.volume.lookup(parent, name))
+            .and_then(|()| self.volume.lookup(parent.0, name))
         {
-            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), 0),
-            Err(err) => reply.error(err.errno()),
+            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), Generation(0)),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
-        match self.volume.attr_inode(ino) {
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        match self.volume.attr_inode(ino.0) {
             Ok(attr) => reply.attr(&TTL, &to_file_attr(&attr)),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn setattr(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
+        &self,
+        req: &Request,
+        ino: INodeNo,
         mode: Option<u32>,
         uid: Option<u32>,
         gid: Option<u32>,
@@ -92,11 +94,11 @@ impl Filesystem for ArgosFuse {
         atime: Option<TimeOrNow>,
         mtime: Option<TimeOrNow>,
         _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
+        _fh: Option<FileHandle>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
+        _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
         let result = (|| -> Result<NodeAttr> {
@@ -109,6 +111,7 @@ impl Filesystem for ArgosFuse {
             {
                 self.require_access(req, ino, libc::W_OK)?;
             }
+            let ino = ino.0;
             let mut attr = self.volume.attr_inode(ino)?;
             if let Some(mode) = mode {
                 attr = self.volume.chmod_inode(ino, mode)?;
@@ -130,21 +133,21 @@ impl Filesystem for ArgosFuse {
         })();
         match result {
             Ok(attr) => reply.attr(&TTL, &to_file_attr(&attr)),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
-        match self.volume.readlink_inode(ino) {
+    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        match self.volume.readlink_inode(ino.0) {
             Ok(target) => reply.data(target.as_bytes()),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     fn mknod(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
+        &self,
+        req: &Request,
+        parent: INodeNo,
         name: &OsStr,
         mode: u32,
         umask: u32,
@@ -155,7 +158,7 @@ impl Filesystem for ArgosFuse {
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
                 self.volume.mknod_at_with_owner(
-                    parent,
+                    parent.0,
                     name,
                     mode & !umask,
                     rdev,
@@ -163,15 +166,15 @@ impl Filesystem for ArgosFuse {
                     req.gid(),
                 )
             }) {
-            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), 0),
-            Err(err) => reply.error(err.errno()),
+            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), Generation(0)),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     fn mkdir(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
+        &self,
+        req: &Request,
+        parent: INodeNo,
         name: &OsStr,
         mode: u32,
         umask: u32,
@@ -181,37 +184,37 @@ impl Filesystem for ArgosFuse {
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
                 self.volume
-                    .mkdir_at_with_owner(parent, name, mode & !umask, req.uid(), req.gid())
+                    .mkdir_at_with_owner(parent.0, name, mode & !umask, req.uid(), req.gid())
             }) {
-            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), 0),
-            Err(err) => reply.error(err.errno()),
+            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), Generation(0)),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn unlink(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+    fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.unlink_at(parent, name))
+            .and_then(|()| self.volume.unlink_at(parent.0, name))
         {
             Ok(()) => reply.ok(),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn rmdir(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+    fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.rmdir_at(parent, name))
+            .and_then(|()| self.volume.rmdir_at(parent.0, name))
         {
             Ok(()) => reply.ok(),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     fn symlink(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
+        &self,
+        req: &Request,
+        parent: INodeNo,
         name: &OsStr,
         link: &Path,
         reply: ReplyEntry,
@@ -220,125 +223,117 @@ impl Filesystem for ArgosFuse {
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
                 self.volume
-                    .symlink_at_with_owner(parent, name, link, req.uid(), req.gid())
+                    .symlink_at_with_owner(parent.0, name, link, req.uid(), req.gid())
             }) {
-            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), 0),
-            Err(err) => reply.error(err.errno()),
+            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), Generation(0)),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     fn rename(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
+        &self,
+        req: &Request,
+        parent: INodeNo,
         name: &OsStr,
-        newparent: u64,
+        newparent: INodeNo,
         newname: &OsStr,
-        flags: u32,
+        flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        if flags != 0 {
-            reply.error(libc::EINVAL);
+        if !flags.is_empty() {
+            reply.error(Errno::EINVAL);
             return;
         }
         let result = self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| self.require_access(req, newparent, libc::W_OK | libc::X_OK))
-            .and_then(|()| self.volume.rename_at(parent, name, newparent, newname));
+            .and_then(|()| self.volume.rename_at(parent.0, name, newparent.0, newname));
         match result {
             Ok(()) => reply.ok(),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     fn link(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        newparent: u64,
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        newparent: INodeNo,
         newname: &OsStr,
         reply: ReplyEntry,
     ) {
         match self
             .require_access(req, ino, libc::R_OK)
             .and_then(|()| self.require_access(req, newparent, libc::W_OK | libc::X_OK))
-            .and_then(|()| self.volume.link_at(ino, newparent, newname))
+            .and_then(|()| self.volume.link_at(ino.0, newparent.0, newname))
         {
-            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), 0),
-            Err(err) => reply.error(err.errno()),
+            Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), Generation(0)),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn open(&mut self, req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
+    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let result = (|| -> Result<NodeAttr> {
             self.require_access(req, ino, open_mask(flags))?;
-            let mut attr = self.volume.attr_inode(ino)?;
+            let mut attr = self.volume.attr_inode(ino.0)?;
             if attr.kind != NodeKind::File {
                 return Err(ArgosError::IsDirectory(format!("inode {ino}")));
             }
-            if flags & libc::O_TRUNC != 0 {
-                self.volume.truncate_inode(ino, 0)?;
-                attr = self.volume.attr_inode(ino)?;
+            if flags.0 & libc::O_TRUNC != 0 {
+                self.volume.truncate_inode(ino.0, 0)?;
+                attr = self.volume.attr_inode(ino.0)?;
             }
             Ok(attr)
         })();
         match result {
-            Ok(_) => reply.opened(ino, self.open_reply_flags()),
-            Err(err) => reply.error(err.errno()),
+            Ok(_) => reply.opened(FileHandle(ino.0), self.open_reply_flags()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     fn read(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        if offset < 0 {
-            reply.error(libc::EINVAL);
-            return;
-        }
-        match self.require_access(req, ino, libc::R_OK).and_then(|()| {
-            self.volume
-                .read_inode(ino, offset as u64, size as usize, true)
-        }) {
+        match self
+            .require_access(req, ino, libc::R_OK)
+            .and_then(|()| self.volume.read_inode(ino.0, offset, size as usize, true))
+        {
             Ok(data) => reply.data(&data),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn write(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _write_flags: WriteFlags,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        if offset < 0 {
-            reply.error(libc::EINVAL);
-            return;
-        }
         match self
             .require_access(req, ino, libc::W_OK)
-            .and_then(|()| self.volume.write_inode_range(ino, offset as u64, data))
+            .and_then(|()| self.volume.write_inode_range(ino.0, offset, data))
         {
             Ok(written) => reply.written(written as u32),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+    fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
         let meta = self.volume.metadata_snapshot();
         let block = meta.config.chunk_size as u64;
         let raw_capacity: u64 = meta
@@ -373,12 +368,12 @@ impl Filesystem for ArgosFuse {
     }
 
     fn release(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        _fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
@@ -386,10 +381,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn fsync(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        _fh: u64,
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
@@ -397,9 +392,9 @@ impl Filesystem for ArgosFuse {
     }
 
     fn setxattr(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
+        &self,
+        req: &Request,
+        ino: INodeNo,
         name: &OsStr,
         value: &[u8],
         _flags: i32,
@@ -408,36 +403,29 @@ impl Filesystem for ArgosFuse {
     ) {
         match self.require_access(req, ino, libc::W_OK).and_then(|()| {
             self.volume
-                .setxattr_inode(ino, &name.to_string_lossy(), value)
+                .setxattr_inode(ino.0, &name.to_string_lossy(), value)
         }) {
             Ok(()) => reply.ok(),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn getxattr(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        name: &OsStr,
-        size: u32,
-        reply: ReplyXattr,
-    ) {
+    fn getxattr(&self, req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
         match self
             .require_access(req, ino, libc::R_OK)
-            .and_then(|()| self.volume.getxattr_inode(ino, &name.to_string_lossy()))
+            .and_then(|()| self.volume.getxattr_inode(ino.0, &name.to_string_lossy()))
         {
             Ok(value) if size == 0 => reply.size(value.len() as u32),
             Ok(value) if value.len() <= size as usize => reply.data(&value),
-            Ok(_) => reply.error(libc::ERANGE),
-            Err(err) => reply.error(err.errno()),
+            Ok(_) => reply.error(Errno::ERANGE),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn listxattr(&mut self, req: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
+    fn listxattr(&self, req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
         match self
             .require_access(req, ino, libc::R_OK)
-            .and_then(|()| self.volume.listxattr_inode(ino))
+            .and_then(|()| self.volume.listxattr_inode(ino.0))
         {
             Ok(names) => {
                 let data = names
@@ -453,34 +441,34 @@ impl Filesystem for ArgosFuse {
                 } else if data.len() <= size as usize {
                     reply.data(&data);
                 } else {
-                    reply.error(libc::ERANGE);
+                    reply.error(Errno::ERANGE);
                 }
             }
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn removexattr(&mut self, req: &Request<'_>, ino: u64, name: &OsStr, reply: ReplyEmpty) {
-        match self
-            .require_access(req, ino, libc::W_OK)
-            .and_then(|()| self.volume.removexattr_inode(ino, &name.to_string_lossy()))
-        {
+    fn removexattr(&self, req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        match self.require_access(req, ino, libc::W_OK).and_then(|()| {
+            self.volume
+                .removexattr_inode(ino.0, &name.to_string_lossy())
+        }) {
             Ok(()) => reply.ok(),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
-    fn access(&mut self, req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
-        match self.require_access(req, ino, mask) {
+    fn access(&self, req: &Request, ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
+        match self.require_access(req, ino, mask.bits()) {
             Ok(()) => reply.ok(),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     fn create(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
+        &self,
+        req: &Request,
+        parent: INodeNo,
         name: &OsStr,
         mode: u32,
         umask: u32,
@@ -491,7 +479,7 @@ impl Filesystem for ArgosFuse {
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
                 self.volume.create_file_at_with_owner(
-                    parent,
+                    parent.0,
                     name,
                     mode & !umask,
                     req.uid(),
@@ -501,31 +489,31 @@ impl Filesystem for ArgosFuse {
             Ok(attr) => reply.created(
                 &TTL,
                 &to_file_attr(&attr),
-                0,
-                attr.ino,
+                Generation(0),
+                FileHandle(attr.ino),
                 self.open_reply_flags(),
             ),
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 
     fn readdir(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         mut reply: ReplyDirectory,
     ) {
         match self
             .require_access(req, ino, libc::R_OK | libc::X_OK)
-            .and_then(|()| self.volume.readdir(ino))
+            .and_then(|()| self.volume.readdir(ino.0))
         {
             Ok(entries) => {
-                for (idx, entry) in entries.into_iter().enumerate().skip(offset.max(0) as usize) {
+                for (idx, entry) in entries.into_iter().enumerate().skip(offset as usize) {
                     let full = reply.add(
-                        entry.attr.ino,
-                        (idx + 1) as i64,
+                        INodeNo(entry.attr.ino),
+                        (idx + 1) as u64,
                         file_type_from_attr(&entry.attr),
                         entry.name,
                     );
@@ -535,14 +523,14 @@ impl Filesystem for ArgosFuse {
                 }
                 reply.ok();
             }
-            Err(err) => reply.error(err.errno()),
+            Err(err) => reply.error(errno(&err)),
         }
     }
 }
 
 fn to_file_attr(attr: &NodeAttr) -> FileAttr {
     FileAttr {
-        ino: attr.ino,
+        ino: INodeNo(attr.ino),
         size: attr.size,
         blocks: attr.blocks,
         atime: f64_to_system_time(attr.atime),
@@ -558,6 +546,10 @@ fn to_file_attr(attr: &NodeAttr) -> FileAttr {
         blksize: attr.blksize,
         flags: 0,
     }
+}
+
+fn errno(err: &ArgosError) -> Errno {
+    Errno::from_i32(err.errno())
 }
 
 fn file_type_from_attr(attr: &NodeAttr) -> FileType {
@@ -596,14 +588,14 @@ fn time_or_now(value: TimeOrNow) -> f64 {
     }
 }
 
-fn open_mask(flags: i32) -> i32 {
-    let mut mask = match flags & libc::O_ACCMODE {
+fn open_mask(flags: OpenFlags) -> i32 {
+    let mut mask = match flags.0 & libc::O_ACCMODE {
         libc::O_RDONLY => libc::R_OK,
         libc::O_WRONLY => libc::W_OK,
         libc::O_RDWR => libc::R_OK | libc::W_OK,
         _ => libc::R_OK,
     };
-    if flags & libc::O_TRUNC != 0 {
+    if flags.0 & libc::O_TRUNC != 0 {
         mask |= libc::W_OK;
     }
     mask

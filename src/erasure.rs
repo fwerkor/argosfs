@@ -1,5 +1,5 @@
 use crate::error::{ArgosError, Result};
-use reed_solomon_erasure::galois_8::ReedSolomon;
+use erase::galois_8::ReedSolomon;
 
 pub struct RsCodec {
     inner: ReedSolomon,

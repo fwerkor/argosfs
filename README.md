@@ -8,7 +8,7 @@ health autopilot, repair tooling, and retained validation data workflows.
 ArgosFS is implemented in Rust for memory safety and future kernel-adjacent
 reuse. The data plane uses mature crates rather than hand-rolled primitives:
 
-- `reed-solomon-erasure` for configurable `k+m` Reed-Solomon layouts.
+- `erase` for configurable `k+m` Reed-Solomon layouts.
 - `fuser`/libfuse3 for the Linux filesystem mount frontend.
 - `zstd` and `lz4_flex` for transparent block compression.
 - `chacha20poly1305` and `argon2` for built-in authenticated encryption.
