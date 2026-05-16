@@ -21,7 +21,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config libfuse3-dev fuse3 smartmontools
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libfuse3-dev fuse3 attr acl smartmontools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -48,6 +48,22 @@ jobs:
       - name: Build release binary
         run: cargo build --release --all-targets --all-features
 
+      - name: Run mounted FUSE compatibility checks when available
+        run: scripts/compat/run_mounted_fuse_compat.sh
+
+      - name: Record pjdfstest compatibility status
+        run: scripts/compat/run_pjdfstest.sh "$RUNNER_TEMP/pjdfstest.jsonl"
+
+      - name: Upload compatibility artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: argosfs-compatibility
+          path: |
+            ${{ runner.temp }}/pjdfstest.jsonl
+            ${{ runner.temp }}/pjdfstest.log
+          if-no-files-found: ignore
+
   retained-validation:
     name: Retained end-to-end validation
     runs-on: ubuntu-latest
@@ -58,7 +74,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config libfuse3-dev fuse3 smartmontools python3
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libfuse3-dev fuse3 attr acl smartmontools python3
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
