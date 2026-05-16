@@ -33,9 +33,21 @@ def main():
         with workload.open() as f:
             rows = list(csv.DictReader(f))
         hot = [float(row["hot_tier_fraction"]) for row in rows]
+        p95 = [float(row["foreground_p95_ms"]) for row in rows]
         summary["workload_shift"] = {
             "samples": len(rows),
             "mean_hot_tier_fraction": statistics.fmean(hot) if hot else 0.0,
+            "mean_foreground_p95_ms": statistics.fmean(p95) if p95 else 0.0,
+        }
+
+    metadata = raw / "metadata-scalability.csv"
+    if metadata.exists():
+        with metadata.open() as f:
+            rows = list(csv.DictReader(f))
+        summary["metadata_scalability"] = {
+            "samples": len(rows),
+            "max_files": max((int(row["files"]) for row in rows), default=0),
+            "max_meta_bytes": max((int(row["meta_bytes"]) for row in rows), default=0),
         }
 
     (processed / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -45,9 +57,35 @@ def main():
         for key, value in summary.items():
             writer.writerow([key, len(value) if isinstance(value, list) else value.get("samples", 0)])
 
-    (figures / "README.md").write_text(
-        "Figures are generated from processed JSON/CSV by paper-specific plotting scripts.\n"
-    )
+    with (tables / "failure-matrix.csv").open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["scenario", "runs", "passed", "failed"])
+        scenarios = sorted({row["scenario"] for row in summary["failure_matrix"]})
+        for scenario in scenarios:
+            rows = [row for row in summary["failure_matrix"] if row["scenario"] == scenario]
+            writer.writerow(
+                [
+                    scenario,
+                    len(rows),
+                    sum(1 for row in rows if row.get("status") == "passed"),
+                    sum(1 for row in rows if row.get("status") == "failed"),
+                ]
+            )
+
+    with (figures / "workload-shift.tsv").open("w", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(["phase", "foreground_p95_ms", "hot_tier_fraction", "rebalance_files"])
+        if workload.exists():
+            with workload.open() as rows_f:
+                for row in csv.DictReader(rows_f):
+                    writer.writerow(
+                        [
+                            row["phase"],
+                            row["foreground_p95_ms"],
+                            row["hot_tier_fraction"],
+                            row["rebalance_files"],
+                        ]
+                    )
 
 
 if __name__ == "__main__":
