@@ -3326,7 +3326,6 @@ impl ArgosFs {
             .filter(|candidate| {
                 candidate.capacity_source == CapacitySource::AutoProbe
                     && candidate.backing_fs_id.as_deref() == Some(fs_id)
-                    && candidate.status == DiskStatus::Online
             })
             .map(|candidate| candidate.used_bytes)
             .sum()

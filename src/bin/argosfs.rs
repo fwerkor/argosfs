@@ -834,11 +834,12 @@ fn apply_export_metadata(
     attr: &argosfs::volume::NodeAttr,
 ) -> Result<()> {
     if let Err(err) = lchown_path(target, attr.uid, attr.gid) {
-        let unprivileged_chown = err
-            .downcast_ref::<io::Error>()
-            .and_then(|err| err.raw_os_error())
-            == Some(libc::EPERM);
-        if !unprivileged_chown {
+        let non_fatal_chown = matches!(
+            err.downcast_ref::<io::Error>()
+                .and_then(|err| err.raw_os_error()),
+            Some(libc::EPERM) | Some(libc::EINVAL)
+        );
+        if !non_fatal_chown {
             return Err(err);
         }
     }
