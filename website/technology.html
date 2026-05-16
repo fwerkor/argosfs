@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Technology | ArgosFS</title>
-    <meta name="description" content="ArgosFS technology overview: erasure coding, placement, metadata, cache, FUSE, and health automation.">
+    <meta name="description" content="ArgosFS technical overview: FUSE request handling, erasure coding, weighted placement, metadata recovery, cache, advanced I/O, and safety-constrained automation.">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
   </head>
@@ -28,37 +28,54 @@
         <div>
           <p class="eyebrow">Technology</p>
           <h1>Storage decisions you can audit.</h1>
-          <p>ArgosFS combines a FUSE frontend, Reed-Solomon shards, tier-aware placement, persistent metadata, and a conservative planner.</p>
+          <p>ArgosFS splits the system into a POSIX-facing FUSE frontend, a shard-oriented data plane, a copy-on-write metadata layer, and a conservative health autopilot.</p>
         </div>
       </section>
 
       <section class="section architecture">
-        <div class="rail">
-          <span>FUSE</span>
-          <span>POSIX metadata</span>
-          <span>Planner</span>
+        <div class="rail architecture-rail">
+          <span>FUSE frontend</span>
+          <span>Permission + ACL layer</span>
+          <span>Stripe transform</span>
+          <span>Placement scorer</span>
           <span>Metadata journal</span>
-          <span>Shard encoder</span>
-          <span>Disk pool</span>
+          <span>Health autopilot</span>
         </div>
         <div class="architecture-copy">
           <h2>Layered for experimentation, not mystery.</h2>
-          <p>The data plane keeps file bytes in compressed, optionally encrypted stripes. The control plane keeps health, capacity, workload, and policy state inspectable in metadata and JSONL logs.</p>
+          <p>The data plane keeps file bytes in compressed and optionally encrypted erasure-coded stripes. The control plane keeps health, capacity, placement, workload, and policy state inspectable through metadata, CLI output, and JSONL experiment logs.</p>
         </div>
       </section>
 
       <section class="section">
-        <div class="section-heading">
+        <div class="section-heading compact-heading">
           <p class="eyebrow">Subsystems</p>
-          <h2>The moving parts.</h2>
+          <h2>The implementation model.</h2>
+          <p>Each subsystem is designed so a researcher can inspect its inputs and outputs rather than treating the filesystem as a black box.</p>
         </div>
-        <div class="feature-grid">
-          <article><h3>Erasure coding</h3><p>Configurable `k+m` Reed-Solomon layouts distribute data and parity shards across online disks.</p></article>
-          <article><h3>Placement policy</h3><p>Weighted rendezvous scoring considers tier, latency, capacity pressure, NUMA locality, and failure domains.</p></article>
-          <article><h3>Metadata integrity</h3><p>Hash-chained journal records and multiple metadata copies recover cleanly from partial writes.</p></article>
-          <article><h3>Advanced I/O</h3><p>Buffered I/O, direct I/O fallback, io_uring fallback, and mmap-backed read staging are selectable.</p></article>
-          <article><h3>L2 cache</h3><p>Persistent cache writes are indexed and pruned incrementally; L2 hits promote into RAM without rewrites.</p></article>
-          <article><h3>Health model</h3><p>SMART, latency, capacity, and fsck observations drive risk scores and bounded action planning.</p></article>
+        <div class="feature-grid feature-grid-4">
+          <article><span>Data plane</span><h3>Stripe lifecycle</h3><p>File data is split into stripes, compressed when configured, encrypted when enabled, encoded into <code class="inline-code">k+m</code> shards, written to selected disks, and referenced from metadata.</p></article>
+          <article><span>Redundancy</span><h3>Reed-Solomon layouts</h3><p>Configurable data and parity counts allow layouts such as 4+2. Degraded reads reconstruct missing shards when enough remaining shards are available.</p></article>
+          <article><span>Placement</span><h3>Weighted rendezvous hashing</h3><p>Placement scores combine stable hashing with disk tier, configured weight, observed latency, remaining capacity, NUMA locality, and failure-domain diversity.</p></article>
+          <article><span>Capacity</span><h3>Hard reservation checks</h3><p>Placement excludes disks with insufficient free shard capacity and rolls back reservations when writes fail, avoiding metadata that points at impossible allocations.</p></article>
+          <article><span>Metadata</span><h3>Copy-on-write commits</h3><p>Metadata writes use journal snapshots, multiple metadata copies, hash validation, replay, and mismatch repair to survive interrupted updates.</p></article>
+          <article><span>Security</span><h3>Authenticated encryption</h3><p>Argon2id-derived keys and XChaCha20-Poly1305 protect stripe contents; invalid or missing keys cause read/write denial rather than silent corruption.</p></article>
+          <article><span>I/O modes</span><h3>Safe advanced I/O</h3><p>Buffered I/O remains the baseline. Direct I/O and io_uring are attempted only when safe, with buffered fallback for unsupported or unaligned cases.</p></article>
+          <article><span>Observability</span><h3>Metrics and artifacts</h3><p>Health JSON, autopilot explanations, Prometheus metrics, fsck reports, CSV timings, and manifests make experiments reproducible.</p></article>
+        </div>
+      </section>
+
+      <section class="section dark-band split-feature">
+        <div>
+          <p class="eyebrow">Control plane</p>
+          <h2>Automation is gated by invariants.</h2>
+          <p>The autopilot plans maintenance from health and workload signals, but it must preserve redundancy, capacity feasibility, metadata consistency, and bootability before it can mutate the volume.</p>
+        </div>
+        <div class="principle-grid principle-grid-tight">
+          <article><span>Safety</span><h3>Never optimize through an unsafe state</h3><p>Actions are rejected when they would violate redundancy or capacity constraints.</p></article>
+          <article><span>Explainability</span><h3>Dry-run before mutation</h3><p>Planner output records selected actions and rejected alternatives.</p></article>
+          <article><span>Bounded work</span><h3>Maintenance is incremental</h3><p>Scrub, rebalance, drain, and self-heal work are budgeted to control interference.</p></article>
+          <article><span>Verification</span><h3>After-action checks close the loop</h3><p>Journal, fsck, and shard validation can downgrade automation when assumptions fail.</p></article>
         </div>
       </section>
 
@@ -69,7 +86,8 @@
         </div>
         <pre><code>argosfs autopilot ROOT --dry-run --explain --json
 argosfs health ROOT --json
-argosfs verify-journal ROOT</code></pre>
+argosfs verify-journal ROOT
+argosfs fsck ROOT --repair --remove-orphans</code></pre>
       </section>
     </main>
 
