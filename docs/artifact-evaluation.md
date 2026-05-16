@@ -2,7 +2,8 @@
 
 ## Requirements
 
-- Linux with libfuse3, `/dev/fuse`, Python 3, Rust stable, and smartmontools
+- Linux with libfuse3, `/dev/fuse`, Python 3, Rust stable, `attr`, `acl`, and
+  smartmontools
 - optional: QEMU, pjdfstest, xfstests, Btrfs/ZFS/mdadm tools for full baselines
 
 ## Build
@@ -28,11 +29,14 @@ documented placeholders.
 ```bash
 scripts/experiments/run_all.sh --full --output paper-data/runs/ae-full
 scripts/compat/run_fuse_smoke.sh
-scripts/compat/run_pjdfstest.sh /mnt/argosfs paper-data/compat/pjdfstest.jsonl
+scripts/compat/run_mounted_fuse_compat.sh
+scripts/compat/run_pjdfstest.sh paper-data/compat/pjdfstest.jsonl
 ```
 
 Full mode is environment-sensitive. QEMU rootfs runs require a prepared root
 image; external baselines require their respective kernel modules and tools.
+FUSE compatibility scripts emit structured skipped records when the runner does
+not expose usable FUSE support.
 
 ## Output Layout
 
