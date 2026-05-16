@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Compatibility | ArgosFS</title>
+    <meta name="description" content="ArgosFS compatibility matrix for FUSE and POSIX-facing behavior.">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body data-page="compatibility">
+    <header class="site-header">
+      <a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a>
+      <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="index.html" data-nav="home">Home</a>
+        <a href="technology.html" data-nav="technology">Technology</a>
+        <a href="research.html" data-nav="research">Research</a>
+        <a href="compatibility.html" data-nav="compatibility">Compatibility</a>
+        <a href="start.html" data-nav="start">Start</a>
+        <a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="page-hero">
+        <canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas>
+        <div>
+          <p class="eyebrow">Compatibility</p>
+          <h1>A real FUSE surface, tested like one.</h1>
+          <p>ArgosFS exposes mounted filesystem behavior for metadata, xattrs, rename flags, sticky directories, non-UTF-8 filenames, and durability hooks.</p>
+        </div>
+      </section>
+
+      <section class="section matrix-section">
+        <div class="compat-matrix">
+          <div class="matrix-head">Area</div><div class="matrix-head">Status</div><div class="matrix-head">Coverage</div>
+          <div>Read/write/create</div><div><span class="status pass">Passed</span></div><div>Rust integration tests and mounted FUSE smoke.</div>
+          <div>chmod/chown/truncate/utimens</div><div><span class="status pass">Passed</span></div><div>Split permission checks in FUSE setattr.</div>
+          <div>xattrs and ACLs</div><div><span class="status bounded">Bounded</span></div><div>`user.*`, POSIX ACLs, and ArgosFS system xattrs are handled explicitly.</div>
+          <div>rename flags</div><div><span class="status pass">Passed</span></div><div>`RENAME_NOREPLACE` and `RENAME_EXCHANGE`; whiteout rejected.</div>
+          <div>non-UTF-8 names</div><div><span class="status pass">Passed</span></div><div>FUSE byte names round-trip through reversible internal encoding.</div>
+          <div>pjdfstest/xfstests</div><div><span class="status planned">Tracked</span></div><div>Scripts emit stable JSONL/skipped records when suites are unavailable.</div>
+        </div>
+      </section>
+
+      <section class="section code-band">
+        <div>
+          <p class="eyebrow">Run locally</p>
+          <h2>Compatibility scripts are plain shell.</h2>
+        </div>
+        <pre><code>scripts/compat/run_fuse_smoke.sh
+scripts/compat/run_pjdfstest.sh /mnt/argosfs paper-data/compat/pjdfstest.jsonl</code></pre>
+      </section>
+    </main>
+
+    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="start.html">Start</a></footer>
+    <script src="app.js"></script>
+  </body>
+</html>

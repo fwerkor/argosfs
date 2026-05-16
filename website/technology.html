@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Technology | ArgosFS</title>
+    <meta name="description" content="ArgosFS technology overview: erasure coding, placement, metadata, cache, FUSE, and health automation.">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body data-page="technology">
+    <header class="site-header">
+      <a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a>
+      <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="index.html" data-nav="home">Home</a>
+        <a href="technology.html" data-nav="technology">Technology</a>
+        <a href="research.html" data-nav="research">Research</a>
+        <a href="compatibility.html" data-nav="compatibility">Compatibility</a>
+        <a href="start.html" data-nav="start">Start</a>
+        <a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="page-hero">
+        <canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas>
+        <div>
+          <p class="eyebrow">Technology</p>
+          <h1>Storage decisions you can audit.</h1>
+          <p>ArgosFS combines a FUSE frontend, Reed-Solomon shards, tier-aware placement, persistent metadata, and a conservative planner.</p>
+        </div>
+      </section>
+
+      <section class="section architecture">
+        <div class="rail">
+          <span>FUSE</span>
+          <span>POSIX metadata</span>
+          <span>Planner</span>
+          <span>Metadata journal</span>
+          <span>Shard encoder</span>
+          <span>Disk pool</span>
+        </div>
+        <div class="architecture-copy">
+          <h2>Layered for experimentation, not mystery.</h2>
+          <p>The data plane keeps file bytes in compressed, optionally encrypted stripes. The control plane keeps health, capacity, workload, and policy state inspectable in metadata and JSONL logs.</p>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <p class="eyebrow">Subsystems</p>
+          <h2>The moving parts.</h2>
+        </div>
+        <div class="feature-grid">
+          <article><h3>Erasure coding</h3><p>Configurable `k+m` Reed-Solomon layouts distribute data and parity shards across online disks.</p></article>
+          <article><h3>Placement policy</h3><p>Weighted rendezvous scoring considers tier, latency, capacity pressure, NUMA locality, and failure domains.</p></article>
+          <article><h3>Metadata integrity</h3><p>Hash-chained journal records and multiple metadata copies recover cleanly from partial writes.</p></article>
+          <article><h3>Advanced I/O</h3><p>Buffered I/O, direct I/O fallback, io_uring fallback, and mmap-backed read staging are selectable.</p></article>
+          <article><h3>L2 cache</h3><p>Persistent cache writes are indexed and pruned incrementally; L2 hits promote into RAM without rewrites.</p></article>
+          <article><h3>Health model</h3><p>SMART, latency, capacity, and fsck observations drive risk scores and bounded action planning.</p></article>
+        </div>
+      </section>
+
+      <section class="section code-band">
+        <div>
+          <p class="eyebrow">Inspectability</p>
+          <h2>Ask the planner before it mutates anything.</h2>
+        </div>
+        <pre><code>argosfs autopilot ROOT --dry-run --explain --json
+argosfs health ROOT --json
+argosfs verify-journal ROOT</code></pre>
+      </section>
+    </main>
+
+    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="start.html">Start</a></footer>
+    <script src="app.js"></script>
+  </body>
+</html>
