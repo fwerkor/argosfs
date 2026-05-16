@@ -3640,7 +3640,12 @@ impl ArgosFs {
             json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details}),
         );
 
-        if result.is_err() {
+        let should_reload = match &result {
+            Err(ArgosError::Conflict(_)) => true,
+            Err(ArgosError::InjectedCrash(point)) if point == "before-journal" => true,
+            _ => false,
+        };
+        if should_reload {
             if let Ok(recovered) = journal::load_or_recover(&self.root) {
                 *meta = recovered.metadata;
                 recompute_disk_usage_from_metadata(meta);
