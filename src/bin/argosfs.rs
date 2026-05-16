@@ -684,6 +684,10 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
     if dest != "/" {
         ensure_virtual_dir(volume, &dest, 0o755)?;
     }
+    let dest_ino = volume.resolve_path(&dest, true)?;
+
+    let mut imported_dirs = std::collections::BTreeMap::<PathBuf, u64>::new();
+    imported_dirs.insert(PathBuf::new(), dest_ino);
 
     let mut directories = Vec::new();
     for entry in walkdir::WalkDir::new(source)
@@ -695,34 +699,88 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
         if path == source {
             continue;
         }
+
         let rel = path.strip_prefix(source)?;
-        let virtual_path = if dest == "/" {
-            format!("/{}", rel.to_string_lossy())
-        } else {
-            format!("{}/{}", dest.trim_end_matches('/'), rel.to_string_lossy())
-        };
+        let parent_rel = rel.parent().unwrap_or_else(|| Path::new(""));
+        let parent_ino = *imported_dirs
+            .get(parent_rel)
+            .with_context(|| format!("missing imported parent for {}", path.display()))?;
+        let name = rel
+            .file_name()
+            .with_context(|| format!("missing file name for {}", path.display()))?;
+
         let meta = fs::symlink_metadata(path)?;
         let ft = meta.file_type();
         let mode = meta.mode();
+
         if ft.is_dir() {
-            ensure_virtual_dir(volume, &virtual_path, mode & 0o7777)?;
-            directories.push((path.to_path_buf(), virtual_path));
+            let ino = match volume.mkdir_at_with_owner(
+                parent_ino,
+                name,
+                mode & 0o7777,
+                meta.uid(),
+                meta.gid(),
+            ) {
+                Ok(attr) => attr.ino,
+                Err(ArgosError::AlreadyExists(_)) => {
+                    let attr = volume.lookup(parent_ino, name)?;
+                    if attr.kind != argosfs::types::NodeKind::Directory {
+                        bail!(
+                            "import target exists but is not a directory: {}",
+                            path.display()
+                        );
+                    }
+                    attr.ino
+                }
+                Err(err) => return Err(err.into()),
+            };
+            imported_dirs.insert(rel.to_path_buf(), ino);
+            directories.push((path.to_path_buf(), ino));
         } else if ft.is_file() {
-            volume.write_file(&virtual_path, &fs::read(path)?, mode & 0o7777)?;
-            apply_import_metadata(volume, path, &virtual_path, &meta)?;
+            let data = fs::read(path)?;
+            let ino = match volume.create_file_at_with_owner(
+                parent_ino,
+                name,
+                mode & 0o7777,
+                meta.uid(),
+                meta.gid(),
+            ) {
+                Ok(attr) => attr.ino,
+                Err(ArgosError::AlreadyExists(_)) => {
+                    let attr = volume.lookup(parent_ino, name)?;
+                    if attr.kind != argosfs::types::NodeKind::File {
+                        bail!("import target exists but is not a file: {}", path.display());
+                    }
+                    volume.truncate_inode(attr.ino, 0)?;
+                    attr.ino
+                }
+                Err(err) => return Err(err.into()),
+            };
+            if !data.is_empty() {
+                volume.write_inode_range(ino, 0, &data)?;
+            }
+            apply_import_metadata(volume, path, ino, &meta)?;
         } else if ft.is_symlink() {
             let target = fs::read_link(path)?;
-            volume.symlink_path(&target.to_string_lossy(), &virtual_path)?;
-            apply_import_metadata(volume, path, &virtual_path, &meta)?;
+            let attr =
+                volume.symlink_at_with_owner(parent_ino, name, &target, meta.uid(), meta.gid())?;
+            apply_import_metadata(volume, path, attr.ino, &meta)?;
         } else if ft.is_char_device() || ft.is_block_device() || ft.is_fifo() || ft.is_socket() {
-            volume.mknod_path(&virtual_path, mode, meta.rdev() as u32)?;
-            apply_import_metadata(volume, path, &virtual_path, &meta)?;
+            let attr = volume.mknod_at_with_owner(
+                parent_ino,
+                name,
+                mode,
+                meta.rdev() as u32,
+                meta.uid(),
+                meta.gid(),
+            )?;
+            apply_import_metadata(volume, path, attr.ino, &meta)?;
         }
     }
 
-    for (path, virtual_path) in directories.into_iter().rev() {
+    for (path, ino) in directories.into_iter().rev() {
         let meta = fs::symlink_metadata(&path)?;
-        apply_import_metadata(volume, &path, &virtual_path, &meta)?;
+        apply_import_metadata(volume, &path, ino, &meta)?;
     }
     Ok(())
 }
@@ -730,10 +788,9 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
 fn apply_import_metadata(
     volume: &ArgosFs,
     source: &Path,
-    virtual_path: &str,
+    ino: u64,
     meta: &fs::Metadata,
 ) -> Result<()> {
-    let ino = volume.resolve_path(virtual_path, false)?;
     let _ = volume.chown_inode(ino, Some(meta.uid()), Some(meta.gid()))?;
     if !meta.file_type().is_symlink() {
         let _ = volume.chmod_inode(ino, meta.mode() & 0o7777)?;
@@ -809,7 +866,8 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
             }
             argosfs::types::NodeKind::Symlink => {
                 prepare_export_target(&target, &attr.kind)?;
-                let link = volume.readlink_inode(ino)?;
+                let link = volume.readlink_inode_bytes(ino)?;
+                let link = Path::new(std::ffi::OsStr::from_bytes(&link));
                 std::os::unix::fs::symlink(link, &target)?;
                 apply_export_metadata(volume, ino, &target, &attr)?;
             }
@@ -940,9 +998,8 @@ fn read_xattrs(path: &Path) -> Result<Vec<(String, Vec<u8>)>> {
         let Ok(name) = std::str::from_utf8(raw_name) else {
             continue;
         };
-        let Ok(value) = read_xattr(path, name) else {
-            continue;
-        };
+        let value = read_xattr(path, name)
+            .with_context(|| format!("read xattr {name:?} from {}", path.display()))?;
         out.push((name.to_string(), value));
     }
     Ok(out)
