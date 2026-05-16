@@ -2221,10 +2221,12 @@ impl ArgosFs {
                     return;
                 }
                 for (name, child) in inode.entries.iter() {
+                    let name_bytes = decode_entry_name_bytes(name);
+                    let display_name = display_entry_name(&name_bytes);
                     let path = if prefix == "/" {
-                        format!("/{name}")
+                        format!("/{display_name}")
                     } else {
-                        format!("{prefix}/{name}")
+                        format!("{prefix}/{display_name}")
                     };
                     out.push((path.clone(), *child));
                     walk(meta, out, &path, *child);
