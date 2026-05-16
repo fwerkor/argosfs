@@ -63,6 +63,7 @@ impl BlockCache {
         }
         drop(inner);
         if self.l2_limit > 0 {
+            let _ = self.load_l2_index();
             let path = self.l2_path(key);
             if let Ok(value) = std::fs::read(&path) {
                 if expected_sha
@@ -71,6 +72,11 @@ impl BlockCache {
                 {
                     let mut inner = self.inner.lock();
                     inner.l2_hits += 1;
+                    inner.l2_clock = inner.l2_clock.saturating_add(1);
+                    let touched = inner.l2_clock;
+                    if let Some(entry) = inner.l2_index.get_mut(&path) {
+                        entry.touched = touched;
+                    }
                     drop(inner);
                     self.put_memory_only(key, &value);
                     return Some(value);

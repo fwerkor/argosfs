@@ -935,6 +935,32 @@ fn l2_cache_enforces_limit_and_evicts_bad_entries() {
 }
 
 #[test]
+fn l2_cache_hit_refreshes_prune_recency_without_rewriting_file() {
+    let tmp = TempDir::new().unwrap();
+
+    {
+        let cache = BlockCache::new(tmp.path(), 0, 8);
+        cache.put("old-hot", b"1111").unwrap();
+        cache.put("old-cold", b"2222").unwrap();
+    }
+
+    let cache = BlockCache::new(tmp.path(), 4, 8);
+    assert_eq!(
+        cache.get("old-hot", Some(&sha256_hex(b"1111"))).unwrap(),
+        b"1111"
+    );
+    assert_eq!(cache.stats()["l2_hits"].as_u64().unwrap(), 1);
+
+    cache.put("new", b"3333").unwrap();
+
+    assert_eq!(
+        cache.get("old-hot", Some(&sha256_hex(b"1111"))).unwrap(),
+        b"1111"
+    );
+    assert!(cache.get("old-cold", Some(&sha256_hex(b"2222"))).is_none());
+}
+
+#[test]
 fn l2_cache_hit_promotes_to_memory_without_rewriting_l2() {
     let tmp = TempDir::new().unwrap();
     let cache = BlockCache::new(tmp.path(), 4, 1024);
