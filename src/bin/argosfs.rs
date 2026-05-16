@@ -509,7 +509,7 @@ fn main() -> Result<()> {
             once,
             dry_run,
             explain,
-            json: _json,
+            json,
             interval,
         } => loop {
             let fs = ArgosFs::open(&root)?;
@@ -518,7 +518,11 @@ fn main() -> Result<()> {
             } else {
                 fs.autopilot_once()?
             };
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
             if once {
                 break;
             }
