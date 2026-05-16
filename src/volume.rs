@@ -773,7 +773,10 @@ impl ArgosFs {
             &old_name,
             new_parent,
             &new_name,
-            RenamePolicy::default(),
+            RenamePolicy {
+                uid: Some(current_uid()),
+                ..RenamePolicy::default()
+            },
         )
     }
 
