@@ -3008,6 +3008,11 @@ impl ArgosFs {
                                 let _ = fs::remove_file(path);
                             }
                         }
+                        for shard in &shards {
+                            if let Some(disk) = meta.disks.get_mut(&shard.disk_id) {
+                                disk.used_bytes = disk.used_bytes.saturating_sub(shard.size as u64);
+                            }
+                        }
                         return Err(err);
                     }
                 }

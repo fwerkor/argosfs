@@ -826,10 +826,10 @@ fn apply_export_metadata(
     target: &Path,
     attr: &argosfs::volume::NodeAttr,
 ) -> Result<()> {
+    lchown_path(target, attr.uid, attr.gid)?;
     if attr.kind != argosfs::types::NodeKind::Symlink {
         fs::set_permissions(target, fs::Permissions::from_mode(attr.mode & 0o7777))?;
     }
-    lchown_path(target, attr.uid, attr.gid)?;
     set_times_nofollow(target, attr.atime, attr.mtime)?;
     for name in volume.listxattr_inode(ino)? {
         let value = volume.getxattr_inode(ino, &name)?;
