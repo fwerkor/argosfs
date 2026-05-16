@@ -7,6 +7,7 @@ use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig}
 use argosfs::util::clean_path;
 use argosfs::{ArgosError, ArgosFs};
 use clap::{Parser, Subcommand};
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read};
@@ -686,8 +687,9 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
     }
     let dest_ino = volume.resolve_path(&dest, true)?;
 
-    let mut imported_dirs = std::collections::BTreeMap::<PathBuf, u64>::new();
+    let mut imported_dirs = BTreeMap::<PathBuf, u64>::new();
     imported_dirs.insert(PathBuf::new(), dest_ino);
+    let mut imported_files = BTreeMap::<(u64, u64), u64>::new();
 
     let mut directories = Vec::new();
     for entry in walkdir::WalkDir::new(source)
@@ -737,6 +739,27 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
             imported_dirs.insert(rel.to_path_buf(), ino);
             directories.push((path.to_path_buf(), ino));
         } else if ft.is_file() {
+            let key = (meta.dev(), meta.ino());
+            if meta.nlink() > 1 {
+                if let Some(existing_ino) = imported_files.get(&key).copied() {
+                    match volume.link_at(existing_ino, parent_ino, name) {
+                        Ok(attr) => {
+                            apply_import_metadata(volume, path, attr.ino, &meta)?;
+                            continue;
+                        }
+                        Err(ArgosError::AlreadyExists(_)) => {
+                            let attr = volume.lookup(parent_ino, name)?;
+                            if attr.ino != existing_ino {
+                                bail!("hardlink import target already exists with a different inode: {}", path.display());
+                            }
+                            apply_import_metadata(volume, path, attr.ino, &meta)?;
+                            continue;
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+            }
+
             let data = fs::read(path)?;
             let ino = match volume.create_file_at_with_owner(
                 parent_ino,
@@ -756,6 +779,9 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
                 }
                 Err(err) => return Err(err.into()),
             };
+            if meta.nlink() > 1 {
+                imported_files.insert(key, ino);
+            }
             if !data.is_empty() {
                 volume.write_inode_range(ino, 0, &data)?;
             }
@@ -770,7 +796,7 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
                 parent_ino,
                 name,
                 mode,
-                meta.rdev() as u32,
+                meta.rdev(),
                 meta.uid(),
                 meta.gid(),
             )?;
@@ -799,18 +825,9 @@ fn apply_import_metadata(
     let mtime = meta.mtime() as f64 + meta.mtime_nsec() as f64 / 1_000_000_000.0;
     let _ = volume.utimens_inode(ino, atime, mtime)?;
     for (name, value) in read_xattrs(source)? {
-        match volume.setxattr_inode(ino, &name, &value) {
-            Ok(()) => {}
-            Err(ArgosError::Unsupported(err)) | Err(ArgosError::PermissionDenied(err))
-                if !name.starts_with("user.") =>
-            {
-                eprintln!(
-                    "warning: skipped unsupported xattr {name:?} on {}: {err}",
-                    source.display()
-                );
-            }
-            Err(err) => return Err(err.into()),
-        }
+        volume
+            .importxattr_inode(ino, &name, &value)
+            .with_context(|| format!("import xattr {name:?} from {}", source.display()))?;
     }
     Ok(())
 }
@@ -844,6 +861,7 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
     paths.sort_by_key(|(path, _)| path.iter().filter(|byte| **byte == b'/').count());
 
     let mut directories = Vec::new();
+    let mut exported_files = BTreeMap::<u64, PathBuf>::new();
     for (path, ino) in paths {
         if path.as_slice() == b"/" {
             continue;
@@ -861,6 +879,20 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
             }
             argosfs::types::NodeKind::File => {
                 prepare_export_target(&target, &attr.kind)?;
+                if attr.nlink > 1 {
+                    if let Some(first_target) = exported_files.get(&ino) {
+                        fs::hard_link(first_target, &target).with_context(|| {
+                            format!(
+                                "hardlink {} -> {}",
+                                target.display(),
+                                first_target.display()
+                            )
+                        })?;
+                        apply_export_metadata(volume, ino, &target, &attr)?;
+                        continue;
+                    }
+                    exported_files.insert(ino, target.clone());
+                }
                 fs::write(&target, volume.read_inode(ino, 0, u64::MAX as usize, true)?)?;
                 apply_export_metadata(volume, ino, &target, &attr)?;
             }
@@ -929,7 +961,29 @@ fn apply_export_metadata(
     set_times_nofollow(target, attr.atime, attr.mtime)?;
     for name in volume.listxattr_inode(ino)? {
         let value = volume.getxattr_inode(ino, &name)?;
-        let _ = write_xattr_nofollow(target, &name, &value);
+        if let Err(err) = write_xattr_nofollow(target, &name, &value) {
+            let non_fatal = matches!(
+                err.downcast_ref::<io::Error>()
+                    .and_then(|err| err.raw_os_error()),
+                Some(libc::EOPNOTSUPP)
+                    | Some(libc::EPERM)
+                    | Some(libc::EACCES)
+                    | Some(libc::EINVAL)
+            );
+            if name == "security.capability" || name.starts_with("user.") {
+                return Err(err)
+                    .with_context(|| format!("write xattr {name:?} to {}", target.display()));
+            }
+            if non_fatal {
+                eprintln!(
+                    "warning: skipped unsupported export xattr {name:?} on {}: {err}",
+                    target.display()
+                );
+            } else {
+                return Err(err)
+                    .with_context(|| format!("write xattr {name:?} to {}", target.display()));
+            }
+        }
     }
     Ok(())
 }
@@ -995,9 +1049,8 @@ fn read_xattrs(path: &Path) -> Result<Vec<(String, Vec<u8>)>> {
         .split(|byte| *byte == 0)
         .filter(|name| !name.is_empty())
     {
-        let Ok(name) = std::str::from_utf8(raw_name) else {
-            continue;
-        };
+        let name = std::str::from_utf8(raw_name)
+            .with_context(|| format!("non-UTF-8 xattr name on {}", path.display()))?;
         let value = read_xattr(path, name)
             .with_context(|| format!("read xattr {name:?} from {}", path.display()))?;
         out.push((name.to_string(), value));

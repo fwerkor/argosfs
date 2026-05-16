@@ -45,6 +45,7 @@ for key in ["prefix_nonutf8", "prefix_utf8", "old_v2_literal"]:
 
 target = os.path.join(b"..", names["nonutf8_dir"], names["nonutf8_file"])
 os.symlink(target, p(names["nonutf8_dir"], names["link"]))
+os.link(p(names["nonutf8_dir"], names["nonutf8_file"]), p(b"hardlink-to-nonutf8-file"))
 
 os.chmod(p(names["nonutf8_dir"], names["nonutf8_file"]), 0o755)
 os.utime(p(names["nonutf8_dir"], names["nonutf8_file"]), ns=(1_700_000_001_123_456_789, 1_700_000_002_987_654_321), follow_symlinks=False)
