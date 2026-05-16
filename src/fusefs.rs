@@ -268,7 +268,11 @@ impl Filesystem for ArgosFuse {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        if flags.contains(RenameFlags::RENAME_WHITEOUT)
+        let supported_flags = RenameFlags::RENAME_NOREPLACE
+            | RenameFlags::RENAME_EXCHANGE
+            | RenameFlags::RENAME_WHITEOUT;
+        if flags.bits() & !supported_flags.bits() != 0
+            || flags.contains(RenameFlags::RENAME_WHITEOUT)
             || flags.contains(RenameFlags::RENAME_NOREPLACE)
                 && flags.contains(RenameFlags::RENAME_EXCHANGE)
         {
