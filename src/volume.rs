@@ -3162,30 +3162,85 @@ impl ArgosFs {
             });
         }
         scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
         let mut selected = Vec::new();
         let mut domains = BTreeSet::new();
+        let mut reserved_by_capacity_group = BTreeMap::<String, u64>::new();
+
+        let capacity_group = |disk: &Disk| -> String {
+            if disk.capacity_source == CapacitySource::AutoProbe {
+                if let Some(fs_id) = disk.backing_fs_id.as_deref() {
+                    return format!("fs:{fs_id}");
+                }
+            }
+            format!("disk:{}", disk.id)
+        };
+
+        let can_reserve = |reservations: &BTreeMap<String, u64>, disk: &Disk| -> bool {
+            let capacity = self.effective_capacity_bytes_locked(meta, disk);
+            if capacity == 0 {
+                return true;
+            }
+            let used = self.effective_used_bytes_locked(meta, disk);
+            let reserved = reservations
+                .get(&capacity_group(disk))
+                .copied()
+                .unwrap_or(0);
+            used.saturating_add(reserved)
+                .saturating_add(request.required_bytes)
+                <= capacity
+        };
+
+        let reserve = |reservations: &mut BTreeMap<String, u64>, disk: &Disk| {
+            let capacity = self.effective_capacity_bytes_locked(meta, disk);
+            if capacity != 0 {
+                let group = capacity_group(disk);
+                *reservations.entry(group).or_default() = reservations
+                    .get(&capacity_group(disk))
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(request.required_bytes);
+            }
+        };
+
         for (_, id) in &scored {
-            let domain = meta
-                .disks
-                .get(id)
-                .map(|disk| disk.failure_domain.as_str())
-                .unwrap_or(id.as_str());
+            let Some(disk) = meta.disks.get(id) else {
+                continue;
+            };
+            if !can_reserve(&reserved_by_capacity_group, disk) {
+                continue;
+            }
+            let domain = disk.failure_domain.as_str();
             if domains.insert(domain.to_string()) {
                 selected.push(id.clone());
+                reserve(&mut reserved_by_capacity_group, disk);
                 if selected.len() == request.count {
                     return Ok(selected);
                 }
             }
         }
+
         for (_, id) in scored {
-            if !selected.contains(&id) {
-                selected.push(id);
-                if selected.len() == request.count {
-                    return Ok(selected);
-                }
+            if selected.contains(&id) {
+                continue;
+            }
+            let Some(disk) = meta.disks.get(&id) else {
+                continue;
+            };
+            if !can_reserve(&reserved_by_capacity_group, disk) {
+                continue;
+            }
+            selected.push(id);
+            reserve(&mut reserved_by_capacity_group, disk);
+            if selected.len() == request.count {
+                return Ok(selected);
             }
         }
-        Ok(selected)
+
+        Err(ArgosError::NotEnoughDisks {
+            need: request.count,
+            have: selected.len(),
+        })
     }
 
     fn disk_has_capacity(
