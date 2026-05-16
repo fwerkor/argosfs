@@ -650,30 +650,52 @@ impl ArgosFs {
     }
 
     pub fn write_inode_range(&self, ino: InodeId, offset: u64, data: &[u8]) -> Result<usize> {
-        let current = self.read_inode(ino, 0, u64::MAX as usize, true)?;
         let start = usize::try_from(offset)
             .map_err(|_| ArgosError::Invalid("write offset is too large".to_string()))?;
         let end = start
             .checked_add(data.len())
             .ok_or_else(|| ArgosError::Invalid("write range is too large".to_string()))?;
-        let mut updated = current;
-        if start > updated.len() {
-            updated.resize(start, 0);
-        }
-        if end > updated.len() {
-            updated.resize(end, 0);
-        }
-        updated[start..end].copy_from_slice(data);
+
         let mut meta = self.meta.lock();
-        self.rewrite_inode_data_from_image_locked(
+        let (old_size, stripe_raw_size) = self.range_update_geometry_locked(&meta, ino)?;
+        let new_size = old_size.max(end);
+        let affected_start = (start / stripe_raw_size) * stripe_raw_size;
+        let affected_end = end
+            .max(old_size.min(new_size))
+            .div_ceil(stripe_raw_size)
+            .saturating_mul(stripe_raw_size)
+            .min(new_size);
+
+        let mut window =
+            self.decode_inode_window_locked(&mut meta, ino, affected_start, affected_end)?;
+        if start > old_size && old_size > affected_start {
+            let gap_start = old_size - affected_start;
+            let gap_end = start - affected_start;
+            window[gap_start..gap_end].fill(0);
+        }
+        if end > affected_end {
+            return Err(ArgosError::Invalid(
+                "write affected window overflow".to_string(),
+            ));
+        }
+        let local_start = start - affected_start;
+        let local_end = local_start + data.len();
+        if local_end > window.len() {
+            window.resize(local_end, 0);
+        }
+        window[local_start..local_end].copy_from_slice(data);
+        window.truncate(affected_end.saturating_sub(affected_start));
+
+        self.rewrite_inode_window_locked(
             &mut meta,
             ino,
-            &updated,
-            start,
-            end,
+            affected_start,
+            affected_end,
+            new_size,
+            &window,
             data.len() as u64,
             "write-range",
-            json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "stripe-range"}),
+            json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "stripe-window-local"}),
         )?;
         Ok(data.len())
     }
@@ -684,26 +706,48 @@ impl ArgosFs {
     }
 
     pub fn truncate_inode(&self, ino: InodeId, size: u64) -> Result<()> {
-        let mut data = self.read_inode(ino, 0, u64::MAX as usize, true)?;
         let requested_size = size;
-        let size = usize::try_from(requested_size)
+        let new_size = usize::try_from(requested_size)
             .map_err(|_| ArgosError::Invalid("truncate size is too large".to_string()))?;
-        data.resize(size, 0);
-        let changed_start = size.min(
-            self.attr_inode(ino)
-                .map(|attr| attr.size as usize)
-                .unwrap_or(size),
-        );
+
         let mut meta = self.meta.lock();
-        self.rewrite_inode_data_from_image_locked(
+        let (old_size, stripe_raw_size) = self.range_update_geometry_locked(&meta, ino)?;
+
+        if new_size == old_size {
+            return Ok(());
+        }
+
+        let changed_start = old_size.min(new_size);
+        let affected_start = (changed_start / stripe_raw_size) * stripe_raw_size;
+        let affected_end = if new_size > affected_start {
+            new_size
+                .div_ceil(stripe_raw_size)
+                .saturating_mul(stripe_raw_size)
+                .min(new_size)
+        } else {
+            affected_start
+        };
+
+        let mut window = if affected_start < affected_end {
+            self.decode_inode_window_locked(&mut meta, ino, affected_start, affected_end)?
+        } else {
+            Vec::new()
+        };
+        window.resize(affected_end.saturating_sub(affected_start), 0);
+        if new_size < affected_end {
+            window.truncate(new_size.saturating_sub(affected_start));
+        }
+
+        self.rewrite_inode_window_locked(
             &mut meta,
             ino,
-            &data,
-            changed_start,
-            size,
+            affected_start,
+            affected_end,
+            new_size,
+            &window,
             0,
             "truncate",
-            json!({"inode": ino, "size": requested_size, "rewrite": "stripe-range"}),
+            json!({"inode": ino, "size": requested_size, "rewrite": "stripe-window-local"}),
         )
     }
 
@@ -2771,19 +2815,22 @@ impl ArgosFs {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn rewrite_inode_data_from_image_locked(
+    fn range_update_geometry_locked(
         &self,
-        meta: &mut Metadata,
+        meta: &Metadata,
         ino: InodeId,
-        data: &[u8],
-        changed_start: usize,
-        changed_end: usize,
-        logical_write_bytes: u64,
-        action: &str,
-        details: serde_json::Value,
-    ) -> Result<()> {
-        let rollback = meta.clone();
+    ) -> Result<(usize, usize)> {
+        let inode = meta
+            .inodes
+            .get(&ino)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+        if inode.kind != NodeKind::File {
+            return Err(ArgosError::Unsupported(
+                "range updates require a regular file".to_string(),
+            ));
+        }
+        let old_size = usize::try_from(inode.size)
+            .map_err(|_| ArgosError::Invalid("inode size is too large".to_string()))?;
         let stripe_raw_size = meta
             .config
             .chunk_size
@@ -2794,7 +2841,70 @@ impl ArgosFs {
                 "stripe size must be positive".to_string(),
             ));
         }
-        let (old_size, storage_class, boot_critical, old_blocks) = {
+        Ok((old_size, stripe_raw_size))
+    }
+
+    fn decode_inode_window_locked(
+        &self,
+        meta: &mut Metadata,
+        ino: InodeId,
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<u8>> {
+        if end <= start {
+            return Ok(Vec::new());
+        }
+        let inode = meta
+            .inodes
+            .get(&ino)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?
+            .clone();
+        if inode.kind != NodeKind::File {
+            return Err(ArgosError::Unsupported(
+                "range updates require a regular file".to_string(),
+            ));
+        }
+
+        let mut out = vec![0u8; end - start];
+        for block in inode.blocks.iter().filter(|block| {
+            let block_start = block.raw_offset as usize;
+            let block_end = block_start.saturating_add(block.raw_size);
+            block_end > start && block_start < end
+        }) {
+            let single = Inode {
+                blocks: vec![block.clone()],
+                size: block.raw_size as u64,
+                ..inode.clone()
+            };
+            let (raw, _) = self.decode_inode_data_locked(meta, &single)?;
+            let block_start = block.raw_offset as usize;
+            let copy_start = block_start.max(start);
+            let copy_end = block_start.saturating_add(raw.len()).min(end);
+            if copy_end > copy_start {
+                let dst_start = copy_start - start;
+                let src_start = copy_start - block_start;
+                let len = copy_end - copy_start;
+                out[dst_start..dst_start + len].copy_from_slice(&raw[src_start..src_start + len]);
+            }
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rewrite_inode_window_locked(
+        &self,
+        meta: &mut Metadata,
+        ino: InodeId,
+        affected_start: usize,
+        affected_end: usize,
+        new_size: usize,
+        window: &[u8],
+        logical_write_bytes: u64,
+        action: &str,
+        details: serde_json::Value,
+    ) -> Result<()> {
+        let rollback = meta.clone();
+        let (storage_class, boot_critical, old_blocks) = {
             let inode = meta
                 .inodes
                 .get(&ino)
@@ -2805,54 +2915,43 @@ impl ArgosFs {
                 ));
             }
             (
-                usize::try_from(inode.size)
-                    .map_err(|_| ArgosError::Invalid("inode size is too large".to_string()))?,
                 inode.storage_class,
                 inode.boot_critical,
                 inode.blocks.clone(),
             )
         };
-        let new_size = data.len();
-        let first_changed = changed_start.min(new_size.max(old_size));
-        let affected_start = (first_changed / stripe_raw_size) * stripe_raw_size;
-        let mut affected_end = changed_end.max(changed_start).min(new_size);
-        if new_size != old_size {
-            affected_end = new_size;
-        } else if affected_end > affected_start {
-            affected_end = affected_end.div_ceil(stripe_raw_size) * stripe_raw_size;
-            affected_end = affected_end.min(new_size);
-        }
-        if affected_end < affected_start {
-            affected_end = affected_start;
-        }
-        let preserve_suffix = new_size == old_size;
+
         let mut merged = Vec::new();
         let mut replaced = Vec::new();
         for block in old_blocks {
-            let block_start = block.raw_offset;
-            let block_end = block.raw_offset.saturating_add(block.raw_size as u64);
-            if block_end <= affected_start as u64
-                || (preserve_suffix && block_start >= affected_end as u64)
-            {
-                merged.push(block);
+            let block_start = block.raw_offset as usize;
+            let block_end = block_start.saturating_add(block.raw_size);
+            if block_end <= affected_start || block_start >= affected_end {
+                if block_start < new_size {
+                    merged.push(block);
+                } else {
+                    replaced.push(block);
+                }
             } else {
                 replaced.push(block);
             }
         }
-        let mut written_blocks = Vec::new();
-        if affected_start < affected_end {
-            let new_blocks = self.encode_data_locked(
+
+        let written_blocks = if !window.is_empty() {
+            self.encode_data_locked(
                 meta,
-                &data[affected_start..affected_end],
+                window,
                 affected_start as u64,
                 storage_class,
                 boot_critical,
                 &BTreeSet::new(),
-            )?;
-            written_blocks = new_blocks.clone();
-            merged.extend(new_blocks);
-        }
+            )?
+        } else {
+            Vec::new()
+        };
+        merged.extend(written_blocks.clone());
         merged.sort_by_key(|block| block.raw_offset);
+
         let now = now_f64();
         let inode = meta.inodes.get_mut(&ino).unwrap();
         inode.blocks = merged;
@@ -2863,6 +2962,7 @@ impl ArgosFs {
         inode.workload_score = inode.workload_score * 0.90 + 2.0;
         inode.mtime = now;
         inode.ctime = now;
+
         self.account_blocks_locked(meta, &replaced, false);
         if let Err(err) = self.commit_locked(meta, action, details) {
             if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
