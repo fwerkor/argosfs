@@ -3462,11 +3462,18 @@ impl ArgosFs {
                 .ok_or_else(|| ArgosError::NotFound(format!("inode {next}")))?;
             let final_component = idx + 1 == parts.len();
             if child.kind == NodeKind::Symlink && (follow_final || !final_component) {
-                let target = child.target.clone().unwrap_or_default();
+                let target_bytes =
+                    decode_symlink_target_bytes(child.target.as_deref().unwrap_or_default());
+                let target = std::str::from_utf8(&target_bytes).map_err(|_| {
+                    ArgosError::Invalid(
+                        "non-UTF-8 symlink targets cannot be followed by string path APIs"
+                            .to_string(),
+                    )
+                })?;
                 let rest = parts[idx + 1..].join("/");
                 let new_path = if target.starts_with('/') {
                     if rest.is_empty() {
-                        target
+                        target.to_string()
                     } else {
                         format!("{target}/{rest}")
                     }

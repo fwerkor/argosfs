@@ -94,6 +94,34 @@ fn write_read_and_posix_metadata() {
 }
 
 #[test]
+fn symlink_resolution_decodes_internal_targets_safely() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    fs.write_file("/utf8-target", b"utf8", 0o644).unwrap();
+    fs.symlink_path("/utf8-target", "/utf8-link").unwrap();
+    assert_eq!(fs.read_file("/utf8-link", true).unwrap(), b"utf8");
+
+    let raw_name = OsString::from_vec(vec![b'n', b'o', b'n', 0xff]);
+    let raw_path = std::path::PathBuf::from("/").join(&raw_name);
+    fs.create_file_at(1, &raw_name, 0o644).unwrap();
+    let ino = fs.lookup(1, &raw_name).unwrap().ino;
+    fs.write_inode_range(ino, 0, b"raw-target").unwrap();
+
+    fs.symlink_at(1, OsStr::new("raw-link"), &raw_path).unwrap();
+    let link_ino = fs.resolve_path("/raw-link", false).unwrap();
+    assert_eq!(
+        fs.readlink_inode_bytes(link_ino).unwrap(),
+        raw_path.as_os_str().as_bytes()
+    );
+
+    assert_eq!(
+        fs.read_file("/raw-link", true).unwrap_err().errno(),
+        libc::EINVAL
+    );
+}
+
+#[test]
 fn create_entry_owner_can_come_from_fuse_request() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
