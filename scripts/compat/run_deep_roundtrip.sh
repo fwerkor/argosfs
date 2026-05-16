@@ -117,7 +117,7 @@ if set(a) != set(b):
 
 for rel in sorted(a):
     aa, bb = a[rel], b[rel]
-    for key in ["kind", "data", "target", "xattrs"]:
+    for key in ["kind", "mode", "data", "target", "xattrs"]:
         if aa.get(key) != bb.get(key):
             raise SystemExit(f"mismatch at {rel!r} key={key}: {aa.get(key)!r} != {bb.get(key)!r}")
 
