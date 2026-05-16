@@ -322,7 +322,8 @@ impl ArgosFs {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let recovered = journal::load_or_recover(&root)?;
-        let meta = recovered.metadata;
+        let mut meta = recovered.metadata;
+        recompute_disk_usage_from_metadata(&mut meta);
         if meta.format != FORMAT_VERSION {
             return Err(ArgosError::Invalid(format!(
                 "unsupported format {}",
@@ -3861,6 +3862,20 @@ fn canonical_or_self(path: &Path) -> PathBuf {
 fn sync_directory(path: &Path) {
     if let Ok(dir) = fs::File::open(path) {
         let _ = dir.sync_all();
+    }
+}
+
+fn recompute_disk_usage_from_metadata(meta: &mut Metadata) {
+    let mut referenced_usage = BTreeMap::<String, u64>::new();
+    for inode in meta.inodes.values() {
+        for block in &inode.blocks {
+            for shard in &block.shards {
+                *referenced_usage.entry(shard.disk_id.clone()).or_default() += shard.size as u64;
+            }
+        }
+    }
+    for (disk_id, disk) in meta.disks.iter_mut() {
+        disk.used_bytes = referenced_usage.get(disk_id).copied().unwrap_or(0);
     }
 }
 
