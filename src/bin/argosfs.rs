@@ -635,6 +635,9 @@ fn main() -> Result<()> {
             }
         }
     }
+    for (ino, target, attr) in directories.into_iter().rev() {
+        apply_export_metadata(volume, ino, &target, &attr)?;
+    }
     Ok(())
 }
 
@@ -713,6 +716,9 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
             apply_import_metadata(volume, path, &virtual_path, &meta)?;
         }
     }
+    for (ino, target, attr) in directories.into_iter().rev() {
+        apply_export_metadata(volume, ino, &target, &attr)?;
+    }
     Ok(())
 }
 
@@ -737,6 +743,9 @@ fn apply_import_metadata(
             Err(err) => return Err(err.into()),
         }
     }
+    for (ino, target, attr) in directories.into_iter().rev() {
+        apply_export_metadata(volume, ino, &target, &attr)?;
+    }
     Ok(())
 }
 
@@ -760,6 +769,9 @@ fn ensure_virtual_dir(volume: &ArgosFs, path: &str, mode: u32) -> Result<()> {
             Err(err) => return Err(err.into()),
         }
     }
+    for (ino, target, attr) in directories.into_iter().rev() {
+        apply_export_metadata(volume, ino, &target, &attr)?;
+    }
     Ok(())
 }
 
@@ -767,6 +779,7 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest)?;
     let mut paths = volume.iter_paths();
     paths.sort_by_key(|(path, _)| path.matches('/').count());
+    let mut directories = Vec::new();
     for (path, ino) in paths {
         if path == "/" {
             continue;
@@ -780,7 +793,7 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
             argosfs::types::NodeKind::Directory => {
                 prepare_export_target(&target, &attr.kind)?;
                 fs::create_dir_all(&target)?;
-                apply_export_metadata(volume, ino, &target, &attr)?;
+                directories.push((ino, target, attr));
             }
             argosfs::types::NodeKind::File => {
                 prepare_export_target(&target, &attr.kind)?;
@@ -810,6 +823,9 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
                 apply_export_metadata(volume, ino, &target, &attr)?;
             }
         }
+    }
+    for (ino, target, attr) in directories.into_iter().rev() {
+        apply_export_metadata(volume, ino, &target, &attr)?;
     }
     Ok(())
 }
