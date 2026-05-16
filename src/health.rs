@@ -111,15 +111,14 @@ pub fn classify_inode(inode: &mut Inode) -> StorageTier {
         + inode.access_count as f64 * read_decay
         + inode.write_count as f64 * 2.0 * write_decay;
     inode.workload_score = score;
-    let class = if inode.boot_critical {
-        StorageTier::Hot
-    } else if score >= 8.0 || (score >= 3.0 && inode.size <= 8 * 1024 * 1024) {
-        StorageTier::Hot
-    } else if score < 0.5 && inode.size >= 1024 * 1024 {
-        StorageTier::Cold
-    } else {
-        StorageTier::Warm
-    };
+    let class =
+        if inode.boot_critical || score >= 8.0 || (score >= 3.0 && inode.size <= 8 * 1024 * 1024) {
+            StorageTier::Hot
+        } else if score < 0.5 && inode.size >= 1024 * 1024 {
+            StorageTier::Cold
+        } else {
+            StorageTier::Warm
+        };
     inode.storage_class = class;
     class
 }
