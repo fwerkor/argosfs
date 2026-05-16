@@ -159,8 +159,8 @@ impl Filesystem for ArgosFuse {
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        match self.volume.readlink_inode(ino.0) {
-            Ok(target) => reply.data(target.as_bytes()),
+        match self.volume.readlink_inode_bytes(ino.0) {
+            Ok(target) => reply.data(&target),
             Err(err) => reply.error(errno(&err)),
         }
     }
@@ -456,14 +456,35 @@ impl Filesystem for ArgosFuse {
         ino: INodeNo,
         name: &OsStr,
         value: &[u8],
-        _flags: i32,
+        flags: i32,
         _position: u32,
         reply: ReplyEmpty,
     ) {
-        match self.require_access(req, ino, libc::W_OK).and_then(|()| {
-            self.volume
-                .setxattr_inode(ino.0, &name.to_string_lossy(), value)
-        }) {
+        let result = (|| -> Result<()> {
+            let supported = libc::XATTR_CREATE | libc::XATTR_REPLACE;
+            if flags & !supported != 0
+                || flags & libc::XATTR_CREATE != 0 && flags & libc::XATTR_REPLACE != 0
+            {
+                return Err(ArgosError::Invalid(format!(
+                    "unsupported setxattr flags {flags:#x}"
+                )));
+            }
+
+            self.require_access(req, ino, libc::W_OK)?;
+            let name = name.to_string_lossy();
+            let exists = self.volume.getxattr_inode(ino.0, &name).is_ok();
+
+            if flags & libc::XATTR_CREATE != 0 && exists {
+                return Err(ArgosError::AlreadyExists(format!("xattr {name}")));
+            }
+            if flags & libc::XATTR_REPLACE != 0 && !exists {
+                return Err(ArgosError::NotFound(format!("xattr {name}")));
+            }
+
+            self.volume.setxattr_inode(ino.0, &name, value)
+        })();
+
+        match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
         }

@@ -26,6 +26,7 @@ const ROOT_INO: InodeId = 1;
 const NON_UTF8_NAME_PREFIX: &str = ".argosfs-name-nonutf8-v3:";
 const ESCAPED_UTF8_NAME_PREFIX: &str = ".argosfs-name-utf8-v3:";
 const LEGACY_NON_UTF8_NAME_PREFIX: &str = "\0argosfs-name-hex:";
+const NON_UTF8_SYMLINK_TARGET_PREFIX: &str = "\0argosfs-symlink-target-hex:";
 const BOOT_CRITICAL_XATTR: &str = "system.argosfs.boot_critical";
 
 #[derive(Clone)]
@@ -847,7 +848,8 @@ impl ArgosFs {
             .inodes
             .get(&parent)
             .and_then(acl::inherited_directory_acl);
-        let target_string = target.to_string_lossy().to_string();
+        let target_string = encode_symlink_target(target);
+        let target_size = decode_symlink_target_bytes(&target_string).len() as u64;
         let inode = Inode {
             id: ino,
             kind: NodeKind::Symlink,
@@ -855,7 +857,7 @@ impl ArgosFs {
             uid,
             gid,
             nlink: 1,
-            size: target_string.len() as u64,
+            size: target_size,
             rdev: 0,
             atime: now,
             mtime: now,
@@ -901,6 +903,11 @@ impl ArgosFs {
     }
 
     pub fn readlink_inode(&self, ino: InodeId) -> Result<String> {
+        let bytes = self.readlink_inode_bytes(ino)?;
+        Ok(String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    pub fn readlink_inode_bytes(&self, ino: InodeId) -> Result<Vec<u8>> {
         let meta = self.meta.lock();
         let inode = meta
             .inodes
@@ -909,7 +916,9 @@ impl ArgosFs {
         if inode.kind != NodeKind::Symlink {
             return Err(ArgosError::Invalid("not a symbolic link".to_string()));
         }
-        Ok(inode.target.clone().unwrap_or_default())
+        Ok(decode_symlink_target_bytes(
+            inode.target.as_deref().unwrap_or_default(),
+        ))
     }
 
     pub fn link_at(&self, ino: InodeId, new_parent: InodeId, new_name: &OsStr) -> Result<NodeAttr> {
@@ -3883,6 +3892,21 @@ fn decode_entry_name_bytes(name: &str) -> Vec<u8> {
 
 fn display_entry_name(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| String::from_utf8_lossy(bytes).to_string())
+}
+
+fn encode_symlink_target(target: &Path) -> String {
+    let bytes = target.as_os_str().as_bytes();
+    if let Some(target) = target.to_str() {
+        return target.to_string();
+    }
+    format!("{NON_UTF8_SYMLINK_TARGET_PREFIX}{}", hex::encode(bytes))
+}
+
+fn decode_symlink_target_bytes(target: &str) -> Vec<u8> {
+    target
+        .strip_prefix(NON_UTF8_SYMLINK_TARGET_PREFIX)
+        .and_then(|encoded| hex::decode(encoded).ok())
+        .unwrap_or_else(|| target.as_bytes().to_vec())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
