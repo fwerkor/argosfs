@@ -1,57 +1,32 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Start | ArgosFS</title>
-    <meta name="description" content="Build, test, create, mount, and evaluate ArgosFS.">
-    <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css">
+    <meta name="description" content="Build, test, create, mount, inspect, repair, and evaluate ArgosFS locally.">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="styles.css">
   </head>
   <body data-page="start">
-    <header class="site-header">
-      <a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a>
-      <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button>
-      <nav class="site-nav" aria-label="Primary navigation">
-        <a href="index.html" data-nav="home">Home</a>
-        <a href="technology.html" data-nav="technology">Technology</a>
-        <a href="research.html" data-nav="research">Research</a>
-        <a href="compatibility.html" data-nav="compatibility">Compatibility</a>
-        <a href="start.html" data-nav="start">Start</a>
-        <a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a>
-      </nav>
-    </header>
-
+    <header class="site-header"><a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a><button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button><nav class="site-nav" aria-label="Primary navigation"><a href="index.html" data-nav="home">Home</a><a href="technology.html" data-nav="technology">Technology</a><a href="research.html" data-nav="research">Research</a><a href="compatibility.html" data-nav="compatibility">Compatibility</a><a href="start.html" data-nav="start">Start</a><a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a></nav></header>
     <main>
-      <section class="page-hero">
-        <canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas>
-        <div>
-          <p class="eyebrow">Get started</p>
-          <h1>Build a local autonomous storage lab.</h1>
-          <p>ArgosFS is a Rust project with a management CLI, FUSE mount frontend, retained validation data, and artifact-evaluation scripts.</p>
-        </div>
-      </section>
-
-      <section class="section steps">
-        <article><span>01</span><h3>Install dependencies</h3><pre><code>sudo apt-get install -y build-essential pkg-config libfuse3-dev fuse3 smartmontools</code></pre></article>
-        <article><span>02</span><h3>Build and test</h3><pre><code>cargo build --release
+      <section class="page-hero"><canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas><div><p class="eyebrow">Get started</p><h1>Build a local autonomous storage lab.</h1><p>ArgosFS is a Rust project with a management CLI, FUSE mount frontend, validation scripts, retained artifact data, and experiments for recovery, placement, compatibility, and rootfs behavior.</p></div></section>
+      <section class="section steps"><article><span>01</span><h3>Install dependencies</h3><p>Use a Linux host or VM with FUSE 3 and SMART tooling. Some compatibility tests need elevated privileges.</p><pre><code>sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libfuse3-dev fuse3 smartmontools</code></pre></article><article><span>02</span><h3>Build and test</h3><p>Start with normal Rust checks before mounting a volume.</p><pre><code>cargo build --release
 cargo test
-cargo clippy --all-targets --all-features -- -D warnings</code></pre></article>
-        <article><span>03</span><h3>Create a volume</h3><pre><code>argosfs mkfs /var/lib/argosfs/root --disks 6 --k 4 --m 2 --compression zstd</code></pre></article>
-        <article><span>04</span><h3>Mount and inspect</h3><pre><code>argosfs mount /var/lib/argosfs/root /mnt/argos-root --foreground
-argosfs health /var/lib/argosfs/root --json</code></pre></article>
-      </section>
-
-      <section class="section callout">
-        <div>
-          <p class="eyebrow">Repository</p>
-          <h2>Everything starts from the GitHub repo.</h2>
-        </div>
-        <a class="button primary" href="https://github.com/fwerkor/argosfs">Clone ArgosFS</a>
-      </section>
+cargo clippy --all-targets --all-features -- -D warnings</code></pre></article><article><span>03</span><h3>Create a volume</h3><p>Create a small local test volume with multiple logical disks and an erasure-coded layout.</p><pre><code>target/release/argosfs mkfs /var/lib/argosfs/root \
+  --disks 6 --k 4 --m 2 --compression zstd</code></pre></article><article><span>04</span><h3>Mount and inspect</h3><p>Mount in foreground while testing, then inspect health and planner output before enabling mutation.</p><pre><code>target/release/argosfs mount /var/lib/argosfs/root /mnt/argos-root --foreground
+target/release/argosfs health /var/lib/argosfs/root --json
+target/release/argosfs autopilot /var/lib/argosfs/root --dry-run --explain --json</code></pre></article></section>
+      <section class="section dark-band"><div class="section-heading compact-heading"><p class="eyebrow">Suggested workflow</p><h2>Do not start by trusting automation.</h2><p>The safest path is to build confidence in layers: compile, run unit/integration tests, create a throwaway volume, mount it, run smoke tests, inspect health output, then run autopilot in dry-run mode before any maintenance action.</p></div><div class="feature-grid feature-grid-4"><article><span>Smoke</span><h3>Basic mounted behavior</h3><p>Create files, rename paths, test xattrs, sync writes, and unmount cleanly before running deeper experiments.</p></article><article><span>Health</span><h3>Inspect disk state</h3><p>Use JSON health output to confirm device discovery, capacity accounting, SMART refresh state, and stale telemetry markers.</p></article><article><span>Plan</span><h3>Dry-run first</h3><p>Planner explanations show selected actions and rejected alternatives without mutating the volume.</p></article><article><span>Repair</span><h3>Validate after faults</h3><p>After simulated failures, run fsck, journal verification, and shard recovery before trusting the mount again.</p></article></div></section>
+      <section class="section detail-split"><div><p class="eyebrow">Common commands</p><h2>Useful CLI surfaces.</h2><p>The CLI is meant for both operation and research. Most commands can be used manually, scripted in experiments, or captured as artifacts.</p></div><div class="detail-panel"><span>Command map</span><h3>What to inspect</h3><ul><li><code class="inline-code">health --json</code>: disk health, capacity, parser status, and risk signals.</li><li><code class="inline-code">autopilot --dry-run --explain --json</code>: planned maintenance without mutation.</li><li><code class="inline-code">fsck --repair</code>: metadata, orphan, and consistency repair checks.</li><li><code class="inline-code">verify-journal</code>: journal snapshot and hash-chain validation.</li><li><code class="inline-code">export</code> / <code class="inline-code">import</code>: rootfs and metadata roundtrip testing.</li><li><code class="inline-code">metrics</code>: Prometheus-oriented observability output for experiments.</li></ul></div></section>
+      <section class="section code-band"><div><p class="eyebrow">Experiment mode</p><h2>Generate artifacts instead of screenshots.</h2><p>For paper-style evaluation, use the experiment scripts so results include raw records, summaries, and manifests.</p></div><pre><code>scripts/compat/run_fuse_smoke.sh
+scripts/compat/run_deep_roundtrip.sh /mnt/argos-root
+scripts/experiments/run_all.sh --quick --output paper-data/runs/ae-quick
+python3 scripts/experiments/summarize_results.py \
+  paper-data/runs/ae-quick/raw \
+  paper-data/runs/ae-quick</code></pre></section>
+      <section class="section callout"><div><p class="eyebrow">Repository</p><h2>Everything starts from the GitHub repo.</h2></div><a class="button primary" href="https://github.com/fwerkor/argosfs">Clone ArgosFS</a></section>
     </main>
-
-    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="technology.html">Technology</a></footer>
-    <script src="app.js"></script>
+    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="technology.html">Technology</a></footer><script src="app.js"></script>
   </body>
 </html>
