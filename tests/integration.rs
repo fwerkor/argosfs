@@ -642,8 +642,12 @@ fn stale_metadata_commits_are_rejected_instead_of_overwriting_newer_state() {
     let err = fs2.write_file("/stale", b"stale", 0o644).unwrap_err();
     assert!(matches!(err, ArgosError::Conflict(_)));
 
+    assert_eq!(fs2.read_file("/fresh", true).unwrap(), b"fresh");
+    fs2.write_file("/after-conflict", b"ok", 0o644).unwrap();
+
     let reopened = ArgosFs::open(tmp.path()).unwrap();
     assert_eq!(reopened.read_file("/fresh", true).unwrap(), b"fresh");
+    assert_eq!(reopened.read_file("/after-conflict", true).unwrap(), b"ok");
     assert!(matches!(
         reopened.read_file("/stale", true).unwrap_err(),
         ArgosError::NotFound(_)
