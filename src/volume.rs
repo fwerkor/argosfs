@@ -2752,10 +2752,10 @@ impl ArgosFs {
         inode.ctime = now;
         self.account_blocks_locked(meta, &old_blocks, false);
         if let Err(err) = self.commit_locked(meta, action, details) {
-            if matches!(&err, ArgosError::Conflict(_))
-                || matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal")
-            {
+            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
                 *meta = rollback;
+                self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
+            } else if matches!(&err, ArgosError::Conflict(_)) {
                 self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
             }
             return Err(err);
@@ -2858,10 +2858,10 @@ impl ArgosFs {
         inode.ctime = now;
         self.account_blocks_locked(meta, &replaced, false);
         if let Err(err) = self.commit_locked(meta, action, details) {
-            if matches!(&err, ArgosError::Conflict(_))
-                || matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal")
-            {
+            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
                 *meta = rollback;
+                self.delete_blocks_locked(meta, &written_blocks);
+            } else if matches!(&err, ArgosError::Conflict(_)) {
                 self.delete_blocks_locked(meta, &written_blocks);
             }
             return Err(err);
