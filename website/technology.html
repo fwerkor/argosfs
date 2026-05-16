@@ -4,94 +4,25 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Technology | ArgosFS</title>
-    <meta name="description" content="ArgosFS technical overview: FUSE request handling, erasure coding, weighted placement, metadata recovery, cache, advanced I/O, and safety-constrained automation.">
+    <meta name="description" content="ArgosFS technical overview: FUSE request handling, erasure coding, weighted placement, metadata recovery, cache, advanced I/O, rootfs integration, and safety-constrained automation.">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
   </head>
   <body data-page="technology">
-    <header class="site-header">
-      <a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a>
-      <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button>
-      <nav class="site-nav" aria-label="Primary navigation">
-        <a href="index.html" data-nav="home">Home</a>
-        <a href="technology.html" data-nav="technology">Technology</a>
-        <a href="research.html" data-nav="research">Research</a>
-        <a href="compatibility.html" data-nav="compatibility">Compatibility</a>
-        <a href="start.html" data-nav="start">Start</a>
-        <a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a>
-      </nav>
-    </header>
-
+    <header class="site-header"><a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a><button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button><nav class="site-nav" aria-label="Primary navigation"><a href="index.html" data-nav="home">Home</a><a href="technology.html" data-nav="technology">Technology</a><a href="research.html" data-nav="research">Research</a><a href="compatibility.html" data-nav="compatibility">Compatibility</a><a href="start.html" data-nav="start">Start</a><a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a></nav></header>
     <main>
-      <section class="page-hero">
-        <canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas>
-        <div>
-          <p class="eyebrow">Technology</p>
-          <h1>Storage decisions you can audit.</h1>
-          <p>ArgosFS splits the system into a POSIX-facing FUSE frontend, a shard-oriented data plane, a copy-on-write metadata layer, and a conservative health autopilot.</p>
-        </div>
-      </section>
-
-      <section class="section architecture">
-        <div class="rail architecture-rail">
-          <span>FUSE frontend</span>
-          <span>Permission + ACL layer</span>
-          <span>Stripe transform</span>
-          <span>Placement scorer</span>
-          <span>Metadata journal</span>
-          <span>Health autopilot</span>
-        </div>
-        <div class="architecture-copy">
-          <h2>Layered for experimentation, not mystery.</h2>
-          <p>The data plane keeps file bytes in compressed and optionally encrypted erasure-coded stripes. The control plane keeps health, capacity, placement, workload, and policy state inspectable through metadata, CLI output, and JSONL experiment logs.</p>
-        </div>
-      </section>
-
-      <section class="section">
-        <div class="section-heading compact-heading">
-          <p class="eyebrow">Subsystems</p>
-          <h2>The implementation model.</h2>
-          <p>Each subsystem is designed so a researcher can inspect its inputs and outputs rather than treating the filesystem as a black box.</p>
-        </div>
-        <div class="feature-grid feature-grid-4">
-          <article><span>Data plane</span><h3>Stripe lifecycle</h3><p>File data is split into stripes, compressed when configured, encrypted when enabled, encoded into <code class="inline-code">k+m</code> shards, written to selected disks, and referenced from metadata.</p></article>
-          <article><span>Redundancy</span><h3>Reed-Solomon layouts</h3><p>Configurable data and parity counts allow layouts such as 4+2. Degraded reads reconstruct missing shards when enough remaining shards are available.</p></article>
-          <article><span>Placement</span><h3>Weighted rendezvous hashing</h3><p>Placement scores combine stable hashing with disk tier, configured weight, observed latency, remaining capacity, NUMA locality, and failure-domain diversity.</p></article>
-          <article><span>Capacity</span><h3>Hard reservation checks</h3><p>Placement excludes disks with insufficient free shard capacity and rolls back reservations when writes fail, avoiding metadata that points at impossible allocations.</p></article>
-          <article><span>Metadata</span><h3>Copy-on-write commits</h3><p>Metadata writes use journal snapshots, multiple metadata copies, hash validation, replay, and mismatch repair to survive interrupted updates.</p></article>
-          <article><span>Security</span><h3>Authenticated encryption</h3><p>Argon2id-derived keys and XChaCha20-Poly1305 protect stripe contents; invalid or missing keys cause read/write denial rather than silent corruption.</p></article>
-          <article><span>I/O modes</span><h3>Safe advanced I/O</h3><p>Buffered I/O remains the baseline. Direct I/O and io_uring are attempted only when safe, with buffered fallback for unsupported or unaligned cases.</p></article>
-          <article><span>Observability</span><h3>Metrics and artifacts</h3><p>Health JSON, autopilot explanations, Prometheus metrics, fsck reports, CSV timings, and manifests make experiments reproducible.</p></article>
-        </div>
-      </section>
-
-      <section class="section dark-band split-feature">
-        <div>
-          <p class="eyebrow">Control plane</p>
-          <h2>Automation is gated by invariants.</h2>
-          <p>The autopilot plans maintenance from health and workload signals, but it must preserve redundancy, capacity feasibility, metadata consistency, and bootability before it can mutate the volume.</p>
-        </div>
-        <div class="principle-grid principle-grid-tight">
-          <article><span>Safety</span><h3>Never optimize through an unsafe state</h3><p>Actions are rejected when they would violate redundancy or capacity constraints.</p></article>
-          <article><span>Explainability</span><h3>Dry-run before mutation</h3><p>Planner output records selected actions and rejected alternatives.</p></article>
-          <article><span>Bounded work</span><h3>Maintenance is incremental</h3><p>Scrub, rebalance, drain, and self-heal work are budgeted to control interference.</p></article>
-          <article><span>Verification</span><h3>After-action checks close the loop</h3><p>Journal, fsck, and shard validation can downgrade automation when assumptions fail.</p></article>
-        </div>
-      </section>
-
-      <section class="section code-band">
-        <div>
-          <p class="eyebrow">Inspectability</p>
-          <h2>Ask the planner before it mutates anything.</h2>
-        </div>
-        <pre><code>argosfs autopilot ROOT --dry-run --explain --json
-argosfs health ROOT --json
+      <section class="page-hero"><canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas><div><p class="eyebrow">Technology</p><h1>Auditable storage automation.</h1><p>ArgosFS is organized around a conservative split: a POSIX-facing FUSE layer, an erasure-coded data plane, a copy-on-write metadata plane, and a health-aware controller that is allowed to act only when safety invariants hold.</p></div></section>
+      <section class="section architecture"><div class="rail architecture-rail"><span>FUSE frontend</span><span>Permission model</span><span>Stripe transform</span><span>Placement scorer</span><span>Metadata journal</span><span>Autopilot</span></div><div class="architecture-copy"><h2>Designed as a filesystem and a research instrument.</h2><p>The project is built so experiments can inspect the exact state used by each storage decision: disk health, capacity, placement weights, workload heat, metadata snapshots, journal events, and post-action verification results.</p></div></section>
+      <section class="section"><div class="section-heading compact-heading"><p class="eyebrow">Architecture</p><h2>Four layers keep the design understandable.</h2><p>Each layer has a narrow responsibility, so bugs in POSIX behavior, data encoding, placement, or automation can be isolated without treating the system as a single opaque daemon.</p></div><div class="feature-grid feature-grid-4"><article><span>Frontend</span><h3>FUSE request handling</h3><p>The mounted interface handles lookup, getattr, setattr, create, read, write, truncate, rename, link, symlink, readdir, statfs, fsync, xattrs, and special inode types.</p></article><article><span>Semantics</span><h3>POSIX-facing metadata</h3><p>Mode bits, ownership, timestamps, sticky directory checks, non-UTF-8 names, symlink targets, hard links, ACL xattrs, and root metadata are preserved through import/export paths.</p></article><article><span>Data plane</span><h3>Stripe lifecycle</h3><p>File bytes are divided into raw stripes, transformed by compression/encryption when configured, encoded into data and parity shards, and stored as disk-local shard objects.</p></article><article><span>Control plane</span><h3>Health autopilot</h3><p>The controller observes SMART data, latency, capacity pressure, and workload state, then proposes bounded actions such as observe, scrub, drain, self-heal, and rebalance.</p></article></div></section>
+      <section class="section detail-split"><div><p class="eyebrow">Write path</p><h2>From one write to recoverable shards.</h2><p>A write starts as a FUSE operation, passes metadata and permission checks, then becomes a sequence of stripes. Every shard placement is scored against capacity, tier, health, locality, and failure-domain constraints.</p></div><div class="detail-grid"><div class="detail-panel"><span>01</span><h3>Validate request</h3><p>Resolve the path or inode, check permissions, update inode timing fields, and preserve byte-oriented names and xattrs without lossy UTF-8 assumptions.</p></div><div class="detail-panel"><span>02</span><h3>Transform stripe</h3><p>Apply the configured compression mode, optionally encrypt with an authenticated cipher, and keep enough raw-size information to reconstruct the original byte range.</p></div><div class="detail-panel"><span>03</span><h3>Encode shards</h3><p>Produce <code class="inline-code">k</code> data shards and <code class="inline-code">m</code> parity shards so degraded reads can recover missing pieces when the redundancy threshold is still satisfied.</p></div><div class="detail-panel"><span>04</span><h3>Commit metadata</h3><p>Install new block references through a metadata transaction, account disk usage, update journal state, and roll back accounting if a write path fails.</p></div></div></section>
+      <section class="section dark-band"><div class="section-heading compact-heading"><p class="eyebrow">Core mechanisms</p><h2>The important algorithms are explicit.</h2><p>The website should not hide the project behind vague claims. These are the mechanisms that make ArgosFS different from a simple FUSE demo.</p></div><div class="feature-grid feature-grid-4"><article><span>Redundancy</span><h3>Reed-Solomon layouts</h3><p>Layouts such as 4+2 split each stripe into data and parity shards. Reads can proceed in degraded mode if enough shards survive, and repair paths can reconstruct missing shards.</p></article><article><span>Placement</span><h3>Weighted rendezvous scoring</h3><p>Stable hashing is combined with disk weight, class, latency, capacity headroom, NUMA hints, and failure-domain diversity so placement is deterministic but policy-aware.</p></article><article><span>Capacity</span><h3>Reservation before mutation</h3><p>Writes and rebalances reserve space before committing references. Failed writes return reserved usage instead of leaving stale accounting behind.</p></article><article><span>Metadata</span><h3>Copy-on-write snapshots</h3><p>Primary and secondary metadata files, journal snapshots, hash checks, replay, and mismatch detection make partial writes observable and repairable.</p></article><article><span>Security</span><h3>Authenticated encryption</h3><p>Keys are derived with Argon2id and stripe data can be protected with XChaCha20-Poly1305. Authentication failures are treated as data integrity failures.</p></article><article><span>Cache</span><h3>RAM and L2 read acceleration</h3><p>Hot reads can be served from RAM or persistent L2 cache. Cache hits refresh recency, and pruning keeps cached data bounded.</p></article><article><span>I/O modes</span><h3>Conservative fast paths</h3><p>Buffered I/O is the safe default. Direct I/O and io_uring paths are optional and fall back when alignment, platform, or safety conditions do not fit.</p></article><article><span>Rootfs</span><h3>Boot-first integration</h3><p>Root filesystem support is treated as a safety requirement: optimization must not compromise mountability, recovery, or emergency-mode operation.</p></article></div></section>
+      <section class="section detail-split"><div><p class="eyebrow">Safety model</p><h2>Automation is useful only when it can stop.</h2><p>The autopilot is intentionally conservative. It can observe and explain unsafe states, but it should not optimize through them. When safety and performance conflict, the controller preserves recoverability and mountability first.</p></div><div class="detail-panel"><span>Controller gates</span><h3>Before an action can run</h3><ul><li>Check that enough disks and shards remain available for the configured redundancy level.</li><li>Reject placements that would collapse failure-domain diversity or exhaust a target disk.</li><li>Apply cooldowns and risk memory so noisy health samples do not trigger unstable oscillation.</li><li>Prefer dry-run explanations and bounded maintenance budgets over large unreviewable rewrites.</li><li>Verify journal, fsck, and shard state after mutation; downgrade automation if verification fails.</li></ul></div></section>
+      <section class="section code-band"><div><p class="eyebrow">Inspectability</p><h2>Every storage decision should leave evidence.</h2><p>The CLI exposes health snapshots, dry-run plans, journal validation, fsck repair, Prometheus metrics, and experiment artifacts.</p></div><pre><code>argosfs health ROOT --json
+argosfs autopilot ROOT --dry-run --explain --json
 argosfs verify-journal ROOT
-argosfs fsck ROOT --repair --remove-orphans</code></pre>
-      </section>
+argosfs fsck ROOT --repair --remove-orphans
+argosfs export ROOT ./rootfs-export --preserve-metadata</code></pre></section>
     </main>
-
-    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="start.html">Start</a></footer>
-    <script src="app.js"></script>
+    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="start.html">Start</a></footer><script src="app.js"></script>
   </body>
 </html>
