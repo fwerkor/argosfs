@@ -459,6 +459,7 @@ impl ArgosFs {
 
     pub fn mkdir(&self, path: &str, mode: u32) -> Result<InodeId> {
         let (parent, name) = parent_name(path)?;
+        let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.lock();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.mkdir_locked(
@@ -492,6 +493,7 @@ impl ArgosFs {
 
     pub fn mknod_path(&self, path: &str, mode: u32, rdev: u32) -> Result<InodeId> {
         let (parent, name) = parent_name(path)?;
+        let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.lock();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.mknod_locked(
@@ -533,6 +535,7 @@ impl ArgosFs {
 
     pub fn create_file_path(&self, path: &str, mode: u32) -> Result<InodeId> {
         let (parent, name) = parent_name(path)?;
+        let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.lock();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.mknod_locked(
@@ -730,6 +733,7 @@ impl ArgosFs {
 
     pub fn unlink_path(&self, path: &str) -> Result<()> {
         let (parent, name) = parent_name(path)?;
+        let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.lock();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.unlink_locked(&mut meta, parent_ino, &name, false, Some(current_uid()))
@@ -747,6 +751,7 @@ impl ArgosFs {
 
     pub fn rmdir_path(&self, path: &str) -> Result<()> {
         let (parent, name) = parent_name(path)?;
+        let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.lock();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.unlink_locked(&mut meta, parent_ino, &name, true, Some(current_uid()))
@@ -765,6 +770,8 @@ impl ArgosFs {
     pub fn rename_path(&self, old: &str, new: &str) -> Result<()> {
         let (old_parent, old_name) = parent_name(old)?;
         let (new_parent, new_name) = parent_name(new)?;
+        let old_name = entry_name_from_str(&old_name)?;
+        let new_name = entry_name_from_str(&new_name)?;
         let mut meta = self.meta.lock();
         let old_parent = self.resolve_path_locked(&meta, &old_parent, true, 40)?;
         let new_parent = self.resolve_path_locked(&meta, &new_parent, true, 40)?;
@@ -2213,27 +2220,39 @@ impl ArgosFs {
     }
 
     pub fn iter_paths(&self) -> Vec<(String, InodeId)> {
+        self.iter_path_bytes()
+            .into_iter()
+            .map(|(path, ino)| (String::from_utf8_lossy(&path).to_string(), ino))
+            .collect()
+    }
+
+    pub fn iter_path_bytes(&self) -> Vec<(Vec<u8>, InodeId)> {
         let meta = self.meta.lock();
-        let mut out = vec![("/".to_string(), ROOT_INO)];
-        fn walk(meta: &Metadata, out: &mut Vec<(String, InodeId)>, prefix: &str, ino: InodeId) {
+        let mut out = vec![(b"/".to_vec(), ROOT_INO)];
+
+        fn walk(meta: &Metadata, out: &mut Vec<(Vec<u8>, InodeId)>, prefix: &[u8], ino: InodeId) {
             if let Some(inode) = meta.inodes.get(&ino) {
                 if inode.kind != NodeKind::Directory {
                     return;
                 }
                 for (name, child) in inode.entries.iter() {
                     let name_bytes = decode_entry_name_bytes(name);
-                    let display_name = display_entry_name(&name_bytes);
-                    let path = if prefix == "/" {
-                        format!("/{display_name}")
+                    let mut path = Vec::new();
+                    if prefix == b"/" {
+                        path.push(b'/');
+                        path.extend_from_slice(&name_bytes);
                     } else {
-                        format!("{prefix}/{display_name}")
-                    };
+                        path.extend_from_slice(prefix);
+                        path.push(b'/');
+                        path.extend_from_slice(&name_bytes);
+                    }
                     out.push((path.clone(), *child));
                     walk(meta, out, &path, *child);
                 }
             }
         }
-        walk(&meta, &mut out, "/", ROOT_INO);
+
+        walk(&meta, &mut out, b"/", ROOT_INO);
         out
     }
 
@@ -3197,11 +3216,8 @@ impl ArgosFs {
             let capacity = self.effective_capacity_bytes_locked(meta, disk);
             if capacity != 0 {
                 let group = capacity_group(disk);
-                *reservations.entry(group).or_default() = reservations
-                    .get(&capacity_group(disk))
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(request.required_bytes);
+                let current = reservations.get(&group).copied().unwrap_or(0);
+                reservations.insert(group, current.saturating_add(request.required_bytes));
             }
         };
 
@@ -3367,7 +3383,6 @@ impl ArgosFs {
             .filter(|candidate| {
                 candidate.capacity_source == CapacitySource::AutoProbe
                     && candidate.backing_fs_id.as_deref() == Some(fs_id)
-                    && candidate.status == DiskStatus::Online
             })
             .map(|candidate| candidate.capacity_bytes)
             .max()
@@ -3423,9 +3438,10 @@ impl ArgosFs {
         let mut prefix: Vec<String> = Vec::new();
         for (idx, part) in parts.iter().enumerate() {
             let inode = self.dir_inode_locked(meta, current)?;
+            let part_key = entry_name_from_str(part)?;
             let next = *inode
                 .entries
-                .get(part)
+                .get(part_key.as_str())
                 .ok_or_else(|| ArgosError::NotFound(clean.clone()))?;
             let child = meta
                 .inodes
@@ -3826,6 +3842,10 @@ fn entry_name_from_os(name: &OsStr) -> Result<String> {
         return Ok(name.to_string());
     }
     Ok(format!("{NON_UTF8_NAME_PREFIX}{}", hex::encode(bytes)))
+}
+
+fn entry_name_from_str(name: &str) -> Result<String> {
+    entry_name_from_os(OsStr::new(name))
 }
 
 fn validate_entry_name(name: &str) -> Result<()> {
