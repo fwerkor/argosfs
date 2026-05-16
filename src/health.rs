@@ -3,7 +3,7 @@ use crate::types::{
     Disk, DiskClass, DiskProbe, DiskStatus, HealthCounters, HealthDiskReport, Inode, NodeKind,
     StorageTier,
 };
-use crate::util::{directory_size, ensure_dir, now_f64};
+use crate::util::{ensure_dir, now_f64};
 use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -12,8 +12,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-pub fn risk_report(disk: &Disk, disk_path: &Path) -> HealthDiskReport {
-    let used_bytes = directory_size(&disk_path.join("shards"));
+pub fn risk_report(disk: &Disk, _disk_path: &Path) -> HealthDiskReport {
+    let used_bytes = disk.used_bytes;
     let available_bytes = disk.capacity_bytes.saturating_sub(used_bytes);
     let mut score = 0.0;
     let mut reasons = Vec::new();
@@ -56,6 +56,11 @@ pub fn risk_report(disk: &Disk, disk_path: &Path) -> HealthDiskReport {
         score += ((disk.health.temperature_c - 55.0) / 80.0).min(0.10);
         reasons.push("temperature".to_string());
     }
+    let smart_stale = disk.health.last_smart_refresh_at <= 0.0
+        || now_f64() - disk.health.last_smart_refresh_at > 24.0 * 60.0 * 60.0;
+    if smart_stale {
+        reasons.push("smart-stale-or-unavailable".to_string());
+    }
     if disk.capacity_bytes > 0 && used_bytes as f64 / disk.capacity_bytes as f64 > 0.92 {
         score += 0.10;
         reasons.push("near-capacity".to_string());
@@ -72,6 +77,8 @@ pub fn risk_report(disk: &Disk, disk_path: &Path) -> HealthDiskReport {
         weight: disk.weight,
         used_bytes,
         capacity_bytes: disk.capacity_bytes,
+        used_bytes_source: "metadata-counter".to_string(),
+        capacity_source: disk.capacity_source,
         available_bytes,
         class: disk.class,
         backing_device: disk.backing_device.clone(),
@@ -83,6 +90,7 @@ pub fn risk_report(disk: &Disk, disk_path: &Path) -> HealthDiskReport {
         observed_write_mib_s: disk.observed_write_mib_s,
         risk_score: score,
         predicted_failure,
+        smart_stale,
         reasons,
         health: disk.health.clone(),
     }
@@ -92,16 +100,25 @@ pub fn classify_inode(inode: &mut Inode) -> StorageTier {
     if inode.kind != NodeKind::File {
         return StorageTier::Warm;
     }
-    let hotness = inode
-        .access_count
-        .saturating_add(inode.write_count.saturating_mul(2));
-    let class = if hotness >= 8 || (hotness >= 3 && inode.size <= 8 * 1024 * 1024) {
-        StorageTier::Hot
-    } else if hotness == 0 && inode.size >= 1024 * 1024 {
-        StorageTier::Cold
-    } else {
-        StorageTier::Warm
-    };
+    let now = now_f64();
+    let read_age_hours =
+        ((now - inode.last_accessed_at.max(inode.atime)).max(0.0) / 3600.0).min(720.0);
+    let write_age_hours =
+        ((now - inode.last_written_at.max(inode.mtime)).max(0.0) / 3600.0).min(720.0);
+    let read_decay = 0.5_f64.powf(read_age_hours / 24.0);
+    let write_decay = 0.5_f64.powf(write_age_hours / 24.0);
+    let score = inode.workload_score * 0.70
+        + inode.access_count as f64 * read_decay
+        + inode.write_count as f64 * 2.0 * write_decay;
+    inode.workload_score = score;
+    let class =
+        if inode.boot_critical || score >= 8.0 || (score >= 3.0 && inode.size <= 8 * 1024 * 1024) {
+            StorageTier::Hot
+        } else if score < 0.5 && inode.size >= 1024 * 1024 {
+            StorageTier::Cold
+        } else {
+            StorageTier::Warm
+        };
     inode.storage_class = class;
     class
 }
@@ -114,6 +131,7 @@ pub fn probe_disk_path(path: &Path, benchmark_bytes: usize) -> DiskProbe {
     };
     if let Ok(metadata) = fs::metadata(path) {
         let dev = metadata.dev();
+        probe.backing_fs_id = Some(format!("dev:{dev}"));
         if let Some((block, backing)) = sysfs_block_from_dev(dev) {
             probe.sysfs_block = Some(block.clone());
             probe.backing_device = Some(backing);
@@ -203,29 +221,44 @@ pub fn refresh_smart(disk: &Disk) -> Result<HealthCounters> {
     }
     let value: Value = serde_json::from_slice(&output.stdout)?;
     let mut health = disk.health.clone();
+    let mut observed = std::collections::BTreeSet::new();
+    let device_type = if value
+        .pointer("/nvme_smart_health_information_log")
+        .is_some()
+    {
+        "nvme"
+    } else if value.pointer("/ata_smart_attributes/table").is_some() {
+        "ata"
+    } else {
+        "unsupported"
+    };
     if let Some(temp) = value
         .pointer("/temperature/current")
         .and_then(Value::as_f64)
     {
         health.temperature_c = temp;
+        observed.insert("temperature_c");
     }
     if let Some(temp) = value
         .pointer("/nvme_smart_health_information_log/temperature")
         .and_then(Value::as_f64)
     {
         health.temperature_c = temp;
+        observed.insert("temperature_c");
     }
     if let Some(used) = value
         .pointer("/nvme_smart_health_information_log/percentage_used")
         .and_then(Value::as_f64)
     {
         health.wear_percent = used;
+        observed.insert("wear_percent");
     }
     if let Some(errors) = value
         .pointer("/nvme_smart_health_information_log/media_errors")
         .and_then(Value::as_u64)
     {
         health.io_errors = health.io_errors.max(errors);
+        observed.insert("io_errors");
     }
     if value
         .pointer("/smart_status/passed")
@@ -233,6 +266,7 @@ pub fn refresh_smart(disk: &Disk) -> Result<HealthCounters> {
         .is_some_and(|passed| !passed)
     {
         health.io_errors = health.io_errors.max(100);
+        observed.insert("io_errors");
     }
     if let Some(table) = value
         .pointer("/ata_smart_attributes/table")
@@ -247,18 +281,37 @@ pub fn refresh_smart(disk: &Disk) -> Result<HealthCounters> {
                 .unwrap_or(0);
             match name {
                 "Reallocated_Sector_Ct" | "Reallocated_Event_Count" => {
-                    health.reallocated_sectors = health.reallocated_sectors.max(raw)
+                    health.reallocated_sectors = health.reallocated_sectors.max(raw);
+                    observed.insert("reallocated_sectors");
                 }
                 "Current_Pending_Sector" => {
-                    health.pending_sectors = health.pending_sectors.max(raw)
+                    health.pending_sectors = health.pending_sectors.max(raw);
+                    observed.insert("pending_sectors");
                 }
                 "UDMA_CRC_Error_Count" | "CRC_Error_Count" => {
-                    health.crc_errors = health.crc_errors.max(raw)
+                    health.crc_errors = health.crc_errors.max(raw);
+                    observed.insert("crc_errors");
                 }
                 _ => {}
             }
         }
     }
+    let expected = [
+        "temperature_c",
+        "wear_percent",
+        "io_errors",
+        "reallocated_sectors",
+        "pending_sectors",
+        "crc_errors",
+    ];
+    health.last_smart_refresh_at = now_f64();
+    health.smart_device_type = device_type.to_string();
+    health.smart_fields_observed = observed.iter().map(|field| (*field).to_string()).collect();
+    health.smart_fields_missing = expected
+        .into_iter()
+        .filter(|field| !observed.contains(field))
+        .map(ToString::to_string)
+        .collect();
     Ok(health)
 }
 

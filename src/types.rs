@@ -82,6 +82,14 @@ pub enum DiskClass {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum CapacitySource {
+    #[default]
+    AutoProbe,
+    UserOverride,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum IoMode {
     #[default]
     Buffered,
@@ -228,12 +236,22 @@ pub struct HealthCounters {
     pub latency_ms: f64,
     pub wear_percent: f64,
     pub temperature_c: f64,
+    #[serde(default)]
+    pub last_smart_refresh_at: f64,
+    #[serde(default)]
+    pub smart_device_type: String,
+    #[serde(default)]
+    pub smart_fields_observed: Vec<String>,
+    #[serde(default)]
+    pub smart_fields_missing: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DiskProbe {
     pub class: DiskClass,
     pub backing_device: Option<PathBuf>,
+    #[serde(default)]
+    pub backing_fs_id: Option<String>,
     pub sysfs_block: Option<String>,
     pub rotational: Option<bool>,
     pub numa_node: Option<i32>,
@@ -255,11 +273,19 @@ pub struct Disk {
     pub weight: f64,
     pub status: DiskStatus,
     pub capacity_bytes: u64,
+    #[serde(default)]
+    pub capacity_source: CapacitySource,
+    #[serde(default)]
+    pub used_bytes: u64,
     pub health: HealthCounters,
     #[serde(default)]
     pub class: DiskClass,
     #[serde(default)]
     pub backing_device: Option<PathBuf>,
+    #[serde(default)]
+    pub backing_fs_id: Option<String>,
+    #[serde(default)]
+    pub failure_domain: String,
     #[serde(default)]
     pub sysfs_block: Option<String>,
     #[serde(default)]
@@ -325,7 +351,7 @@ pub struct Inode {
     pub gid: u32,
     pub nlink: u32,
     pub size: u64,
-    pub rdev: u32,
+    pub rdev: u64,
     pub atime: f64,
     pub mtime: f64,
     pub ctime: f64,
@@ -344,6 +370,14 @@ pub struct Inode {
     pub read_bytes: u64,
     pub write_bytes: u64,
     pub storage_class: StorageTier,
+    #[serde(default)]
+    pub boot_critical: bool,
+    #[serde(default)]
+    pub workload_score: f64,
+    #[serde(default)]
+    pub last_accessed_at: f64,
+    #[serde(default)]
+    pub last_written_at: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -407,6 +441,8 @@ pub struct HealthDiskReport {
     pub weight: f64,
     pub used_bytes: u64,
     pub capacity_bytes: u64,
+    pub used_bytes_source: String,
+    pub capacity_source: CapacitySource,
     pub available_bytes: u64,
     pub class: DiskClass,
     pub backing_device: Option<PathBuf>,
@@ -418,6 +454,7 @@ pub struct HealthDiskReport {
     pub observed_write_mib_s: f64,
     pub risk_score: f64,
     pub predicted_failure: bool,
+    pub smart_stale: bool,
     pub reasons: Vec<String>,
     pub health: HealthCounters,
 }

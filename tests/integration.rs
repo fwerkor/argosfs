@@ -5,9 +5,10 @@ use argosfs::journal;
 use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
 use argosfs::util::{directory_size, sha256_hex};
 use argosfs::{ArgosError, ArgosFs, AutopilotConfig};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
@@ -65,6 +66,28 @@ fn tree_contains_bytes(root: &std::path::Path, needle: &[u8]) -> bool {
 }
 
 #[test]
+fn hard_link_does_not_require_source_read_permission() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    let attr = fs
+        .create_file_at_with_owner(1, OsStr::new("secret"), 0o000, 1234, 1234)
+        .unwrap();
+    fs.write_inode_range(attr.ino, 0, b"secret").unwrap();
+
+    assert_eq!(
+        fs.check_access_inode(attr.ino, 5678, 5678, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+
+    let linked = fs.link_at(attr.ino, 1, OsStr::new("secret-hard")).unwrap();
+    assert_eq!(linked.ino, attr.ino);
+    assert_eq!(fs.read_file("/secret-hard", true).unwrap(), b"secret");
+}
+
+#[test]
 fn write_read_and_posix_metadata() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
@@ -90,6 +113,34 @@ fn write_read_and_posix_metadata() {
 
     fs.setxattr_inode(ino, "user.paper", b"argon").unwrap();
     assert_eq!(fs.getxattr_inode(ino, "user.paper").unwrap(), b"argon");
+}
+
+#[test]
+fn symlink_resolution_decodes_internal_targets_safely() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    fs.write_file("/utf8-target", b"utf8", 0o644).unwrap();
+    fs.symlink_path("/utf8-target", "/utf8-link").unwrap();
+    assert_eq!(fs.read_file("/utf8-link", true).unwrap(), b"utf8");
+
+    let raw_name = OsString::from_vec(vec![b'n', b'o', b'n', 0xff]);
+    let raw_path = std::path::PathBuf::from("/").join(&raw_name);
+    fs.create_file_at(1, &raw_name, 0o644).unwrap();
+    let ino = fs.lookup(1, &raw_name).unwrap().ino;
+    fs.write_inode_range(ino, 0, b"raw-target").unwrap();
+
+    fs.symlink_at(1, OsStr::new("raw-link"), &raw_path).unwrap();
+    let link_ino = fs.resolve_path("/raw-link", false).unwrap();
+    assert_eq!(
+        fs.readlink_inode_bytes(link_ino).unwrap(),
+        raw_path.as_os_str().as_bytes()
+    );
+
+    assert_eq!(
+        fs.read_file("/raw-link", true).unwrap_err().errno(),
+        libc::EINVAL
+    );
 }
 
 #[test]
@@ -179,6 +230,62 @@ fn readdir_reports_real_parent_for_dotdot() {
             .ino,
         1
     );
+}
+
+#[test]
+fn failed_pre_journal_commit_reloads_in_memory_metadata() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    journal::set_thread_crash_point(Some("before-journal"));
+    let err = fs.mkdir("/ghost", 0o755).unwrap_err();
+    journal::set_thread_crash_point(None);
+
+    assert!(matches!(
+        err,
+        ArgosError::InjectedCrash(point) if point == "before-journal"
+    ));
+    assert_eq!(
+        fs.resolve_path("/ghost", false).unwrap_err().errno(),
+        libc::ENOENT
+    );
+
+    let reopened = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(
+        reopened.resolve_path("/ghost", false).unwrap_err().errno(),
+        libc::ENOENT
+    );
+}
+
+#[test]
+fn read_and_readdir_do_not_commit_metadata_transactions() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/file", b"payload", 0o644).unwrap();
+    let ino = fs.resolve_path("/file", false).unwrap();
+    let txid = fs.metadata_snapshot().txid;
+
+    assert_eq!(fs.read_inode(ino, 0, 7, true).unwrap(), b"payload");
+    assert_eq!(fs.readdir(1).unwrap().len(), 3);
+    assert_eq!(fs.metadata_snapshot().txid, txid);
+}
+
+#[test]
+fn non_utf8_directory_entries_round_trip_through_fuse_style_apis() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    let raw = OsString::from_vec(vec![b'f', 0xff, b'x']);
+    fs.create_file_at(1, &raw, 0o644).unwrap();
+
+    let attr = fs.lookup(1, &raw).unwrap();
+    let entries = fs.readdir(1).unwrap();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.attr.ino == attr.ino)
+        .unwrap();
+    assert_eq!(entry.name_bytes, raw.as_bytes());
+    assert_eq!(entry.os_name().as_bytes(), raw.as_bytes());
 }
 
 #[test]
@@ -277,6 +384,65 @@ fn rename_noop_and_replacement_keep_metadata_consistent() {
     assert_eq!(fs.attr_path("/a", false).unwrap().nlink, 1);
     assert_eq!(fs.read_file("/b", true).unwrap(), b"charlie");
     assert!(fs.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn rename_policy_supports_noreplace_exchange_and_sticky_checks() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/a", b"alpha", 0o644).unwrap();
+    fs.write_file("/b", b"beta", 0o644).unwrap();
+
+    let err = fs
+        .rename_at_with_policy(
+            1,
+            OsStr::new("a"),
+            1,
+            OsStr::new("b"),
+            argosfs::volume::RenamePolicy {
+                no_replace: true,
+                exchange: false,
+                uid: Some(0),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.errno(), libc::EEXIST);
+
+    fs.rename_at_with_policy(
+        1,
+        OsStr::new("a"),
+        1,
+        OsStr::new("b"),
+        argosfs::volume::RenamePolicy {
+            no_replace: false,
+            exchange: true,
+            uid: Some(0),
+        },
+    )
+    .unwrap();
+    assert_eq!(fs.read_file("/a", true).unwrap(), b"beta");
+    assert_eq!(fs.read_file("/b", true).unwrap(), b"alpha");
+
+    fs.mkdir("/tmp", libc::S_ISVTX | 0o777).unwrap();
+    fs.create_file_at_with_owner(1, OsStr::new("owned"), 0o644, 1001, 1001)
+        .unwrap();
+    fs.rename_path("/owned", "/tmp/owned").unwrap();
+    assert_eq!(
+        fs.unlink_at_as(
+            fs.resolve_path("/tmp", false).unwrap(),
+            OsStr::new("owned"),
+            2002
+        )
+        .unwrap_err()
+        .errno(),
+        libc::EACCES
+    );
+    fs.unlink_at_as(
+        fs.resolve_path("/tmp", false).unwrap(),
+        OsStr::new("owned"),
+        1001,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -526,8 +692,12 @@ fn stale_metadata_commits_are_rejected_instead_of_overwriting_newer_state() {
     let err = fs2.write_file("/stale", b"stale", 0o644).unwrap_err();
     assert!(matches!(err, ArgosError::Conflict(_)));
 
+    assert_eq!(fs2.read_file("/fresh", true).unwrap(), b"fresh");
+    fs2.write_file("/after-conflict", b"ok", 0o644).unwrap();
+
     let reopened = ArgosFs::open(tmp.path()).unwrap();
     assert_eq!(reopened.read_file("/fresh", true).unwrap(), b"fresh");
+    assert_eq!(reopened.read_file("/after-conflict", true).unwrap(), b"ok");
     assert!(matches!(
         reopened.read_file("/stale", true).unwrap_err(),
         ArgosError::NotFound(_)
@@ -630,6 +800,32 @@ fn posix_and_nfs4_acl_are_enforced_and_exposed_as_xattrs() {
             .errno(),
         libc::EACCES
     );
+}
+
+#[test]
+fn xattr_namespaces_are_explicitly_enforced() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/file", b"xattr", 0o644).unwrap();
+    let ino = fs.resolve_path("/file", false).unwrap();
+
+    fs.setxattr_inode(ino, "user.ok", b"1").unwrap();
+    assert_eq!(fs.getxattr_inode(ino, "user.ok").unwrap(), b"1");
+    assert_eq!(
+        fs.setxattr_inode(ino, "trusted.nope", b"1")
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+    assert_eq!(
+        fs.setxattr_inode(ino, "system.unknown", b"1")
+            .unwrap_err()
+            .errno(),
+        libc::ENOTSUP
+    );
+    fs.setxattr_inode(ino, "system.argosfs.boot_critical", b"true")
+        .unwrap();
+    assert!(fs.metadata_snapshot().inodes[&ino].boot_critical);
 }
 
 #[test]
@@ -769,6 +965,7 @@ fn advanced_io_policy_and_prometheus_metrics_are_live() {
     assert!(metrics.contains("argosfs_txid"));
     assert!(metrics.contains("argosfs_disk_read_latency_ms"));
     assert!(metrics.contains("argosfs_io_uring_available"));
+    assert_eq!(metrics.matches("# HELP argosfs_disk_used_bytes").count(), 1);
 }
 
 #[test]
@@ -785,6 +982,62 @@ fn l2_cache_enforces_limit_and_evicts_bad_entries() {
     assert!(cache.get("bad", Some(&sha256_hex(b"fresh"))).is_none());
     assert_eq!(cache.stats()["memory_items"], serde_json::json!(0));
     assert_eq!(directory_size(&corrupt_root), 0);
+}
+
+#[test]
+fn l2_cache_hit_refreshes_prune_recency_without_rewriting_file() {
+    let tmp = TempDir::new().unwrap();
+
+    {
+        let cache = BlockCache::new(tmp.path(), 0, 8);
+        cache.put("old-hot", b"1111").unwrap();
+        cache.put("old-cold", b"2222").unwrap();
+    }
+
+    let cache = BlockCache::new(tmp.path(), 4, 8);
+    assert_eq!(
+        cache.get("old-hot", Some(&sha256_hex(b"1111"))).unwrap(),
+        b"1111"
+    );
+    assert_eq!(cache.stats()["l2_hits"].as_u64().unwrap(), 1);
+
+    cache.put("new", b"3333").unwrap();
+
+    assert_eq!(
+        cache.get("old-hot", Some(&sha256_hex(b"1111"))).unwrap(),
+        b"1111"
+    );
+    assert!(cache.get("old-cold", Some(&sha256_hex(b"2222"))).is_none());
+}
+
+#[test]
+fn l2_cache_hit_promotes_to_memory_without_rewriting_l2() {
+    let tmp = TempDir::new().unwrap();
+    let cache = BlockCache::new(tmp.path(), 4, 1024);
+    cache.put("block", b"data").unwrap();
+    drop(cache);
+    let cache = BlockCache::new(tmp.path(), 4, 1024);
+    assert_eq!(
+        cache.get("block", Some(&sha256_hex(b"data"))).unwrap(),
+        b"data"
+    );
+    assert_eq!(cache.stats()["l2_hits"].as_u64().unwrap(), 1);
+    assert_eq!(cache.stats()["l2_writes"].as_u64().unwrap(), 0);
+}
+
+#[test]
+fn user_capacity_override_survives_disk_probe_refresh() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 1), 2, false).unwrap();
+    fs.add_disk(None, Some(StorageTier::Warm), Some(1.0), Some(12345), false)
+        .unwrap();
+    fs.refresh_disk_probe(Some("disk-0002")).unwrap();
+    let disk = fs.metadata_snapshot().disks["disk-0002"].clone();
+    assert_eq!(disk.capacity_bytes, 12345);
+    assert_eq!(
+        disk.capacity_source,
+        argosfs::types::CapacitySource::UserOverride
+    );
 }
 
 #[test]
@@ -961,6 +1214,28 @@ fn transaction_verifier_flags_bad_journal_tail_without_losing_data() {
 
     let fs = ArgosFs::open(tmp.path()).unwrap();
     assert_eq!(fs.read_file("/journal", true).unwrap(), b"hash chain");
+}
+
+#[test]
+fn journal_replay_skips_invalid_snapshot_records() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/journal", b"snapshot skip", 0o644).unwrap();
+    drop(fs);
+
+    let mut journal = fs::OpenOptions::new()
+        .append(true)
+        .open(tmp.path().join(".argosfs/journal.jsonl"))
+        .unwrap();
+    writeln!(
+        journal,
+        r#"{{"version":1,"txid":999,"metadata":{{"format":"broken"}},"record_hash":"bad"}}"#
+    )
+    .unwrap();
+    journal.sync_all().unwrap();
+
+    let fs = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(fs.read_file("/journal", true).unwrap(), b"snapshot skip");
 }
 
 #[test]

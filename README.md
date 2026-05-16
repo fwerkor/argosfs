@@ -1,9 +1,9 @@
 # ArgosFS
 
 ArgosFS is a Rust implementation of a self-driving, erasure-coded Linux
-filesystem designed from `deep-research-report.md`. It provides a real FUSE
-mount frontend suitable for root filesystem experiments, plus a management CLI,
-health autopilot, repair tooling, and retained validation data workflows.
+filesystem. It provides a real FUSE mount frontend suitable for root filesystem
+experiments, plus a management CLI, health autopilot, repair tooling, and
+retained validation data workflows.
 
 ArgosFS is implemented in Rust for memory safety and future kernel-adjacent
 reuse. The data plane uses mature crates rather than hand-rolled primitives:
@@ -12,7 +12,7 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
 - `fuser`/libfuse3 for the Linux filesystem mount frontend.
 - `zstd` and `lz4_flex` for transparent block compression.
 - `chacha20poly1305` and `argon2` for built-in authenticated encryption.
-- `io-uring`, `O_DIRECT`, and mmap-backed zero-copy reads for advanced I/O.
+- `io-uring`, `O_DIRECT`, and mmap-backed read staging for advanced I/O.
 - `serde_json` with copy-on-write replacement for durable metadata commits.
 
 ## Implemented Features
@@ -48,8 +48,9 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
   and observed throughput, and placement penalizes slow disks automatically.
 - Advanced I/O policy controls: buffered I/O, `O_DIRECT` with safe buffered
   fallback for unaligned requests, `io_uring` with buffered fallback when the
-  kernel denies setup, mmap zero-copy read staging, FUSE direct-I/O open flags,
-  and NUMA-aware placement preference when sysfs exposes disk node locality.
+  kernel denies setup, mmap-backed read staging that still returns owned
+  `Vec<u8>` buffers, FUSE direct-I/O open flags, and NUMA-aware placement
+  preference when sysfs exposes disk node locality.
 - Transparent per-stripe compression with `zstd`, `lz4`, or `none`.
 - Built-in Prometheus exporter at `/metrics`.
 - Persistent metadata with copy-on-write JSON commits, triple metadata copies
@@ -141,8 +142,10 @@ argosfs fsck ROOT --repair --remove-orphans
 argosfs scrub ROOT
 argosfs rebalance ROOT
 argosfs autopilot ROOT --interval 60
+argosfs autopilot ROOT --dry-run --explain --json
 argosfs snapshot ROOT before-upgrade
 argosfs enable-encryption ROOT --key-file /etc/argosfs.key --reencrypt
+argosfs enable-encryption ROOT --passphrase-stdin
 argosfs encryption-status ROOT
 argosfs set-io-mode ROOT --mode io-uring
 argosfs set-io-mode ROOT --mode direct --direct-io
@@ -158,11 +161,17 @@ argosfs verify-journal ROOT
 `--capacity-bytes` only when you want to override the probe result. Modes accept
 decimal, octal (`755` or `0o755`), and hex (`0x...`) syntax.
 
+`mount --foreground` is accepted for compatibility with service files and
+scripts. The current libfuse frontend runs in the foreground either way.
+
 Encryption reads the key from `ARGOSFS_KEY` or `ARGOSFS_KEY_FILE` during normal
-operation. `enable-encryption --reencrypt` rewrites existing file stripes so
-old data becomes encrypted at rest; new writes are encrypted immediately after
-encryption is enabled. `set-io-mode` persists the data-plane policy in volume
-metadata, and `--direct-io` also asks FUSE clients to use direct I/O handles.
+operation. Use `--key-file` or `--passphrase-stdin` when enabling encryption.
+`--passphrase` remains available only for tests because argv can be exposed in
+shell history, process listings, logs, and crash reports. `enable-encryption
+--reencrypt` rewrites existing file stripes so old data becomes encrypted at
+rest; new writes are encrypted immediately after encryption is enabled.
+`set-io-mode` persists the data-plane policy in volume metadata, and
+`--direct-io` also asks FUSE clients to use direct I/O handles.
 
 `verify-journal` validates the transaction hash chain, metadata snapshot hashes,
 and all metadata copies. Opening a volume also performs recovery: ArgosFS picks
@@ -194,6 +203,7 @@ Run the retained validation workflow:
 
 ```bash
 python3 scripts/run_full_validation.py --output paper-data/runs/manual
+scripts/experiments/run_all.sh --quick --output paper-data/runs/ae-quick
 ```
 
 The run directory contains:
@@ -205,10 +215,15 @@ The run directory contains:
 - CSV timing samples,
 - a manifest with build, kernel, and ArgosFS configuration.
 
+See `docs/artifact-evaluation.md`, `docs/compatibility-report.md`,
+`docs/self-driving-model.md`, `docs/safety-invariants.md`, and
+`docs/related-work.md` for paper-oriented reproduction and positioning. A
+static project website lives in `website/index.html`.
+
 ## Limitations
 
 ArgosFS is a complete research filesystem project with a real FUSE frontend, but
 it is not yet a production-certified kernel filesystem. The current metadata
 store is a single-node COW JSON database. That makes experiments transparent and
-auditable; a production version should replace it with a page/B-tree store and
-add xfstests coverage and long-duration hardware power-failure testing.
+auditable; `docs/metadata-scalability.md` tracks the page/B-tree migration plan
+and benchmark entry point.

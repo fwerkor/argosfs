@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Research | ArgosFS</title>
+    <meta name="description" content="ArgosFS research and artifact evaluation overview.">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body data-page="research">
+    <header class="site-header">
+      <a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a>
+      <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="index.html" data-nav="home">Home</a>
+        <a href="technology.html" data-nav="technology">Technology</a>
+        <a href="research.html" data-nav="research">Research</a>
+        <a href="compatibility.html" data-nav="compatibility">Compatibility</a>
+        <a href="start.html" data-nav="start">Start</a>
+        <a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="page-hero research-hero">
+        <canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas>
+        <div>
+          <p class="eyebrow">Research agenda</p>
+          <h1>Safety-constrained self-driving storage.</h1>
+          <p>ArgosFS positions autonomy as something measurable: decisions, safety checks, verification, and artifacts all become data.</p>
+        </div>
+      </section>
+
+      <section class="section timeline">
+        <div class="timeline-item"><span>Observe</span><p>SMART fields, latency EWMAs, capacity provenance, boot-critical classification, and workload heat.</p></div>
+        <div class="timeline-item"><span>Diagnose</span><p>Risk memory confirms unhealthy disks and separates stale measurements from fresh observations.</p></div>
+        <div class="timeline-item"><span>Plan</span><p>Dry-run explain records expose chosen action, rejected actions, safety checks, and expected utility.</p></div>
+        <div class="timeline-item"><span>Verify</span><p>Mutation runs end with fsck verification and adaptive mode downgrade on failure.</p></div>
+      </section>
+
+      <section class="section split-feature">
+        <div>
+          <p class="eyebrow">Artifact evaluation</p>
+          <h2>One command to produce reviewable artifacts.</h2>
+          <p>The experiment framework writes raw JSONL/CSV, processed summaries, figures, tables, and a manifest with kernel, commit, mode, and seed.</p>
+        </div>
+        <pre><code>scripts/experiments/run_all.sh --quick --output paper-data/runs/ae-quick
+python3 scripts/experiments/summarize_results.py paper-data/runs/ae-quick/raw paper-data/runs/ae-quick</code></pre>
+      </section>
+
+      <section class="section dark-band">
+        <div class="section-heading">
+          <p class="eyebrow">Experiment families</p>
+          <h2>From smoke tests to paper figures.</h2>
+        </div>
+        <div class="feature-grid">
+          <article><h3>Failure matrix</h3><p>Clean writes, interrupted writes, rename recovery, degraded reads, and self-heal paths.</p></article>
+          <article><h3>Workload shifts</h3><p>Hot/cold phase changes measure placement convergence and background interference.</p></article>
+          <article><h3>QEMU rootfs</h3><p>Boot and degraded-mode records for normal, interrupted, and emergency-mode scenarios.</p></article>
+          <article><h3>Baselines</h3><p>ArgosFS manual/autopilot and documented external comparisons such as Btrfs, ZFS, mdadm, and mergerfs.</p></article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="compatibility.html">Compatibility</a></footer>
+    <script src="app.js"></script>
+  </body>
+</html>

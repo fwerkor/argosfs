@@ -7,9 +7,10 @@ use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig}
 use argosfs::util::clean_path;
 use argosfs::{ArgosError, ArgosFs};
 use clap::{Parser, Subcommand};
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -91,8 +92,8 @@ enum Command {
         path: String,
         #[arg(long, value_parser = parse_u32_auto)]
         mode: u32,
-        #[arg(long, default_value = "0", value_parser = parse_u32_auto)]
-        rdev: u32,
+        #[arg(long, default_value = "0", value_parser = parse_u64_auto)]
+        rdev: u64,
     },
     Symlink {
         root: PathBuf,
@@ -195,6 +196,12 @@ enum Command {
         root: PathBuf,
         #[arg(long)]
         once: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        explain: bool,
+        #[arg(long)]
+        json: bool,
         #[arg(long, default_value_t = 60)]
         interval: u64,
     },
@@ -204,10 +211,15 @@ enum Command {
     },
     EnableEncryption {
         root: PathBuf,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "INSECURE/testing-only: visible in argv and shell history; prefer --key-file or --passphrase-stdin"
+        )]
         passphrase: Option<String>,
         #[arg(long)]
         key_file: Option<PathBuf>,
+        #[arg(long)]
+        passphrase_stdin: bool,
         #[arg(long)]
         reencrypt: bool,
     },
@@ -496,11 +508,26 @@ fn main() -> Result<()> {
         Command::Autopilot {
             root,
             once,
+            dry_run,
+            explain,
+            json,
             interval,
         } => loop {
             let fs = ArgosFs::open(&root)?;
-            println!("{}", serde_json::to_string_pretty(&fs.autopilot_once()?)?);
+            let report = if dry_run || explain {
+                fs.autopilot_dry_run()?
+            } else {
+                fs.autopilot_once()?
+            };
+            if json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
             if once {
+                break;
+            }
+            if dry_run || explain {
                 break;
             }
             thread::sleep(Duration::from_secs(interval));
@@ -513,9 +540,10 @@ fn main() -> Result<()> {
             root,
             passphrase,
             key_file,
+            passphrase_stdin,
             reencrypt,
         } => {
-            let passphrase = load_passphrase(passphrase, key_file)?;
+            let passphrase = load_passphrase(passphrase, key_file, passphrase_stdin)?;
             let fs = ArgosFs::open(root)?;
             fs.enable_encryption(&passphrase)?;
             std::env::set_var("ARGOSFS_KEY", &passphrase);
@@ -615,8 +643,16 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn load_passphrase(passphrase: Option<String>, key_file: Option<PathBuf>) -> Result<String> {
+fn load_passphrase(
+    passphrase: Option<String>,
+    key_file: Option<PathBuf>,
+    passphrase_stdin: bool,
+) -> Result<String> {
+    if passphrase.is_some() as u8 + key_file.is_some() as u8 + passphrase_stdin as u8 > 1 {
+        bail!("choose only one of --passphrase, --key-file, or --passphrase-stdin");
+    }
     if let Some(passphrase) = passphrase {
+        eprintln!("warning: --passphrase is visible in argv and shell history; prefer --key-file or --passphrase-stdin");
         return Ok(passphrase);
     }
     if let Some(path) = key_file {
@@ -624,8 +660,13 @@ fn load_passphrase(passphrase: Option<String>, key_file: Option<PathBuf>) -> Res
             .trim_end_matches(['\r', '\n'])
             .to_string());
     }
+    if passphrase_stdin {
+        let mut passphrase = String::new();
+        io::stdin().read_to_string(&mut passphrase)?;
+        return Ok(passphrase.trim_end_matches(['\r', '\n']).to_string());
+    }
     crypto::passphrase_from_env()?
-        .context("provide --passphrase, --key-file, ARGOSFS_KEY, or ARGOSFS_KEY_FILE")
+        .context("provide --key-file, --passphrase-stdin, ARGOSFS_KEY, ARGOSFS_KEY_FILE, or testing-only --passphrase")
 }
 
 fn load_inline_or_file(value: &str) -> Result<String> {
@@ -644,6 +685,13 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
     if dest != "/" {
         ensure_virtual_dir(volume, &dest, 0o755)?;
     }
+    let dest_ino = volume.resolve_path(&dest, true)?;
+
+    let mut imported_dirs = BTreeMap::<PathBuf, u64>::new();
+    imported_dirs.insert(PathBuf::new(), dest_ino);
+    let mut imported_files = BTreeMap::<(u64, u64), u64>::new();
+
+    let mut directories = vec![(source.to_path_buf(), dest_ino)];
     for entry in walkdir::WalkDir::new(source)
         .follow_links(false)
         .sort_by_file_name()
@@ -653,27 +701,133 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
         if path == source {
             continue;
         }
+
         let rel = path.strip_prefix(source)?;
-        let virtual_path = if dest == "/" {
-            format!("/{}", rel.to_string_lossy())
-        } else {
-            format!("{}/{}", dest.trim_end_matches('/'), rel.to_string_lossy())
-        };
+        let parent_rel = rel.parent().unwrap_or_else(|| Path::new(""));
+        let parent_ino = *imported_dirs
+            .get(parent_rel)
+            .with_context(|| format!("missing imported parent for {}", path.display()))?;
+        let name = rel
+            .file_name()
+            .with_context(|| format!("missing file name for {}", path.display()))?;
+
         let meta = fs::symlink_metadata(path)?;
         let ft = meta.file_type();
         let mode = meta.mode();
+
         if ft.is_dir() {
-            ensure_virtual_dir(volume, &virtual_path, mode & 0o7777)?;
+            let ino = match volume.mkdir_at_with_owner(
+                parent_ino,
+                name,
+                mode & 0o7777,
+                meta.uid(),
+                meta.gid(),
+            ) {
+                Ok(attr) => attr.ino,
+                Err(ArgosError::AlreadyExists(_)) => {
+                    let attr = volume.lookup(parent_ino, name)?;
+                    if attr.kind != argosfs::types::NodeKind::Directory {
+                        bail!(
+                            "import target exists but is not a directory: {}",
+                            path.display()
+                        );
+                    }
+                    attr.ino
+                }
+                Err(err) => return Err(err.into()),
+            };
+            imported_dirs.insert(rel.to_path_buf(), ino);
+            directories.push((path.to_path_buf(), ino));
         } else if ft.is_file() {
-            volume.write_file(&virtual_path, &fs::read(path)?, mode & 0o7777)?;
-            let ino = volume.resolve_path(&virtual_path, false)?;
-            let _ = volume.chown_inode(ino, Some(meta.uid()), Some(meta.gid()));
+            let key = (meta.dev(), meta.ino());
+            if meta.nlink() > 1 {
+                if let Some(existing_ino) = imported_files.get(&key).copied() {
+                    match volume.link_at(existing_ino, parent_ino, name) {
+                        Ok(attr) => {
+                            apply_import_metadata(volume, path, attr.ino, &meta)?;
+                            continue;
+                        }
+                        Err(ArgosError::AlreadyExists(_)) => {
+                            let attr = volume.lookup(parent_ino, name)?;
+                            if attr.ino != existing_ino {
+                                bail!("hardlink import target already exists with a different inode: {}", path.display());
+                            }
+                            apply_import_metadata(volume, path, attr.ino, &meta)?;
+                            continue;
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+            }
+
+            let data = fs::read(path)?;
+            let ino = match volume.create_file_at_with_owner(
+                parent_ino,
+                name,
+                mode & 0o7777,
+                meta.uid(),
+                meta.gid(),
+            ) {
+                Ok(attr) => attr.ino,
+                Err(ArgosError::AlreadyExists(_)) => {
+                    let attr = volume.lookup(parent_ino, name)?;
+                    if attr.kind != argosfs::types::NodeKind::File {
+                        bail!("import target exists but is not a file: {}", path.display());
+                    }
+                    volume.truncate_inode(attr.ino, 0)?;
+                    attr.ino
+                }
+                Err(err) => return Err(err.into()),
+            };
+            if meta.nlink() > 1 {
+                imported_files.insert(key, ino);
+            }
+            if !data.is_empty() {
+                volume.write_inode_range(ino, 0, &data)?;
+            }
+            apply_import_metadata(volume, path, ino, &meta)?;
         } else if ft.is_symlink() {
             let target = fs::read_link(path)?;
-            volume.symlink_path(&target.to_string_lossy(), &virtual_path)?;
+            let attr =
+                volume.symlink_at_with_owner(parent_ino, name, &target, meta.uid(), meta.gid())?;
+            apply_import_metadata(volume, path, attr.ino, &meta)?;
         } else if ft.is_char_device() || ft.is_block_device() || ft.is_fifo() || ft.is_socket() {
-            volume.mknod_path(&virtual_path, mode, meta.rdev() as u32)?;
+            let attr = volume.mknod_at_with_owner(
+                parent_ino,
+                name,
+                mode,
+                meta.rdev(),
+                meta.uid(),
+                meta.gid(),
+            )?;
+            apply_import_metadata(volume, path, attr.ino, &meta)?;
         }
+    }
+
+    for (path, ino) in directories.into_iter().rev() {
+        let meta = fs::symlink_metadata(&path)?;
+        apply_import_metadata(volume, &path, ino, &meta)?;
+    }
+    Ok(())
+}
+
+fn apply_import_metadata(
+    volume: &ArgosFs,
+    source: &Path,
+    ino: u64,
+    meta: &fs::Metadata,
+) -> Result<()> {
+    let _ = volume.chown_inode(ino, Some(meta.uid()), Some(meta.gid()))?;
+    if !meta.file_type().is_symlink() {
+        let _ = volume.chmod_inode(ino, meta.mode() & 0o7777)?;
+    }
+    let atime = meta.atime() as f64 + meta.atime_nsec() as f64 / 1_000_000_000.0;
+    let mtime = meta.mtime() as f64 + meta.mtime_nsec() as f64 / 1_000_000_000.0;
+    let _ = volume.utimens_inode(ino, atime, mtime)?;
+    for (name, value) in read_xattrs(source)? {
+        volume
+            .importxattr_inode(ino, &name, &value)
+            .with_context(|| format!("import xattr {name:?} from {}", source.display()))?;
     }
     Ok(())
 }
@@ -703,14 +857,17 @@ fn ensure_virtual_dir(volume: &ArgosFs, path: &str, mode: u32) -> Result<()> {
 
 fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest)?;
-    let mut paths = volume.iter_paths();
-    paths.sort_by_key(|(path, _)| path.matches('/').count());
+    let mut paths = volume.iter_path_bytes();
+    paths.sort_by_key(|(path, _)| path.iter().filter(|byte| **byte == b'/').count());
+
+    let mut directories = Vec::new();
+    let mut exported_files = BTreeMap::<u64, PathBuf>::new();
     for (path, ino) in paths {
-        if path == "/" {
+        if path.as_slice() == b"/" {
             continue;
         }
         let attr = volume.attr_inode(ino)?;
-        let target = dest.join(path.trim_start_matches('/'));
+        let target = export_target_from_path_bytes(dest, &path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -718,17 +875,33 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
             argosfs::types::NodeKind::Directory => {
                 prepare_export_target(&target, &attr.kind)?;
                 fs::create_dir_all(&target)?;
-                fs::set_permissions(&target, fs::Permissions::from_mode(attr.mode & 0o7777))?;
+                directories.push((ino, target, attr));
             }
             argosfs::types::NodeKind::File => {
                 prepare_export_target(&target, &attr.kind)?;
+                if attr.nlink > 1 {
+                    if let Some(first_target) = exported_files.get(&ino) {
+                        fs::hard_link(first_target, &target).with_context(|| {
+                            format!(
+                                "hardlink {} -> {}",
+                                target.display(),
+                                first_target.display()
+                            )
+                        })?;
+                        apply_export_metadata(volume, ino, &target, &attr)?;
+                        continue;
+                    }
+                    exported_files.insert(ino, target.clone());
+                }
                 fs::write(&target, volume.read_inode(ino, 0, u64::MAX as usize, true)?)?;
-                fs::set_permissions(&target, fs::Permissions::from_mode(attr.mode & 0o7777))?;
+                apply_export_metadata(volume, ino, &target, &attr)?;
             }
             argosfs::types::NodeKind::Symlink => {
                 prepare_export_target(&target, &attr.kind)?;
-                let link = volume.readlink_inode(ino)?;
+                let link = volume.readlink_inode_bytes(ino)?;
+                let link = Path::new(std::ffi::OsStr::from_bytes(&link));
                 std::os::unix::fs::symlink(link, &target)?;
+                apply_export_metadata(volume, ino, &target, &attr)?;
             }
             argosfs::types::NodeKind::Special => {
                 prepare_export_target(&target, &attr.kind)?;
@@ -744,6 +917,76 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
                     return Err(io::Error::last_os_error())
                         .with_context(|| format!("mknod {}", target.display()));
                 }
+                apply_export_metadata(volume, ino, &target, &attr)?;
+            }
+        }
+    }
+
+    for (ino, target, attr) in directories.into_iter().rev() {
+        apply_export_metadata(volume, ino, &target, &attr)?;
+    }
+    let root_attr = volume.attr_path("/", false)?;
+    apply_export_metadata(volume, root_attr.ino, dest, &root_attr)?;
+    Ok(())
+}
+
+fn export_target_from_path_bytes(dest: &Path, path: &[u8]) -> PathBuf {
+    let mut target = dest.to_path_buf();
+    let rel = path.strip_prefix(b"/").unwrap_or(path);
+    for component in rel.split(|byte| *byte == b'/') {
+        if !component.is_empty() {
+            target.push(std::ffi::OsStr::from_bytes(component));
+        }
+    }
+    target
+}
+
+fn apply_export_metadata(
+    volume: &ArgosFs,
+    ino: u64,
+    target: &Path,
+    attr: &argosfs::volume::NodeAttr,
+) -> Result<()> {
+    if let Err(err) = lchown_path(target, attr.uid, attr.gid) {
+        let non_fatal_chown = matches!(
+            err.downcast_ref::<io::Error>()
+                .and_then(|err| err.raw_os_error()),
+            Some(libc::EPERM) | Some(libc::EINVAL)
+        );
+        if !non_fatal_chown {
+            return Err(err);
+        }
+    }
+    if attr.kind != argosfs::types::NodeKind::Symlink {
+        fs::set_permissions(target, fs::Permissions::from_mode(attr.mode & 0o7777))?;
+    }
+    set_times_nofollow(target, attr.atime, attr.mtime)?;
+    for name in volume.listxattr_inode(ino)? {
+        if is_internal_export_xattr(&name) {
+            continue;
+        }
+        let value = volume.getxattr_inode(ino, &name)?;
+        if let Err(err) = write_xattr_nofollow(target, &name, &value) {
+            let non_fatal = matches!(
+                err.downcast_ref::<io::Error>()
+                    .and_then(|err| err.raw_os_error()),
+                Some(libc::EOPNOTSUPP)
+                    | Some(libc::EPERM)
+                    | Some(libc::EACCES)
+                    | Some(libc::EINVAL)
+            );
+            if name == "security.capability" || name.starts_with("user.") {
+                return Err(err)
+                    .with_context(|| format!("write xattr {name:?} to {}", target.display()));
+            }
+            if non_fatal {
+                eprintln!(
+                    "warning: skipped unsupported export xattr {name:?} on {}: {err}",
+                    target.display()
+                );
+            } else {
+                return Err(err)
+                    .with_context(|| format!("write xattr {name:?} to {}", target.display()));
             }
         }
     }
@@ -774,6 +1017,132 @@ fn prepare_export_target(target: &Path, kind: &argosfs::types::NodeKind) -> Resu
     }
 }
 
+fn c_path(path: &Path) -> Result<CString> {
+    Ok(CString::new(path.as_os_str().as_bytes())?)
+}
+
+fn read_xattrs(path: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let c_path = c_path(path)?;
+    let size = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        let err = io::Error::last_os_error();
+        if matches!(err.raw_os_error(), Some(libc::EOPNOTSUPP)) {
+            return Ok(Vec::new());
+        }
+        return Err(err.into());
+    }
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+    let mut names = vec![0u8; size as usize];
+    let read = unsafe {
+        libc::llistxattr(
+            c_path.as_ptr(),
+            names.as_mut_ptr().cast::<libc::c_char>(),
+            names.len(),
+        )
+    };
+    if read < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    names.truncate(read as usize);
+    let mut out = Vec::new();
+    for raw_name in names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let name = std::str::from_utf8(raw_name)
+            .with_context(|| format!("non-UTF-8 xattr name on {}", path.display()))?;
+        let value = read_xattr(path, name)
+            .with_context(|| format!("read xattr {name:?} from {}", path.display()))?;
+        out.push((name.to_string(), value));
+    }
+    Ok(out)
+}
+
+fn read_xattr(path: &Path, name: &str) -> Result<Vec<u8>> {
+    let c_path = c_path(path)?;
+    let c_name = CString::new(name)?;
+    let size =
+        unsafe { libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let mut value = vec![0u8; size as usize];
+    let read = unsafe {
+        libc::lgetxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            value.as_mut_ptr().cast::<libc::c_void>(),
+            value.len(),
+        )
+    };
+    if read < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    value.truncate(read as usize);
+    Ok(value)
+}
+
+fn write_xattr_nofollow(path: &Path, name: &str, value: &[u8]) -> Result<()> {
+    let c_path = c_path(path)?;
+    let c_name = CString::new(name)?;
+    let rc = unsafe {
+        libc::lsetxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            value.as_ptr().cast::<libc::c_void>(),
+            value.len(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+fn is_internal_export_xattr(name: &str) -> bool {
+    name.starts_with("system.argosfs.")
+}
+
+fn lchown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    let c_path = c_path(path)?;
+    let rc = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("lchown {}", path.display()));
+    }
+    Ok(())
+}
+
+fn set_times_nofollow(path: &Path, atime: f64, mtime: f64) -> Result<()> {
+    let c_path = c_path(path)?;
+    let times = [timespec_from_f64(atime), timespec_from_f64(mtime)];
+    let rc = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("utimensat {}", path.display()));
+    }
+    Ok(())
+}
+
+fn timespec_from_f64(value: f64) -> libc::timespec {
+    let seconds = value.trunc().max(0.0);
+    let nanos = ((value - seconds) * 1_000_000_000.0).clamp(0.0, 999_999_999.0);
+    libc::timespec {
+        tv_sec: seconds as libc::time_t,
+        tv_nsec: nanos as libc::c_long,
+    }
+}
+
 fn normalize_dest(dest: &str) -> String {
     clean_path(dest.trim())
 }
@@ -797,5 +1166,18 @@ fn parse_u32_auto(value: &str) -> std::result::Result<u32, String> {
         u32::from_str_radix(trimmed, 8).map_err(|err| err.to_string())
     } else {
         trimmed.parse::<u32>().map_err(|err| err.to_string())
+    }
+}
+
+fn parse_u64_auto(value: &str) -> std::result::Result<u64, String> {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("0o") {
+        u64::from_str_radix(rest, 8).map_err(|err| err.to_string())
+    } else if let Some(rest) = trimmed.strip_prefix("0x") {
+        u64::from_str_radix(rest, 16).map_err(|err| err.to_string())
+    } else if trimmed.chars().all(|ch| matches!(ch, '0'..='7')) && trimmed.len() >= 3 {
+        u64::from_str_radix(trimmed, 8).map_err(|err| err.to_string())
+    } else {
+        trimmed.parse::<u64>().map_err(|err| err.to_string())
     }
 }

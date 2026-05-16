@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Start | ArgosFS</title>
+    <meta name="description" content="Build, test, create, mount, and evaluate ArgosFS.">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body data-page="start">
+    <header class="site-header">
+      <a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a>
+      <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="index.html" data-nav="home">Home</a>
+        <a href="technology.html" data-nav="technology">Technology</a>
+        <a href="research.html" data-nav="research">Research</a>
+        <a href="compatibility.html" data-nav="compatibility">Compatibility</a>
+        <a href="start.html" data-nav="start">Start</a>
+        <a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="page-hero">
+        <canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas>
+        <div>
+          <p class="eyebrow">Get started</p>
+          <h1>Build a local autonomous storage lab.</h1>
+          <p>ArgosFS is a Rust project with a management CLI, FUSE mount frontend, retained validation data, and artifact-evaluation scripts.</p>
+        </div>
+      </section>
+
+      <section class="section steps">
+        <article><span>01</span><h3>Install dependencies</h3><pre><code>sudo apt-get install -y build-essential pkg-config libfuse3-dev fuse3 smartmontools</code></pre></article>
+        <article><span>02</span><h3>Build and test</h3><pre><code>cargo build --release
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings</code></pre></article>
+        <article><span>03</span><h3>Create a volume</h3><pre><code>argosfs mkfs /var/lib/argosfs/root --disks 6 --k 4 --m 2 --compression zstd</code></pre></article>
+        <article><span>04</span><h3>Mount and inspect</h3><pre><code>argosfs mount /var/lib/argosfs/root /mnt/argos-root --foreground
+argosfs health /var/lib/argosfs/root --json</code></pre></article>
+      </section>
+
+      <section class="section callout">
+        <div>
+          <p class="eyebrow">Repository</p>
+          <h2>Everything starts from the GitHub repo.</h2>
+        </div>
+        <a class="button primary" href="https://github.com/fwerkor/argosfs">Clone ArgosFS</a>
+      </section>
+    </main>
+
+    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="technology.html">Technology</a></footer>
+    <script src="app.js"></script>
+  </body>
+</html>
