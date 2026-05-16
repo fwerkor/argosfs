@@ -172,6 +172,15 @@ pub struct RenamePolicy {
     pub uid: Option<u32>,
 }
 
+struct PlacementRequest<'a> {
+    key: &'a str,
+    count: usize,
+    storage_class: StorageTier,
+    boot_critical: bool,
+    exclude_disks: &'a BTreeSet<String>,
+    required_bytes: u64,
+}
+
 impl ArgosFs {
     pub fn create(
         root: impl AsRef<Path>,
@@ -2974,12 +2983,14 @@ impl ArgosFs {
             let encoded = self.rs.encode(&data_shards)?;
             let placements = self.choose_disks_locked(
                 meta,
-                &stripe_id,
-                self.rs.total(),
-                storage_class,
-                boot_critical,
-                exclude_disks,
-                shard_size as u64,
+                PlacementRequest {
+                    key: &stripe_id,
+                    count: self.rs.total(),
+                    storage_class,
+                    boot_critical,
+                    exclude_disks,
+                    required_bytes: shard_size as u64,
+                },
             )?;
             let mut shards = Vec::new();
             for (slot, shard_data) in encoded.iter().enumerate() {
@@ -3066,12 +3077,7 @@ impl ArgosFs {
     fn choose_disks_locked(
         &self,
         meta: &Metadata,
-        key: &str,
-        count: usize,
-        storage_class: StorageTier,
-        boot_critical: bool,
-        exclude_disks: &BTreeSet<String>,
-        required_bytes: u64,
+        request: PlacementRequest<'_>,
     ) -> Result<Vec<String>> {
         let mut scored = Vec::new();
         let local_numa = meta
@@ -3080,24 +3086,24 @@ impl ArgosFs {
             .then(advanced_io::current_numa_node)
             .flatten();
         for (disk_id, disk) in &meta.disks {
-            if exclude_disks.contains(disk_id) || disk.status != DiskStatus::Online {
+            if request.exclude_disks.contains(disk_id) || disk.status != DiskStatus::Online {
                 continue;
             }
             let disk_path = relative_or_absolute(&self.root, &disk.path);
             if !disk_path.join("shards").exists() {
                 continue;
             }
-            if !self.disk_has_capacity(meta, disk_id, disk, required_bytes) {
+            if !self.disk_has_capacity(meta, disk_id, disk, request.required_bytes) {
                 continue;
             }
-            let tier_bonus = match (storage_class, disk.tier) {
+            let tier_bonus = match (request.storage_class, disk.tier) {
                 (StorageTier::Hot, StorageTier::Hot) => 2.5,
                 (StorageTier::Hot, StorageTier::Cold) => 0.45,
                 (StorageTier::Cold, StorageTier::Cold) => 2.2,
                 (StorageTier::Cold, StorageTier::Hot) => 0.55,
                 _ => 1.0,
             };
-            let u = stable_u01(&[&meta.uuid, key, disk_id]);
+            let u = stable_u01(&[&meta.uuid, request.key, disk_id]);
             let latency_penalty = 1.0
                 + ((disk.read_latency_ewma_ms + disk.write_latency_ewma_ms) / 2.0 / 20.0).min(4.0);
             let mut score = (-u.ln() * latency_penalty) / (disk.weight.max(0.01) * tier_bonus);
@@ -3115,14 +3121,14 @@ impl ArgosFs {
                     score += (used as f64 / capacity as f64).min(2.0);
                 }
             }
-            if boot_critical && disk.tier == StorageTier::Cold {
+            if request.boot_critical && disk.tier == StorageTier::Cold {
                 score *= 1.35;
             }
             scored.push((score, disk_id.clone()));
         }
-        if scored.len() < count {
+        if scored.len() < request.count {
             return Err(ArgosError::NotEnoughDisks {
-                need: count,
+                need: request.count,
                 have: scored.len(),
             });
         }
@@ -3137,7 +3143,7 @@ impl ArgosFs {
                 .unwrap_or(id.as_str());
             if domains.insert(domain.to_string()) {
                 selected.push(id.clone());
-                if selected.len() == count {
+                if selected.len() == request.count {
                     return Ok(selected);
                 }
             }
@@ -3145,7 +3151,7 @@ impl ArgosFs {
         for (_, id) in scored {
             if !selected.contains(&id) {
                 selected.push(id);
-                if selected.len() == count {
+                if selected.len() == request.count {
                     return Ok(selected);
                 }
             }
