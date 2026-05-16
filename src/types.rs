@@ -351,7 +351,7 @@ pub struct Inode {
     pub gid: u32,
     pub nlink: u32,
     pub size: u64,
-    pub rdev: u32,
+    pub rdev: u64,
     pub atime: f64,
     pub mtime: f64,
     pub ctime: f64,

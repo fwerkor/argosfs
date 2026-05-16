@@ -189,7 +189,7 @@ impl Filesystem for ArgosFuse {
                     parent.0,
                     name,
                     mode & !umask,
-                    rdev,
+                    rdev as u64,
                     req.uid(),
                     req.gid(),
                 )
@@ -621,7 +621,7 @@ fn to_file_attr(attr: &NodeAttr) -> FileAttr {
         nlink: attr.nlink,
         uid: attr.uid,
         gid: attr.gid,
-        rdev: attr.rdev,
+        rdev: attr.rdev as u32,
         blksize: attr.blksize,
         flags: 0,
     }

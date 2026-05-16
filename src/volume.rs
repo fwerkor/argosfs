@@ -147,7 +147,7 @@ pub struct NodeAttr {
     pub gid: u32,
     pub nlink: u32,
     pub size: u64,
-    pub rdev: u32,
+    pub rdev: u64,
     pub atime: f64,
     pub mtime: f64,
     pub ctime: f64,
@@ -523,7 +523,7 @@ impl ArgosFs {
         parent: InodeId,
         name: &OsStr,
         mode: u32,
-        rdev: u32,
+        rdev: u64,
         uid: u32,
         gid: u32,
     ) -> Result<NodeAttr> {
@@ -1043,6 +1043,15 @@ impl ArgosFs {
 
     pub fn setxattr_inode(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<()> {
         validate_xattr_write(name)?;
+        self.setxattr_inode_unchecked(ino, name, value)
+    }
+
+    pub fn importxattr_inode(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<()> {
+        xattr_namespace(name)?;
+        self.setxattr_inode_unchecked(ino, name, value)
+    }
+
+    fn setxattr_inode_unchecked(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<()> {
         let mut meta = self.meta.lock();
         let inode = meta
             .inodes
@@ -1153,9 +1162,7 @@ impl ArgosFs {
         let mut names = inode
             .xattrs
             .keys()
-            .filter(|name| {
-                xattr_namespace(name).is_ok_and(|namespace| namespace == XattrNamespace::User)
-            })
+            .filter(|name| xattr_namespace(name).is_ok())
             .cloned()
             .collect::<BTreeSet<_>>();
         if inode.posix_acl_access.is_some() {
@@ -2371,7 +2378,7 @@ impl ArgosFs {
         parent: InodeId,
         name: &str,
         mode: u32,
-        rdev: u32,
+        rdev: u64,
         uid: u32,
         gid: u32,
     ) -> Result<InodeId> {
@@ -3971,10 +3978,7 @@ fn validate_xattr_read(name: &str) -> Result<()> {
         return Ok(());
     }
     match xattr_namespace(name)? {
-        XattrNamespace::User => Ok(()),
-        XattrNamespace::Trusted | XattrNamespace::Security => Err(ArgosError::PermissionDenied(
-            format!("xattr namespace is protected: {name}"),
-        )),
+        XattrNamespace::User | XattrNamespace::Trusted | XattrNamespace::Security => Ok(()),
         XattrNamespace::System | XattrNamespace::ArgosSystem => Err(ArgosError::Unsupported(
             format!("unsupported system xattr: {name}"),
         )),
