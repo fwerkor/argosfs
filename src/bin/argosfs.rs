@@ -740,7 +740,14 @@ fn apply_import_metadata(
     for (name, value) in read_xattrs(source)? {
         match volume.setxattr_inode(ino, &name, &value) {
             Ok(()) => {}
-            Err(ArgosError::Unsupported(_)) | Err(ArgosError::PermissionDenied(_)) => {}
+            Err(ArgosError::Unsupported(err)) | Err(ArgosError::PermissionDenied(err))
+                if !name.starts_with("user.") =>
+            {
+                eprintln!(
+                    "warning: skipped unsupported xattr {name:?} on {}: {err}",
+                    source.display()
+                );
+            }
             Err(err) => return Err(err.into()),
         }
     }
