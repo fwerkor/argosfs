@@ -22,6 +22,8 @@ import sys
 
 root = os.fsencode(sys.argv[1])
 os.makedirs(root, exist_ok=True)
+os.chmod(root, 0o751)
+os.utime(root, ns=(1_700_000_011_111_111_111, 1_700_000_012_222_222_222), follow_symlinks=False)
 
 def p(*parts):
     return os.path.join(root, *parts)
@@ -118,6 +120,17 @@ for rel in sorted(a):
     for key in ["kind", "data", "target", "xattrs"]:
         if aa.get(key) != bb.get(key):
             raise SystemExit(f"mismatch at {rel!r} key={key}: {aa.get(key)!r} != {bb.get(key)!r}")
+
+main_rel = os.path.join(b"dir-\xff", b"file-\xfe.txt")
+hard_rel = b"hardlink-to-nonutf8-file"
+src_main = os.stat(os.path.join(src, main_rel), follow_symlinks=False)
+src_hard = os.stat(os.path.join(src, hard_rel), follow_symlinks=False)
+dst_main = os.stat(os.path.join(dst, main_rel), follow_symlinks=False)
+dst_hard = os.stat(os.path.join(dst, hard_rel), follow_symlinks=False)
+if (src_main.st_dev, src_main.st_ino) != (src_hard.st_dev, src_hard.st_ino):
+    raise SystemExit("source hardlink fixture is not actually linked")
+if (dst_main.st_dev, dst_main.st_ino) != (dst_hard.st_dev, dst_hard.st_ino):
+    raise SystemExit("export did not preserve hardlink relationship")
 
 print("import/export byte roundtrip: ok")
 PY
