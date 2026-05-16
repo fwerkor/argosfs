@@ -23,7 +23,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const ROOT_INO: InodeId = 1;
-const NON_UTF8_NAME_PREFIX: &str = ".argosfs-name-hex:";
+const NON_UTF8_NAME_PREFIX: &str = ".argosfs-name-bytes-v2:";
 const LEGACY_NON_UTF8_NAME_PREFIX: &str = "\0argosfs-name-hex:";
 const BOOT_CRITICAL_XATTR: &str = "system.argosfs.boot_critical";
 
@@ -3763,23 +3763,12 @@ fn entry_name_from_os(name: &OsStr) -> Result<String> {
     validate_entry_name_bytes(bytes)?;
     if let Some(name) = name.to_str() {
         validate_entry_name(name)?;
-        if !name.starts_with(NON_UTF8_NAME_PREFIX) && !name.starts_with(LEGACY_NON_UTF8_NAME_PREFIX)
-        {
-            return Ok(name.to_string());
-        }
+        return Ok(name.to_string());
     }
     Ok(format!("{NON_UTF8_NAME_PREFIX}{}", hex::encode(bytes)))
 }
 
 fn validate_entry_name(name: &str) -> Result<()> {
-    if let Some(hex_name) = name
-        .strip_prefix(NON_UTF8_NAME_PREFIX)
-        .or_else(|| name.strip_prefix(LEGACY_NON_UTF8_NAME_PREFIX))
-    {
-        let bytes = hex::decode(hex_name)
-            .map_err(|err| ArgosError::Invalid(format!("invalid encoded entry name: {err}")))?;
-        return validate_entry_name_bytes(&bytes);
-    }
     if name.is_empty() || name == "." || name == ".." {
         return Err(ArgosError::Invalid(format!("invalid entry name: {name:?}")));
     }
