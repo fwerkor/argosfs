@@ -15,87 +15,130 @@ if (toggle && nav) {
   });
 }
 
-document.querySelectorAll(".mesh-canvas").forEach((canvas, canvasIndex) => {
+const palette = {
+  line: "rgba(148, 163, 184, .18)",
+  faint: "rgba(148, 163, 184, .08)",
+  green: "rgba(125, 211, 167, .82)",
+  cyan: "rgba(103, 232, 249, .80)",
+  amber: "rgba(251, 191, 36, .82)",
+  violet: "rgba(196, 181, 253, .78)",
+  panel: "rgba(15, 23, 42, .58)",
+  text: "rgba(247, 249, 251, .72)"
+};
+
+function drawRoundedRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+
+function drawCanvas(canvas) {
   const ctx = canvas.getContext("2d");
-  const nodes = Array.from({ length: canvas.dataset.scene === "hero" ? 18 : 12 }, (_, index) => ({
-    x: 0,
-    y: 0,
-    tier: index % 4,
-    phase: index * 0.61 + canvasIndex
-  }));
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, canvas.clientWidth);
+  const h = Math.max(1, canvas.clientHeight);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
 
-  function resize() {
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
-    canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-
-  function draw(time) {
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
-    const heroScene = canvas.dataset.scene === "hero";
-    const cx = w * (heroScene ? 0.62 : 0.70);
-    const cy = h * (heroScene ? 0.40 : 0.48);
-    const rx = Math.max(160, w * 0.31);
-    const ry = Math.max(110, h * (heroScene ? 0.22 : 0.25));
-    ctx.clearRect(0, 0, w, h);
-
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(120, 215, 255, .12)";
-    for (let x = 0; x < w; x += 72) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
-      ctx.stroke();
-    }
-    for (let y = 0; y < h; y += 72) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
-      ctx.stroke();
-    }
-
-    nodes.forEach((node, index) => {
-      const angle = (index / nodes.length) * Math.PI * 2 + Math.sin(time / 2600 + node.phase) * 0.08;
-      node.x = cx + Math.cos(angle) * rx + Math.sin(time / 1600 + index) * 10;
-      node.y = cy + Math.sin(angle) * ry + Math.cos(time / 1900 + index) * 8;
-    });
-
-    nodes.forEach((node, index) => {
-      const next = nodes[(index + 5) % nodes.length];
-      const other = nodes[(index + 9) % nodes.length];
-      drawLink(node, next, "rgba(105, 229, 181, .22)");
-      drawLink(node, other, "rgba(255, 211, 110, .12)");
-    });
-
-    nodes.forEach((node, index) => {
-      const colors = ["#69e5b5", "#78d7ff", "#ffd36e", "#ff7f70"];
-      ctx.fillStyle = colors[node.tier];
-      ctx.beginPath();
-      ctx.rect(node.x - 8, node.y - 8, 16, 16);
-      ctx.fill();
-      ctx.strokeStyle = "rgba(246,244,234,.45)";
-      ctx.strokeRect(node.x - 11, node.y - 11, 22, 22);
-      if (heroScene && index < 10 && w > 760 && node.x > w * 0.50) {
-        ctx.fillStyle = "rgba(246,244,234,.72)";
-        ctx.font = "12px ui-monospace, monospace";
-        ctx.fillText(`disk-${String(index).padStart(4, "0")}`, node.x + 16, node.y + 4);
-      }
-    });
-
-    requestAnimationFrame(draw);
-  }
-
-  function drawLink(a, b, color) {
-    ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = palette.faint;
+  const grid = w > 900 ? 96 : 72;
+  for (let x = 0; x <= w; x += grid) {
     ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= h; y += grid) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
     ctx.stroke();
   }
 
-  resize();
-  window.addEventListener("resize", resize);
-  requestAnimationFrame(draw);
+  const heroScene = canvas.dataset.scene === "hero";
+  const originX = heroScene ? w * 0.60 : w * 0.58;
+  const originY = heroScene ? h * 0.38 : h * 0.42;
+  const scale = Math.min(Math.max(w / 1200, 0.72), 1.12);
+  const boxW = 122 * scale;
+  const boxH = 46 * scale;
+  const gapX = 158 * scale;
+  const gapY = 86 * scale;
+
+  const nodes = [
+    { id: "POSIX", x: originX - gapX * 1.35, y: originY - gapY * .85, color: palette.cyan },
+    { id: "Stripe", x: originX - gapX * .32, y: originY - gapY * .85, color: palette.green },
+    { id: "Parity", x: originX + gapX * .72, y: originY - gapY * .85, color: palette.amber },
+    { id: "Hot tier", x: originX - gapX * .85, y: originY + gapY * .10, color: palette.green },
+    { id: "Cold tier", x: originX + gapX * .18, y: originY + gapY * .10, color: palette.violet },
+    { id: "Metadata", x: originX - gapX * .32, y: originY + gapY * 1.05, color: palette.cyan },
+    { id: "Autopilot", x: originX + gapX * .72, y: originY + gapY * 1.05, color: palette.amber }
+  ];
+
+  const visibleNodes = nodes.filter((node) => (
+    node.x > -boxW && node.x < w + boxW && node.y > -boxH && node.y < h + boxH
+  ));
+
+  const links = [
+    ["POSIX", "Stripe"],
+    ["Stripe", "Parity"],
+    ["Stripe", "Hot tier"],
+    ["Stripe", "Cold tier"],
+    ["Hot tier", "Metadata"],
+    ["Cold tier", "Metadata"],
+    ["Metadata", "Autopilot"],
+    ["Autopilot", "Hot tier"],
+    ["Autopilot", "Cold tier"]
+  ];
+
+  ctx.lineWidth = 1.4;
+  links.forEach(([from, to]) => {
+    const a = visibleNodes.find((node) => node.id === from);
+    const b = visibleNodes.find((node) => node.id === to);
+    if (!a || !b) return;
+    ctx.strokeStyle = palette.line;
+    ctx.beginPath();
+    ctx.moveTo(a.x + boxW / 2, a.y + boxH / 2);
+    ctx.lineTo(b.x + boxW / 2, b.y + boxH / 2);
+    ctx.stroke();
+  });
+
+  visibleNodes.forEach((node) => {
+    drawRoundedRect(ctx, node.x, node.y, boxW, boxH, 14 * scale);
+    ctx.fillStyle = palette.panel;
+    ctx.fill();
+    ctx.strokeStyle = node.color;
+    ctx.stroke();
+
+    ctx.fillStyle = node.color;
+    ctx.beginPath();
+    ctx.arc(node.x + 18 * scale, node.y + boxH / 2, 4.5 * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (w > 620) {
+      ctx.fillStyle = palette.text;
+      ctx.font = `${Math.round(12 * scale)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+      ctx.fillText(node.id, node.x + 30 * scale, node.y + boxH / 2 + 4 * scale);
+    }
+  });
+}
+
+const canvases = document.querySelectorAll(".mesh-canvas");
+canvases.forEach((canvas) => {
+  drawCanvas(canvas);
+});
+
+let resizeTimer;
+window.addEventListener("resize", () => {
+  window.clearTimeout(resizeTimer);
+  resizeTimer = window.setTimeout(() => {
+    canvases.forEach((canvas) => drawCanvas(canvas));
+  }, 80);
 });
