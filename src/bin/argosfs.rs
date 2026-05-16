@@ -1026,10 +1026,7 @@ fn read_xattrs(path: &Path) -> Result<Vec<(String, Vec<u8>)>> {
     let size = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
     if size < 0 {
         let err = io::Error::last_os_error();
-        if matches!(
-            err.raw_os_error(),
-            Some(libc::EOPNOTSUPP) | Some(libc::EPERM) | Some(libc::EACCES)
-        ) {
+        if matches!(err.raw_os_error(), Some(libc::EOPNOTSUPP)) {
             return Ok(Vec::new());
         }
         return Err(err.into());
