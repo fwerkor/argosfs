@@ -3789,8 +3789,7 @@ fn validate_entry_name_bytes(name: &[u8]) -> Result<()> {
 }
 
 fn decode_entry_name_bytes(name: &str) -> Vec<u8> {
-    name.strip_prefix(NON_UTF8_NAME_PREFIX)
-        .or_else(|| name.strip_prefix(LEGACY_NON_UTF8_NAME_PREFIX))
+    name.strip_prefix(LEGACY_NON_UTF8_NAME_PREFIX)
         .and_then(|encoded| hex::decode(encoded).ok())
         .unwrap_or_else(|| name.as_bytes().to_vec())
 }
