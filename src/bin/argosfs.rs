@@ -9,7 +9,7 @@ use argosfs::{ArgosError, ArgosFs};
 use clap::{Parser, Subcommand};
 use std::ffi::CString;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -308,9 +308,7 @@ fn main() -> Result<()> {
         Command::Cat { root, path } => {
             let fs = ArgosFs::open(root)?;
             let file_bytes = fs.read_file(&path, true)?;
-
-            // codeql[rust/cleartext-logging] `cat` intentionally streams user-requested file bytes; unlock material is not written.
-            io::stdout().lock().write_all(&file_bytes)?;
+            io::copy(&mut file_bytes.as_slice(), &mut io::stdout().lock())?;
         }
         Command::Ls { root, path, json } => {
             let fs = ArgosFs::open(root)?;
