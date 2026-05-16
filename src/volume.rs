@@ -607,7 +607,11 @@ impl ArgosFs {
             .clone();
         match inode.kind {
             NodeKind::Directory => return Err(ArgosError::IsDirectory(format!("inode {ino}"))),
-            NodeKind::Symlink => return Ok(inode.target.unwrap_or_default().into_bytes()),
+            NodeKind::Symlink => {
+                return Ok(decode_symlink_target_bytes(
+                    inode.target.as_deref().unwrap_or_default(),
+                ));
+            }
             NodeKind::Special => {
                 return Err(ArgosError::Unsupported(format!(
                     "special inode {ino} has no data stream"
