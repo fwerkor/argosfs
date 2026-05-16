@@ -98,4 +98,4 @@ require_absent 'random\.Random\(424242\)' scripts/experiments/run_failure_matrix
 require_present 'ARGOSFS_EXPERIMENT_SEED' scripts/experiments/run_failure_matrix.py \
   "failure matrix should use configured experiment seed"
 
-echo "local PR64 guard passed"
+echo "regression checks passed"
