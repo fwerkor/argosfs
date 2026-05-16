@@ -23,7 +23,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const ROOT_INO: InodeId = 1;
-const NON_UTF8_NAME_PREFIX: &str = ".argosfs-name-bytes-v2:";
+const NON_UTF8_NAME_PREFIX: &str = ".argosfs-name-nonutf8-v3:";
+const ESCAPED_UTF8_NAME_PREFIX: &str = ".argosfs-name-utf8-v3:";
 const LEGACY_NON_UTF8_NAME_PREFIX: &str = "\0argosfs-name-hex:";
 const BOOT_CRITICAL_XATTR: &str = "system.argosfs.boot_critical";
 
@@ -1109,11 +1110,10 @@ impl ArgosFs {
                 return Ok(acl::nfs4_to_json(acl)?.into_bytes());
             }
             BOOT_CRITICAL_XATTR => {
-                return Ok(if inode.boot_critical {
-                    b"1".to_vec()
-                } else {
-                    b"0".to_vec()
-                });
+                if inode.boot_critical {
+                    return Ok(b"1".to_vec());
+                }
+                return Err(ArgosError::NotFound(format!("xattr {name}")));
             }
             _ => {}
         }
@@ -3763,6 +3763,9 @@ fn entry_name_from_os(name: &OsStr) -> Result<String> {
     validate_entry_name_bytes(bytes)?;
     if let Some(name) = name.to_str() {
         validate_entry_name(name)?;
+        if name.starts_with(NON_UTF8_NAME_PREFIX) || name.starts_with(ESCAPED_UTF8_NAME_PREFIX) {
+            return Ok(format!("{ESCAPED_UTF8_NAME_PREFIX}{}", hex::encode(bytes)));
+        }
         return Ok(name.to_string());
     }
     Ok(format!("{NON_UTF8_NAME_PREFIX}{}", hex::encode(bytes)))
@@ -3789,18 +3792,15 @@ fn validate_entry_name_bytes(name: &[u8]) -> Result<()> {
 }
 
 fn decode_entry_name_bytes(name: &str) -> Vec<u8> {
-    if let Some(encoded) = name.strip_prefix(LEGACY_NON_UTF8_NAME_PREFIX) {
-        return hex::decode(encoded).unwrap_or_else(|_| name.as_bytes().to_vec());
-    }
-
-    if let Some(encoded) = name.strip_prefix(NON_UTF8_NAME_PREFIX) {
-        if let Ok(bytes) = hex::decode(encoded) {
-            if std::str::from_utf8(&bytes).is_err() {
-                return bytes;
-            }
+    for prefix in [
+        ESCAPED_UTF8_NAME_PREFIX,
+        NON_UTF8_NAME_PREFIX,
+        LEGACY_NON_UTF8_NAME_PREFIX,
+    ] {
+        if let Some(encoded) = name.strip_prefix(prefix) {
+            return hex::decode(encoded).unwrap_or_else(|_| name.as_bytes().to_vec());
         }
     }
-
     name.as_bytes().to_vec()
 }
 
