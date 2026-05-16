@@ -691,7 +691,7 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
     imported_dirs.insert(PathBuf::new(), dest_ino);
     let mut imported_files = BTreeMap::<(u64, u64), u64>::new();
 
-    let mut directories = Vec::new();
+    let mut directories = vec![(source.to_path_buf(), dest_ino)];
     for entry in walkdir::WalkDir::new(source)
         .follow_links(false)
         .sort_by_file_name()
@@ -925,6 +925,8 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
     for (ino, target, attr) in directories.into_iter().rev() {
         apply_export_metadata(volume, ino, &target, &attr)?;
     }
+    let root_attr = volume.attr_path("/", false)?;
+    apply_export_metadata(volume, root_attr.ino, dest, &root_attr)?;
     Ok(())
 }
 
@@ -960,6 +962,9 @@ fn apply_export_metadata(
     }
     set_times_nofollow(target, attr.atime, attr.mtime)?;
     for name in volume.listxattr_inode(ino)? {
+        if is_internal_export_xattr(&name) {
+            continue;
+        }
         let value = volume.getxattr_inode(ino, &name)?;
         if let Err(err) = write_xattr_nofollow(target, &name, &value) {
             let non_fatal = matches!(
@@ -1098,6 +1103,10 @@ fn write_xattr_nofollow(path: &Path, name: &str, value: &[u8]) -> Result<()> {
         return Err(io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+fn is_internal_export_xattr(name: &str) -> bool {
+    name.starts_with("system.argosfs.")
 }
 
 fn lchown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {

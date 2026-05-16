@@ -3978,10 +3978,13 @@ fn validate_xattr_read(name: &str) -> Result<()> {
         return Ok(());
     }
     match xattr_namespace(name)? {
-        XattrNamespace::User | XattrNamespace::Trusted | XattrNamespace::Security => Ok(()),
-        XattrNamespace::System | XattrNamespace::ArgosSystem => Err(ArgosError::Unsupported(
-            format!("unsupported system xattr: {name}"),
-        )),
+        XattrNamespace::User
+        | XattrNamespace::Trusted
+        | XattrNamespace::Security
+        | XattrNamespace::System => Ok(()),
+        XattrNamespace::ArgosSystem => Err(ArgosError::Unsupported(format!(
+            "unsupported ArgosFS-internal xattr: {name}"
+        ))),
     }
 }
 
