@@ -497,16 +497,14 @@ fn main() -> Result<()> {
             root,
             once,
             interval,
-        } => {
-            let fs = ArgosFs::open(root)?;
-            loop {
-                println!("{}", serde_json::to_string_pretty(&fs.autopilot_once()?)?);
-                if once {
-                    break;
-                }
-                thread::sleep(Duration::from_secs(interval));
+        } => loop {
+            let fs = ArgosFs::open(&root)?;
+            println!("{}", serde_json::to_string_pretty(&fs.autopilot_once()?)?);
+            if once {
+                break;
             }
-        }
+            thread::sleep(Duration::from_secs(interval));
+        },
         Command::Snapshot { root, name } => {
             let path = ArgosFs::open(root)?.snapshot(&name)?;
             println!("{}", path.display());

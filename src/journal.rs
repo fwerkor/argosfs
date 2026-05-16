@@ -2,7 +2,7 @@ use crate::error::{ArgosError, Result};
 use crate::types::{
     Metadata, MetadataCandidateReport, MetadataIntegrity, TransactionReport, FORMAT_VERSION,
 };
-use crate::util::{append_json_line, atomic_write, now_f64, read_to_vec, sha256_hex};
+use crate::util::{append_json_line, atomic_write, now_f64, read_to_vec, sha256_hex, FileLock};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::cell::RefCell;
@@ -222,6 +222,26 @@ pub fn append_transaction(
     action: &str,
     details: serde_json::Value,
 ) -> Result<()> {
+    append_transaction_checked(root, meta, None, action, details)
+}
+
+pub fn append_transaction_checked(
+    root: &Path,
+    meta: &mut Metadata,
+    expected_previous_txid: Option<u64>,
+    action: &str,
+    details: serde_json::Value,
+) -> Result<()> {
+    let _lock = FileLock::exclusive(&transaction_lock_path(root))?;
+    if let Some(expected) = expected_previous_txid {
+        if let Some(current) = latest_metadata_txid_unlocked(root)? {
+            if current > expected {
+                return Err(ArgosError::Conflict(format!(
+                    "volume advanced from txid {expected} to {current}; reopen and retry"
+                )));
+            }
+        }
+    }
     inject_crash("before-journal")?;
     let previous_meta_hash = if meta.integrity.meta_hash.is_empty() {
         canonical_metadata_hash(meta)?
@@ -242,6 +262,7 @@ pub fn append_event(
     action: &str,
     details: serde_json::Value,
 ) -> Result<()> {
+    let _lock = FileLock::exclusive(&transaction_lock_path(root))?;
     let previous_record_hash = scan(root)?.last_valid_record_hash;
     let record = build_record(meta, action, details, previous_record_hash, now_f64())?;
     append_record(root, &record)
@@ -480,6 +501,23 @@ fn report_latest_snapshot(root: &Path) -> Result<Option<Metadata>> {
     Ok(latest)
 }
 
+fn latest_metadata_txid_unlocked(root: &Path) -> Result<Option<u64>> {
+    let mut best = read_metadata_candidates(root)
+        .into_iter()
+        .filter_map(|candidate| candidate.metadata)
+        .max_by(|left, right| metadata_order(left).cmp(&metadata_order(right)));
+    if let Some(snapshot) = report_latest_snapshot(root)? {
+        if best
+            .as_ref()
+            .map(|metadata| metadata_order(&snapshot) > metadata_order(metadata))
+            .unwrap_or(true)
+        {
+            best = Some(snapshot);
+        }
+    }
+    Ok(best.map(|metadata| metadata.txid))
+}
+
 fn metadata_paths(root: &Path) -> Vec<(String, PathBuf)> {
     let system = root.join(".argosfs");
     vec![
@@ -491,6 +529,10 @@ fn metadata_paths(root: &Path) -> Vec<(String, PathBuf)> {
 
 fn journal_path(root: &Path) -> PathBuf {
     root.join(".argosfs/journal.jsonl")
+}
+
+fn transaction_lock_path(root: &Path) -> PathBuf {
+    root.join(".argosfs/tx.lock")
 }
 
 fn metadata_order(meta: &Metadata) -> (u64, u64) {

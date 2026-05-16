@@ -57,8 +57,9 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
   transaction journal snapshots, automatic journal replay, double-write
   mismatch detection, and named metadata snapshots.
 - RAM + persistent L2 block cache.
-- Health scoring from SMART-like counters, predicted failure detection, disk
-  draining, repair, rebalancing, and `autopilot`.
+- Health scoring from SMART-like counters plus an `autopilot` planner with
+  persistent risk memory, confirmation/cooldown gates, incremental scrub,
+  budgeted rebalance, and metadata-conflict protection.
 - Root filesystem integration assets for initramfs and systemd.
 - Comprehensive Rust tests and `paper-data/` validation output for later papers.
 

@@ -4,7 +4,7 @@ use argosfs::crypto;
 use argosfs::journal;
 use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
 use argosfs::util::{directory_size, sha256_hex};
-use argosfs::ArgosFs;
+use argosfs::{ArgosError, ArgosFs, AutopilotConfig};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
@@ -432,6 +432,106 @@ fn drain_remove_and_rebalance_keep_data_available() {
     let moved = fs.rebalance().unwrap();
     assert_eq!(moved, 2);
     assert_eq!(fs.fsck(true, true).unwrap().unrecoverable_files, 0);
+}
+
+#[test]
+fn autopilot_confirms_risk_before_draining_and_keeps_data_available() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 5, false).unwrap();
+    fs.write_file("/a", b"alpha", 0o644).unwrap();
+    fs.write_file("/b", b"beta", 0o644).unwrap();
+
+    let mut health = fs
+        .metadata_snapshot()
+        .disks
+        .get("disk-0001")
+        .unwrap()
+        .health
+        .clone();
+    health.pending_sectors = 12;
+    fs.set_disk_health("disk-0001", health).unwrap();
+
+    let autopilot = AutopilotConfig {
+        probe_interval_sec: u64::MAX,
+        smart_interval_sec: u64::MAX,
+        scrub_interval_sec: u64::MAX,
+        rebalance_interval_sec: u64::MAX,
+        risk_confirmations: 2,
+        ..AutopilotConfig::default()
+    };
+
+    let first = fs.autopilot_once_with_config(autopilot.clone()).unwrap();
+    assert!(first["actions"].as_array().unwrap().iter().any(|action| {
+        action["action"] == "observe-predicted-failure" && action["disk_id"] == "disk-0001"
+    }));
+    assert_eq!(
+        fs.metadata_snapshot().disks["disk-0001"].status,
+        DiskStatus::Online
+    );
+
+    let second = fs.autopilot_once_with_config(autopilot).unwrap();
+    assert!(second["actions"].as_array().unwrap().iter().any(|action| {
+        action["action"] == "drain-predicted-failure" && action["disk_id"] == "disk-0001"
+    }));
+    assert_eq!(
+        fs.metadata_snapshot().disks["disk-0001"].status,
+        DiskStatus::Degraded
+    );
+    assert_eq!(fs.read_file("/a", true).unwrap(), b"alpha");
+    assert_eq!(fs.read_file("/b", true).unwrap(), b"beta");
+}
+
+#[test]
+fn autopilot_rebalances_with_a_file_budget() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 5, false).unwrap();
+    for index in 0..5 {
+        fs.write_file(
+            &format!("/file-{index}"),
+            format!("payload-{index}").as_bytes(),
+            0o644,
+        )
+        .unwrap();
+    }
+    fs.add_disk(None, Some(StorageTier::Warm), Some(1.0), Some(0), false)
+        .unwrap();
+
+    let result = fs
+        .autopilot_once_with_config(AutopilotConfig {
+            probe_interval_sec: u64::MAX,
+            smart_interval_sec: u64::MAX,
+            scrub_interval_sec: u64::MAX,
+            rebalance_interval_sec: 0,
+            rebalance_files_per_run: 2,
+            rebalance_min_skew: 0.0,
+            ..AutopilotConfig::default()
+        })
+        .unwrap();
+    let rebalance = result["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action"] == "rebalance-incremental")
+        .unwrap();
+    assert!(rebalance["rewritten_files"].as_u64().unwrap() <= 2);
+}
+
+#[test]
+fn stale_metadata_commits_are_rejected_instead_of_overwriting_newer_state() {
+    let tmp = TempDir::new().unwrap();
+    let fs1 = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    let fs2 = ArgosFs::open(tmp.path()).unwrap();
+
+    fs1.write_file("/fresh", b"fresh", 0o644).unwrap();
+    let err = fs2.write_file("/stale", b"stale", 0o644).unwrap_err();
+    assert!(matches!(err, ArgosError::Conflict(_)));
+
+    let reopened = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(reopened.read_file("/fresh", true).unwrap(), b"fresh");
+    assert!(matches!(
+        reopened.read_file("/stale", true).unwrap_err(),
+        ArgosError::NotFound(_)
+    ));
 }
 
 #[test]

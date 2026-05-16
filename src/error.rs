@@ -34,6 +34,8 @@ pub enum ArgosError {
     Invalid(String),
     #[error("permission denied: {0}")]
     PermissionDenied(String),
+    #[error("metadata conflict: {0}")]
+    Conflict(String),
     #[error("injected crash point: {0}")]
     InjectedCrash(String),
     #[error("unsupported operation: {0}")]
@@ -53,6 +55,7 @@ impl ArgosError {
             ArgosError::UnrecoverableStripe { .. } => libc::EIO,
             ArgosError::Invalid(_) => libc::EINVAL,
             ArgosError::PermissionDenied(_) => libc::EACCES,
+            ArgosError::Conflict(_) => libc::EAGAIN,
             ArgosError::InjectedCrash(_) => libc::EIO,
             ArgosError::Unsupported(_) => libc::ENOTSUP,
             ArgosError::Io(err) => err.raw_os_error().unwrap_or(libc::EIO),

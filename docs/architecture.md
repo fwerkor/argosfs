@@ -15,9 +15,10 @@ implemented as a Rust core with a real FUSE frontend.
 - Control plane: CLI operations for creation, reads/writes, health, rebalance,
   disk lifecycle, scrub/fsck, FUSE mounting, import/export, ACLs, encryption,
   I/O policy, Prometheus metrics, and benchmarks.
-- Autopilot: disk probing, SMART refresh, periodic health scoring, failure
-  prediction, disk draining, repair, rebalancing, tier classification, latency
-  feedback, and cache maintenance.
+- Autopilot: observation-only disk probing, SMART refresh, periodic health
+  scoring, persistent risk memory, confirmation/cooldown-gated failure
+  response, disk draining, incremental scrub, budgeted rebalance, adaptive
+  action scoring, latency feedback, and cache maintenance.
 
 ## Data Path
 
@@ -62,6 +63,31 @@ for zero-copy staging before returning data to the reconstruction pipeline.
 The Prometheus exporter serves `/metrics` and reports volume transaction IDs,
 file counts, encryption state, io_uring availability, disk capacity, disk usage,
 risk scores, online status, and latency EWMA values.
+
+## Autopilot Control Loop
+
+The long-running `autopilot` service reopens the volume each interval so it does
+not act on a stale in-memory metadata snapshot. Each run persists planner state
+under `.argosfs/autopilot-state.json` and appends an audit record to
+`.argosfs/autopilot.jsonl`.
+
+The planner separates observation from action. Probe refreshes update discovered
+device facts and latency samples without overwriting operator-selected tier or
+weight. SMART counters and health reports feed a per-disk risk memory; risky
+online disks must either cross a critical score or remain predicted-failing for
+multiple runs before drain starts. Failed drain attempts enter cooldown instead
+of retrying every service tick.
+
+Maintenance is incremental. Scrub advances through a bounded file window, and
+rebalance runs only when online disk usage skew exceeds the configured threshold.
+The rebalance budget is adjusted by a small utility EWMA so actions that have
+recently provided little benefit become less aggressive while useful actions can
+use a larger window. Manual `argosfs scrub` and `argosfs rebalance` still keep
+their explicit full-volume behavior.
+
+Metadata commits are serialized with an advisory transaction lock and checked
+against the latest on-disk txid. A stale process receives a conflict error
+instead of overwriting newer metadata.
 
 ## Crash Consistency
 

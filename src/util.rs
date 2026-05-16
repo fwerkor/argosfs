@@ -2,6 +2,7 @@ use crate::error::{ArgosError, Result};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +22,35 @@ pub fn sha256_hex(data: &[u8]) -> String {
 pub fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     Ok(())
+}
+
+pub struct FileLock {
+    file: File,
+}
+
+impl FileLock {
+    pub fn exclusive(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            ensure_dir(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(ArgosError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {

@@ -60,7 +60,10 @@ exec switch_root /newroot /sbin/init
 
 ## Operational Notes
 
-- Run `argosfs autopilot ROOT --interval 60` as a long-running service.
+- Run `argosfs autopilot ROOT --interval 60` as a long-running service. Each
+  interval reopens the volume, updates planner state, and performs only the
+  maintenance work that is due under its risk, cooldown, scrub, and rebalance
+  budgets.
 - Add replacement devices with `argosfs add-disk ROOT --path /mnt/device --rebalance`.
   The command automatically probes SSD/HDD/NVMe class, real capacity, measured
   performance, and recommended tier/weight unless overridden.

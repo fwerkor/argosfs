@@ -15,4 +15,4 @@ pub mod volume;
 
 pub use error::{ArgosError, Result};
 pub use types::{Compression, DiskStatus, StorageTier, VolumeConfig};
-pub use volume::ArgosFs;
+pub use volume::{ArgosFs, AutopilotConfig};
