@@ -3789,9 +3789,19 @@ fn validate_entry_name_bytes(name: &[u8]) -> Result<()> {
 }
 
 fn decode_entry_name_bytes(name: &str) -> Vec<u8> {
-    name.strip_prefix(LEGACY_NON_UTF8_NAME_PREFIX)
-        .and_then(|encoded| hex::decode(encoded).ok())
-        .unwrap_or_else(|| name.as_bytes().to_vec())
+    if let Some(encoded) = name.strip_prefix(LEGACY_NON_UTF8_NAME_PREFIX) {
+        return hex::decode(encoded).unwrap_or_else(|_| name.as_bytes().to_vec());
+    }
+
+    if let Some(encoded) = name.strip_prefix(NON_UTF8_NAME_PREFIX) {
+        if let Ok(bytes) = hex::decode(encoded) {
+            if std::str::from_utf8(&bytes).is_err() {
+                return bytes;
+            }
+        }
+    }
+
+    name.as_bytes().to_vec()
 }
 
 fn display_entry_name(bytes: &[u8]) -> String {
