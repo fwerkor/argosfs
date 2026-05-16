@@ -1,69 +1,24 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Research | ArgosFS</title>
-    <meta name="description" content="ArgosFS research and artifact evaluation overview.">
-    <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css">
+    <meta name="description" content="ArgosFS research agenda, safety-constrained self-driving storage model, experiment families, and artifact evaluation workflow.">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="styles.css">
   </head>
   <body data-page="research">
-    <header class="site-header">
-      <a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a>
-      <button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button>
-      <nav class="site-nav" aria-label="Primary navigation">
-        <a href="index.html" data-nav="home">Home</a>
-        <a href="technology.html" data-nav="technology">Technology</a>
-        <a href="research.html" data-nav="research">Research</a>
-        <a href="compatibility.html" data-nav="compatibility">Compatibility</a>
-        <a href="start.html" data-nav="start">Start</a>
-        <a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a>
-      </nav>
-    </header>
-
+    <header class="site-header"><a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a><button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button><nav class="site-nav" aria-label="Primary navigation"><a href="index.html" data-nav="home">Home</a><a href="technology.html" data-nav="technology">Technology</a><a href="research.html" data-nav="research">Research</a><a href="compatibility.html" data-nav="compatibility">Compatibility</a><a href="start.html" data-nav="start">Start</a><a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a></nav></header>
     <main>
-      <section class="page-hero research-hero">
-        <canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas>
-        <div>
-          <p class="eyebrow">Research agenda</p>
-          <h1>Safety-constrained self-driving storage.</h1>
-          <p>ArgosFS positions autonomy as something measurable: decisions, safety checks, verification, and artifacts all become data.</p>
-        </div>
-      </section>
-
-      <section class="section timeline">
-        <div class="timeline-item"><span>Observe</span><p>SMART fields, latency EWMAs, capacity provenance, boot-critical classification, and workload heat.</p></div>
-        <div class="timeline-item"><span>Diagnose</span><p>Risk memory confirms unhealthy disks and separates stale measurements from fresh observations.</p></div>
-        <div class="timeline-item"><span>Plan</span><p>Dry-run explain records expose chosen action, rejected actions, safety checks, and expected utility.</p></div>
-        <div class="timeline-item"><span>Verify</span><p>Mutation runs end with fsck verification and adaptive mode downgrade on failure.</p></div>
-      </section>
-
-      <section class="section split-feature">
-        <div>
-          <p class="eyebrow">Artifact evaluation</p>
-          <h2>One command to produce reviewable artifacts.</h2>
-          <p>The experiment framework writes raw JSONL/CSV, processed summaries, figures, tables, and a manifest with kernel, commit, mode, and seed.</p>
-        </div>
-        <pre><code>scripts/experiments/run_all.sh --quick --output paper-data/runs/ae-quick
-python3 scripts/experiments/summarize_results.py paper-data/runs/ae-quick/raw paper-data/runs/ae-quick</code></pre>
-      </section>
-
-      <section class="section dark-band">
-        <div class="section-heading">
-          <p class="eyebrow">Experiment families</p>
-          <h2>From smoke tests to paper figures.</h2>
-        </div>
-        <div class="feature-grid">
-          <article><h3>Failure matrix</h3><p>Clean writes, interrupted writes, rename recovery, degraded reads, and self-heal paths.</p></article>
-          <article><h3>Workload shifts</h3><p>Hot/cold phase changes measure placement convergence and background interference.</p></article>
-          <article><h3>QEMU rootfs</h3><p>Boot and degraded-mode records for normal, interrupted, and emergency-mode scenarios.</p></article>
-          <article><h3>Baselines</h3><p>ArgosFS manual/autopilot and documented external comparisons such as Btrfs, ZFS, mdadm, and mergerfs.</p></article>
-        </div>
-      </section>
+      <section class="page-hero research-hero"><canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas><div><p class="eyebrow">Research agenda</p><h1>Safety-constrained self-driving storage.</h1><p>ArgosFS treats storage autonomy as a measurable control problem: observations, plans, rejected actions, mutations, and verification results all become inspectable data.</p></div></section>
+      <section class="section timeline"><div class="timeline-item"><span>Observe</span><p>Collect SMART fields, parser coverage, latency EWMAs, capacity provenance, boot-critical classification, workload heat, and stale-measurement markers.</p></div><div class="timeline-item"><span>Diagnose</span><p>Use risk memory and repeated evidence to distinguish unhealthy disks from missing or stale telemetry, avoiding one-sample overreaction.</p></div><div class="timeline-item"><span>Plan</span><p>Emit dry-run records containing the selected action, rejected alternatives, safety checks, expected utility, cooldowns, and capacity constraints.</p></div><div class="timeline-item"><span>Verify</span><p>Finish mutations with journal validation, fsck checks, shard verification, and adaptive mode downgrade when a post-action invariant fails.</p></div></section>
+      <section class="section detail-split"><div><p class="eyebrow">Research questions</p><h2>What ArgosFS is trying to make testable.</h2><p>The project targets the gap between static local filesystems and policy-rich distributed storage: a single-machine root filesystem can still make autonomous placement and repair decisions, but only under strict boot and recovery constraints.</p></div><div class="detail-grid"><div class="detail-panel"><span>RQ1</span><h3>Can local storage become policy-driven?</h3><p>Evaluate whether capacity, health, tier, and workload signals can guide placement without hiding the decision process.</p></div><div class="detail-panel"><span>RQ2</span><h3>Can automation remain safe for rootfs?</h3><p>Study whether the controller can improve layout while preserving mountability, repairability, and emergency-mode behavior.</p></div><div class="detail-panel"><span>RQ3</span><h3>Can experiments be reproducible?</h3><p>Retain raw JSONL/CSV, manifests, command logs, and summaries so each figure or table can be regenerated from artifacts.</p></div><div class="detail-panel"><span>RQ4</span><h3>Can heterogeneous disks be first-class?</h3><p>Test SSD/HDD mixes, uneven capacities, tier changes, disk drain, add-disk, and degraded operation rather than assuming uniform devices.</p></div></div></section>
+      <section class="section split-feature"><div><p class="eyebrow">Artifact evaluation</p><h2>One command to produce reviewable artifacts.</h2><p>The experiment framework writes raw event streams, processed summaries, compatibility records, manifests, and command logs. The goal is to make review less dependent on screenshots or undocumented manual runs.</p></div><pre><code>scripts/experiments/run_all.sh --quick --output paper-data/runs/ae-quick
+python3 scripts/experiments/summarize_results.py \
+  paper-data/runs/ae-quick/raw \
+  paper-data/runs/ae-quick</code></pre></section>
+      <section class="section dark-band"><div class="section-heading compact-heading"><p class="eyebrow">Experiment families</p><h2>From smoke tests to paper figures.</h2><p>ArgosFS separates correctness-oriented tests from research-oriented measurements so quick CI checks and artifact evaluation can share infrastructure without pretending they have the same cost.</p></div><div class="feature-grid feature-grid-4"><article><span>Recovery</span><h3>Failure matrix</h3><p>Clean writes, interrupted metadata commits, degraded reads, shard reconstruction, rename recovery, and orphan cleanup are exercised as explicit scenarios.</p></article><article><span>Placement</span><h3>Workload shifts</h3><p>Hot/cold phase changes measure whether placement converges and how much background interference the controller introduces.</p></article><article><span>Boot</span><h3>QEMU rootfs matrix</h3><p>Root filesystem boot, degraded boot, interrupted boot, and emergency-mode outcomes are recorded as first-class research artifacts.</p></article><article><span>Baseline</span><h3>Manual and autopilot modes</h3><p>ArgosFS manual policy, autopilot policy, and documented comparisons against familiar Linux storage stacks can be evaluated side by side.</p></article><article><span>Metadata</span><h3>Scalability probes</h3><p>Metadata size, journal behavior, snapshot costs, and import/export performance are tracked under growing file and directory populations.</p></article><article><span>Compatibility</span><h3>POSIX-facing suites</h3><p>Mounted smoke tests, pjdfstest-oriented checks, and skipped-record handling give compatibility results that are reproducible even when external suites are absent.</p></article><article><span>Health</span><h3>Telemetry robustness</h3><p>SMART parsing, stale refreshes, missing fields, latency signals, and risk memory can be studied separately from the data-path implementation.</p></article><article><span>Artifacts</span><h3>Manifested runs</h3><p>Each run can include commit, kernel, mode, seed, command output, generated files, and processed summary tables.</p></article></div></section>
+      <section class="section detail-split"><div><p class="eyebrow">Publication angle</p><h2>The central claim is not “another filesystem”.</h2><p>The research contribution is the combination of rootfs-capable local storage, heterogeneous disk control, and safety-constrained autonomy.</p></div><div class="detail-panel"><span>Contribution map</span><h3>What a paper can emphasize</h3><ul><li>A boot-first self-driving storage controller where mountability dominates optimization.</li><li>An explainable maintenance planner with rejected-action records and safety gates.</li><li>A heterogeneous placement model that treats disk capacity, tier, health, and failure domain as inputs.</li><li>A reproducible artifact pipeline that links raw events to summarized research claims.</li></ul></div></section>
     </main>
-
-    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="compatibility.html">Compatibility</a></footer>
-    <script src="app.js"></script>
+    <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="compatibility.html">Compatibility</a></footer><script src="app.js"></script>
   </body>
 </html>
