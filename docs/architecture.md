@@ -92,16 +92,18 @@ instead of overwriting newer metadata.
 ## Crash Consistency
 
 Every metadata transaction is written to `journal.jsonl` before metadata copies
-are updated. A journal record contains the transaction id, action details, the
-previous record hash, the previous metadata hash, the new metadata hash, and a
-full metadata snapshot. The record itself is hashed with its `record_hash` field
-cleared, forming a verifiable chain.
+are updated. A normal transaction record contains the transaction id, action
+details, the previous record hash, the previous metadata hash, the new metadata
+hash, and a metadata delta. Full metadata snapshots are written only as explicit
+checkpoint records, including the initial `mkfs` checkpoint and periodic
+checkpoints. The record itself is hashed with its `record_hash` field cleared,
+forming a verifiable chain.
 
 Metadata is then written to `meta.primary.json`, `meta.secondary.json`, and the
 compatibility `meta.json`. On open, ArgosFS validates all copies, detects
 double-write divergence or corrupt copies, chooses the newest valid generation,
-replays a newer journal snapshot if present, and rewrites the copies to a
-consistent state.
+replays a newer journal checkpoint plus subsequent valid deltas if present, and
+rewrites the copies to a consistent state.
 
 Crash injection is available through `ARGOSFS_CRASH_POINT`, with injection
 points before/after journal append and after each metadata copy. The integration
