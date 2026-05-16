@@ -68,6 +68,7 @@ pub fn initialize_volume(root: &Path, meta: &mut Metadata, created_at: f64) -> R
         json!({"txid": meta.txid}),
         String::new(),
         created_at,
+        true,
     )?;
     append_record(root, &record)?;
     write_metadata_copies(root, meta)?;
@@ -184,7 +185,7 @@ pub fn scan(root: &Path) -> Result<TransactionReport> {
             ));
             continue;
         }
-        if let Some(metadata_value) = value.get("metadata") {
+        if let Some(metadata_value) = value.get("metadata").filter(|value| !value.is_null()) {
             match canonical_metadata_hash_value(metadata_value) {
                 Ok(hash) if hash == record.meta_hash => {
                     report.latest_snapshot_txid = record.txid;
@@ -250,7 +251,7 @@ pub fn append_transaction_checked(
     };
     prepare_metadata_integrity(meta, previous_meta_hash)?;
     let previous_record_hash = scan(root)?.last_valid_record_hash;
-    let record = build_record(meta, action, details, previous_record_hash, now_f64())?;
+    let record = build_record(meta, action, details, previous_record_hash, now_f64(), true)?;
     append_record(root, &record)?;
     inject_crash("after-journal")?;
     write_metadata_copies_with_injection(root, meta)
@@ -264,7 +265,14 @@ pub fn append_event(
 ) -> Result<()> {
     let _lock = FileLock::exclusive(&transaction_lock_path(root))?;
     let previous_record_hash = scan(root)?.last_valid_record_hash;
-    let record = build_record(meta, action, details, previous_record_hash, now_f64())?;
+    let record = build_record(
+        meta,
+        action,
+        details,
+        previous_record_hash,
+        now_f64(),
+        false,
+    )?;
     append_record(root, &record)
 }
 
@@ -348,6 +356,7 @@ fn build_record(
     details: serde_json::Value,
     previous_record_hash: String,
     time: f64,
+    include_snapshot: bool,
 ) -> Result<JournalRecord> {
     let mut record = JournalRecord {
         version: JOURNAL_VERSION,
@@ -360,7 +369,7 @@ fn build_record(
         previous_record_hash,
         previous_meta_hash: meta.integrity.previous_meta_hash.clone(),
         meta_hash: canonical_metadata_hash(meta)?,
-        metadata: Some(meta.clone()),
+        metadata: include_snapshot.then(|| meta.clone()),
         record_hash: String::new(),
     };
     record.record_hash = record_hash(&record)?;
@@ -479,17 +488,23 @@ fn report_latest_snapshot(root: &Path) -> Result<Option<Metadata>> {
         if record.record_hash.is_empty() {
             continue;
         }
-        if record_hash_value(&value)? != record.record_hash {
+        let Ok(hash) = record_hash_value(&value) else {
+            continue;
+        };
+        if hash != record.record_hash {
             continue;
         }
         if record.previous_record_hash != previous_hash {
             continue;
         }
         previous_hash = record.record_hash.clone();
-        let Some(metadata_value) = value.get("metadata") else {
+        let Some(metadata_value) = value.get("metadata").filter(|value| !value.is_null()) else {
             continue;
         };
-        if canonical_metadata_hash_value(metadata_value)? != record.meta_hash {
+        let Ok(meta_hash) = canonical_metadata_hash_value(metadata_value) else {
+            continue;
+        };
+        if meta_hash != record.meta_hash {
             continue;
         }
         let Some(mut metadata) = record.metadata else {

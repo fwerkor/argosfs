@@ -1,6 +1,6 @@
 use crate::error::{ArgosError, Result};
-use crate::types::NodeKind;
-use crate::volume::{ArgosFs, NodeAttr};
+use crate::types::{CapacitySource, DiskStatus, NodeKind};
+use crate::volume::{ArgosFs, NodeAttr, RenamePolicy};
 use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
     FopenFlags, Generation, INodeNo, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags,
@@ -39,7 +39,7 @@ impl ArgosFuse {
 pub fn mount(
     volume_root: impl AsRef<Path>,
     mountpoint: impl AsRef<Path>,
-    _foreground: bool,
+    foreground: bool,
     options: Vec<String>,
 ) -> Result<()> {
     let volume = ArgosFs::open(volume_root)?;
@@ -49,6 +49,11 @@ pub fn mount(
     ];
     for option in options {
         mount_options.push(MountOption::CUSTOM(option));
+    }
+    if !foreground {
+        eprintln!(
+            "argosfs mount runs in the foreground; --foreground is accepted for CLI compatibility"
+        );
     }
     let mut config = Config::default();
     config.mount_options = mount_options;
@@ -102,17 +107,33 @@ impl Filesystem for ArgosFuse {
         reply: ReplyAttr,
     ) {
         let result = (|| -> Result<NodeAttr> {
-            if mode.is_some()
-                || uid.is_some()
-                || gid.is_some()
-                || size.is_some()
-                || atime.is_some()
-                || mtime.is_some()
-            {
+            let current = self.volume.attr_inode(ino.0)?;
+            if mode.is_some() && req.uid() != 0 && req.uid() != current.uid {
+                return Err(ArgosError::PermissionDenied(
+                    "chmod requires file ownership or root".to_string(),
+                ));
+            }
+            if (uid.is_some() || gid.is_some()) && req.uid() != 0 {
+                return Err(ArgosError::PermissionDenied(
+                    "chown requires root".to_string(),
+                ));
+            }
+            if size.is_some() {
                 self.require_access(req, ino, libc::W_OK)?;
             }
+            if atime.is_some() || mtime.is_some() {
+                let owner_or_root = req.uid() == 0 || req.uid() == current.uid;
+                if !owner_or_root && (is_specific_time(&atime) || is_specific_time(&mtime)) {
+                    return Err(ArgosError::PermissionDenied(
+                        "setting explicit timestamps requires ownership or root".to_string(),
+                    ));
+                }
+                if !owner_or_root {
+                    self.require_access(req, ino, libc::W_OK)?;
+                }
+            }
             let ino = ino.0;
-            let mut attr = self.volume.attr_inode(ino)?;
+            let mut attr = current;
             if let Some(mode) = mode {
                 attr = self.volume.chmod_inode(ino, mode)?;
             }
@@ -154,6 +175,13 @@ impl Filesystem for ArgosFuse {
         rdev: u32,
         reply: ReplyEntry,
     ) {
+        let file_type = mode & libc::S_IFMT;
+        if matches!(file_type, value if value == libc::S_IFCHR || value == libc::S_IFBLK)
+            && req.uid() != 0
+        {
+            reply.error(Errno::EACCES);
+            return;
+        }
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
@@ -194,7 +222,7 @@ impl Filesystem for ArgosFuse {
     fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.unlink_at(parent.0, name))
+            .and_then(|()| self.volume.unlink_at_as(parent.0, name, req.uid()))
         {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
@@ -204,7 +232,7 @@ impl Filesystem for ArgosFuse {
     fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.rmdir_at(parent.0, name))
+            .and_then(|()| self.volume.rmdir_at_as(parent.0, name, req.uid()))
         {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
@@ -240,14 +268,25 @@ impl Filesystem for ArgosFuse {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        if !flags.is_empty() {
+        if flags.contains(RenameFlags::RENAME_WHITEOUT)
+            || flags.contains(RenameFlags::RENAME_NOREPLACE)
+                && flags.contains(RenameFlags::RENAME_EXCHANGE)
+        {
             reply.error(Errno::EINVAL);
             return;
         }
+        let policy = RenamePolicy {
+            no_replace: flags.contains(RenameFlags::RENAME_NOREPLACE),
+            exchange: flags.contains(RenameFlags::RENAME_EXCHANGE),
+            uid: Some(req.uid()),
+        };
         let result = self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| self.require_access(req, newparent, libc::W_OK | libc::X_OK))
-            .and_then(|()| self.volume.rename_at(parent.0, name, newparent.0, newname));
+            .and_then(|()| {
+                self.volume
+                    .rename_at_with_policy(parent.0, name, newparent.0, newname, policy)
+            });
         match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
@@ -336,12 +375,25 @@ impl Filesystem for ArgosFuse {
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
         let meta = self.volume.metadata_snapshot();
         let block = meta.config.chunk_size as u64;
-        let raw_capacity: u64 = meta
+        let (explicit_capacity, grouped_capacity) = meta
             .disks
             .values()
-            .filter(|disk| disk.status != crate::types::DiskStatus::Removed)
-            .map(|disk| disk.capacity_bytes)
-            .sum();
+            .filter(|disk| disk.status == DiskStatus::Online)
+            .fold(
+                (0u64, std::collections::BTreeMap::<String, u64>::new()),
+                |mut acc, disk| {
+                    if disk.capacity_source == CapacitySource::UserOverride {
+                        acc.0 = acc.0.saturating_add(disk.capacity_bytes);
+                    } else if let Some(fs_id) = disk.backing_fs_id.as_ref() {
+                        let entry = acc.1.entry(fs_id.clone()).or_default();
+                        *entry = (*entry).max(disk.capacity_bytes);
+                    } else {
+                        acc.0 = acc.0.saturating_add(disk.capacity_bytes);
+                    }
+                    acc
+                },
+            );
+        let raw_capacity = explicit_capacity.saturating_add(grouped_capacity.values().sum::<u64>());
         let logical_used: u64 = meta
             .inodes
             .values()
@@ -388,7 +440,10 @@ impl Filesystem for ArgosFuse {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        reply.ok();
+        match self.volume.sync() {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(errno(&err)),
+        }
     }
 
     fn setxattr(
@@ -515,7 +570,7 @@ impl Filesystem for ArgosFuse {
                         INodeNo(entry.attr.ino),
                         (idx + 1) as u64,
                         file_type_from_attr(&entry.attr),
-                        entry.name,
+                        entry.os_name(),
                     );
                     if full {
                         break;
@@ -586,6 +641,10 @@ fn time_or_now(value: TimeOrNow) -> f64 {
             .unwrap_or_default()
             .as_secs_f64(),
     }
+}
+
+fn is_specific_time(value: &Option<TimeOrNow>) -> bool {
+    matches!(value, Some(TimeOrNow::SpecificTime(_)))
 }
 
 fn open_mask(flags: OpenFlags) -> i32 {

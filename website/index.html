@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ArgosFS</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="hero">
+      <canvas id="topology" aria-hidden="true"></canvas>
+      <nav>
+        <strong>ArgosFS</strong>
+        <a href="../README.md">Docs</a>
+        <a href="../docs/artifact-evaluation.md">Artifact Eval</a>
+        <a href="https://github.com/fwerkor/argosfs">GitHub</a>
+      </nav>
+      <section class="hero-copy">
+        <h1>ArgosFS</h1>
+        <p>Self-driving erasure-coded storage for root filesystem experiments.</p>
+        <div class="commands">
+          <code>cargo build --release</code>
+          <code>scripts/experiments/run_all.sh --quick</code>
+        </div>
+      </section>
+    </header>
+    <main>
+      <section class="band">
+        <h2>Control Loop</h2>
+        <div class="grid">
+          <article><span>01</span><h3>Observe</h3><p>Probe devices, SMART fields, latency, capacity, and workload signals.</p></article>
+          <article><span>02</span><h3>Plan</h3><p>Score drain, scrub, rebalance, and observe actions with explicit safety checks.</p></article>
+          <article><span>03</span><h3>Act</h3><p>Rewrite shards across diverse failure domains with bounded background budgets.</p></article>
+          <article><span>04</span><h3>Verify</h3><p>Run fsck verification and downgrade automation when the system gets uncertain.</p></article>
+        </div>
+      </section>
+      <section class="band split">
+        <div>
+          <h2>Compatibility Surface</h2>
+          <p>FUSE operations include POSIX metadata, ACL xattrs, rename flags, sticky directories, non-UTF-8 filenames, and fsync durability hooks.</p>
+        </div>
+        <pre><code>argosfs autopilot ROOT --dry-run --explain --json
+argosfs verify-journal ROOT
+scripts/compat/run_fuse_smoke.sh</code></pre>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>
