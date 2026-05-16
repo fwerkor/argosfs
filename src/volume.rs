@@ -492,7 +492,7 @@ impl ArgosFs {
         Ok(Self::attr_from_inode(inode, meta.config.chunk_size))
     }
 
-    pub fn mknod_path(&self, path: &str, mode: u32, rdev: u32) -> Result<InodeId> {
+    pub fn mknod_path(&self, path: &str, mode: u32, rdev: u64) -> Result<InodeId> {
         let (parent, name) = parent_name(path)?;
         let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.lock();
@@ -513,7 +513,7 @@ impl ArgosFs {
         parent: InodeId,
         name: &OsStr,
         mode: u32,
-        rdev: u32,
+        rdev: u64,
     ) -> Result<NodeAttr> {
         self.mknod_at_with_owner(parent, name, mode, rdev, current_uid(), current_gid())
     }

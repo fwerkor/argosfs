@@ -92,8 +92,8 @@ enum Command {
         path: String,
         #[arg(long, value_parser = parse_u32_auto)]
         mode: u32,
-        #[arg(long, default_value = "0", value_parser = parse_u32_auto)]
-        rdev: u32,
+        #[arg(long, default_value = "0", value_parser = parse_u64_auto)]
+        rdev: u64,
     },
     Symlink {
         root: PathBuf,
@@ -1160,5 +1160,18 @@ fn parse_u32_auto(value: &str) -> std::result::Result<u32, String> {
         u32::from_str_radix(trimmed, 8).map_err(|err| err.to_string())
     } else {
         trimmed.parse::<u32>().map_err(|err| err.to_string())
+    }
+}
+
+fn parse_u64_auto(value: &str) -> std::result::Result<u64, String> {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("0o") {
+        u64::from_str_radix(rest, 8).map_err(|err| err.to_string())
+    } else if let Some(rest) = trimmed.strip_prefix("0x") {
+        u64::from_str_radix(rest, 16).map_err(|err| err.to_string())
+    } else if trimmed.chars().all(|ch| matches!(ch, '0'..='7')) && trimmed.len() >= 3 {
+        u64::from_str_radix(trimmed, 8).map_err(|err| err.to_string())
+    } else {
+        trimmed.parse::<u64>().map_err(|err| err.to_string())
     }
 }
