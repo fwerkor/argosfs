@@ -456,10 +456,16 @@ impl Filesystem for ArgosFuse {
         name: &OsStr,
         value: &[u8],
         flags: i32,
-        _position: u32,
+        position: u32,
         reply: ReplyEmpty,
     ) {
         let result = (|| -> Result<()> {
+            if position != 0 {
+                return Err(ArgosError::Invalid(format!(
+                    "unsupported setxattr position {position}"
+                )));
+            }
+
             let supported = libc::XATTR_CREATE | libc::XATTR_REPLACE;
             if flags & !supported != 0
                 || flags & libc::XATTR_CREATE != 0 && flags & libc::XATTR_REPLACE != 0
@@ -470,8 +476,8 @@ impl Filesystem for ArgosFuse {
             }
 
             self.require_access(req, ino, libc::W_OK)?;
-            let name = name.to_string_lossy();
-            let exists = self.volume.getxattr_inode(ino.0, &name).is_ok();
+            let name = xattr_name(name)?;
+            let exists = self.volume.getxattr_inode(ino.0, name).is_ok();
 
             if flags & libc::XATTR_CREATE != 0 && exists {
                 return Err(ArgosError::AlreadyExists(format!("xattr {name}")));
@@ -480,7 +486,7 @@ impl Filesystem for ArgosFuse {
                 return Err(ArgosError::NotFound(format!("xattr {name}")));
             }
 
-            self.volume.setxattr_inode(ino.0, &name, value)
+            self.volume.setxattr_inode(ino.0, name, value)
         })();
 
         match result {
@@ -490,10 +496,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn getxattr(&self, req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-        match self
+        let result = self
             .require_access(req, ino, libc::R_OK)
-            .and_then(|()| self.volume.getxattr_inode(ino.0, &name.to_string_lossy()))
-        {
+            .and_then(|()| self.volume.getxattr_inode(ino.0, xattr_name(name)?));
+        match result {
             Ok(value) if size == 0 => reply.size(value.len() as u32),
             Ok(value) if value.len() <= size as usize => reply.data(&value),
             Ok(_) => reply.error(Errno::ERANGE),
@@ -528,10 +534,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn removexattr(&self, req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        match self.require_access(req, ino, libc::W_OK).and_then(|()| {
-            self.volume
-                .removexattr_inode(ino.0, &name.to_string_lossy())
-        }) {
+        match self
+            .require_access(req, ino, libc::W_OK)
+            .and_then(|()| self.volume.removexattr_inode(ino.0, xattr_name(name)?))
+        {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
         }
@@ -682,4 +688,9 @@ fn open_mask(flags: OpenFlags) -> i32 {
         mask |= libc::W_OK;
     }
     mask
+}
+
+fn xattr_name(name: &OsStr) -> Result<&str> {
+    name.to_str()
+        .ok_or_else(|| ArgosError::Invalid("non-UTF-8 xattr names are unsupported".to_string()))
 }
