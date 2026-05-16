@@ -9,19 +9,22 @@ use crate::health::{classify_inode, probe_disk_path, refresh_smart, risk_report}
 use crate::journal;
 use crate::types::*;
 use crate::util::{
-    append_json_line, atomic_write, clean_path, directory_size, ensure_dir, now_f64, parent_name,
+    append_json_line, atomic_write, clean_path, ensure_dir, now_f64, parent_name,
     relative_or_absolute, sha256_hex, split_path, stable_u01,
 };
 use parking_lot::Mutex;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
 const ROOT_INO: InodeId = 1;
+const NON_UTF8_NAME_PREFIX: &str = "\0argosfs-name-hex:";
+const BOOT_CRITICAL_XATTR: &str = "system.argosfs.boot_critical";
 
 #[derive(Clone)]
 pub struct ArgosFs {
@@ -45,6 +48,7 @@ pub struct AutopilotConfig {
     pub rebalance_min_skew: f64,
     pub critical_risk_score: f64,
     pub max_drains_per_run: usize,
+    pub foreground_latency_target_ms: f64,
 }
 
 impl Default for AutopilotConfig {
@@ -62,6 +66,7 @@ impl Default for AutopilotConfig {
             rebalance_min_skew: 0.08,
             critical_risk_score: 0.85,
             max_drains_per_run: 1,
+            foreground_latency_target_ms: 75.0,
         }
     }
 }
@@ -150,7 +155,21 @@ pub struct NodeAttr {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct DirEntry {
     pub name: String,
+    pub name_bytes: Vec<u8>,
     pub attr: NodeAttr,
+}
+
+impl DirEntry {
+    pub fn os_name(&self) -> OsString {
+        OsString::from_vec(self.name_bytes.clone())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenamePolicy {
+    pub no_replace: bool,
+    pub exchange: bool,
+    pub uid: Option<u32>,
 }
 
 impl ArgosFs {
@@ -213,12 +232,19 @@ impl ArgosFs {
                     weight: probe.recommended_weight,
                     status: DiskStatus::Online,
                     capacity_bytes: probe.capacity_bytes,
+                    capacity_source: CapacitySource::AutoProbe,
+                    used_bytes: 0,
                     health: HealthCounters {
                         temperature_c: 30.0,
                         ..HealthCounters::default()
                     },
                     class: probe.class,
                     backing_device: probe.backing_device.clone(),
+                    backing_fs_id: probe.backing_fs_id.clone(),
+                    failure_domain: probe
+                        .backing_fs_id
+                        .clone()
+                        .unwrap_or_else(|| format!("disk-{index:04}")),
                     sysfs_block: probe.sysfs_block.clone(),
                     rotational: probe.rotational,
                     numa_node: probe.numa_node,
@@ -258,6 +284,10 @@ impl ArgosFs {
             read_bytes: 0,
             write_bytes: 0,
             storage_class: StorageTier::Warm,
+            boot_critical: true,
+            workload_score: 0.0,
+            last_accessed_at: created_at,
+            last_written_at: created_at,
         };
         let mut inodes = BTreeMap::new();
         inodes.insert(ROOT_INO, root_inode);
@@ -314,6 +344,27 @@ impl ArgosFs {
 
     pub fn transaction_report(&self) -> Result<TransactionReport> {
         journal::scan(&self.root)
+    }
+
+    pub fn sync(&self) -> Result<()> {
+        let meta = self.meta.lock();
+        for path in [
+            self.root.join(".argosfs/journal.jsonl"),
+            self.root.join(".argosfs/meta.primary.json"),
+            self.root.join(".argosfs/meta.secondary.json"),
+            self.root.join(".argosfs/meta.json"),
+        ] {
+            if let Ok(file) = fs::File::open(&path) {
+                file.sync_all()?;
+            }
+        }
+        sync_directory(&self.root.join(".argosfs"));
+        for disk in meta.disks.values() {
+            let disk_root = relative_or_absolute(&self.root, &disk.path);
+            sync_directory(&disk_root);
+            sync_directory(&disk_root.join("shards"));
+        }
+        Ok(())
     }
 
     pub fn audit_transactions(root: impl AsRef<Path>) -> Result<TransactionReport> {
@@ -551,16 +602,8 @@ impl ArgosFs {
         } else if let Some(live) = meta.inodes.get_mut(&ino) {
             live.access_count = live.access_count.saturating_add(1);
             live.read_bytes = live.read_bytes.saturating_add(data.len() as u64);
-            live.atime = now_f64();
-            if let Err(err) = self.commit_locked(
-                &mut meta,
-                "read",
-                json!({"inode": ino, "bytes": data.len()}),
-            ) {
-                if !matches!(err, ArgosError::Conflict(_)) {
-                    return Err(err);
-                }
-            }
+            live.last_accessed_at = now_f64();
+            live.workload_score = live.workload_score * 0.98 + 1.0;
         }
         let start = offset.min(data.len() as u64) as usize;
         let end = start.saturating_add(size).min(data.len());
@@ -582,11 +625,16 @@ impl ArgosFs {
             updated.resize(end, 0);
         }
         updated[start..end].copy_from_slice(data);
-        self.replace_inode_data(
+        let mut meta = self.meta.lock();
+        self.rewrite_inode_data_from_image_locked(
+            &mut meta,
             ino,
             &updated,
+            start,
+            end,
+            data.len() as u64,
             "write-range",
-            json!({"inode": ino, "offset": offset, "bytes": data.len()}),
+            json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "stripe-range"}),
         )?;
         Ok(data.len())
     }
@@ -602,37 +650,46 @@ impl ArgosFs {
         let size = usize::try_from(requested_size)
             .map_err(|_| ArgosError::Invalid("truncate size is too large".to_string()))?;
         data.resize(size, 0);
-        self.replace_inode_data(
+        let changed_start = size.min(
+            self.attr_inode(ino)
+                .map(|attr| attr.size as usize)
+                .unwrap_or(size),
+        );
+        let mut meta = self.meta.lock();
+        self.rewrite_inode_data_from_image_locked(
+            &mut meta,
             ino,
             &data,
+            changed_start,
+            size,
+            0,
             "truncate",
-            json!({"inode": ino, "size": requested_size}),
+            json!({"inode": ino, "size": requested_size, "rewrite": "stripe-range"}),
         )
     }
 
     pub fn readdir(&self, ino: InodeId) -> Result<Vec<DirEntry>> {
-        let mut meta = self.meta.lock();
+        let meta = self.meta.lock();
         let chunk = meta.config.chunk_size;
         let inode = self.dir_inode_locked(&meta, ino)?.clone();
         let parent_ino = self.parent_inode_locked(&meta, ino)?;
-        if let Some(live) = meta.inodes.get_mut(&ino) {
-            live.access_count = live.access_count.saturating_add(1);
-            live.atime = now_f64();
-        }
-        self.commit_locked(&mut meta, "readdir", json!({"inode": ino}))?;
         let mut entries = Vec::new();
         entries.push(DirEntry {
             name: ".".to_string(),
+            name_bytes: b".".to_vec(),
             attr: Self::attr_from_inode(meta.inodes.get(&ino).unwrap(), chunk),
         });
         entries.push(DirEntry {
             name: "..".to_string(),
+            name_bytes: b"..".to_vec(),
             attr: Self::attr_from_inode(meta.inodes.get(&parent_ino).unwrap(), chunk),
         });
         for (name, child) in inode.entries {
             if let Some(child_inode) = meta.inodes.get(&child) {
+                let name_bytes = decode_entry_name_bytes(&name);
                 entries.push(DirEntry {
-                    name,
+                    name: display_entry_name(&name_bytes),
+                    name_bytes,
                     attr: Self::attr_from_inode(child_inode, chunk),
                 });
             }
@@ -644,26 +701,34 @@ impl ArgosFs {
         let (parent, name) = parent_name(path)?;
         let mut meta = self.meta.lock();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
-        self.unlink_locked(&mut meta, parent_ino, &name, false)
+        self.unlink_locked(&mut meta, parent_ino, &name, false, Some(current_uid()))
     }
 
     pub fn unlink_at(&self, parent: InodeId, name: &OsStr) -> Result<()> {
+        self.unlink_at_as(parent, name, current_uid())
+    }
+
+    pub fn unlink_at_as(&self, parent: InodeId, name: &OsStr, uid: u32) -> Result<()> {
         let name = entry_name_from_os(name)?;
         let mut meta = self.meta.lock();
-        self.unlink_locked(&mut meta, parent, &name, false)
+        self.unlink_locked(&mut meta, parent, &name, false, Some(uid))
     }
 
     pub fn rmdir_path(&self, path: &str) -> Result<()> {
         let (parent, name) = parent_name(path)?;
         let mut meta = self.meta.lock();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
-        self.unlink_locked(&mut meta, parent_ino, &name, true)
+        self.unlink_locked(&mut meta, parent_ino, &name, true, Some(current_uid()))
     }
 
     pub fn rmdir_at(&self, parent: InodeId, name: &OsStr) -> Result<()> {
+        self.rmdir_at_as(parent, name, current_uid())
+    }
+
+    pub fn rmdir_at_as(&self, parent: InodeId, name: &OsStr, uid: u32) -> Result<()> {
         let name = entry_name_from_os(name)?;
         let mut meta = self.meta.lock();
-        self.unlink_locked(&mut meta, parent, &name, true)
+        self.unlink_locked(&mut meta, parent, &name, true, Some(uid))
     }
 
     pub fn rename_path(&self, old: &str, new: &str) -> Result<()> {
@@ -672,7 +737,14 @@ impl ArgosFs {
         let mut meta = self.meta.lock();
         let old_parent = self.resolve_path_locked(&meta, &old_parent, true, 40)?;
         let new_parent = self.resolve_path_locked(&meta, &new_parent, true, 40)?;
-        self.rename_locked(&mut meta, old_parent, &old_name, new_parent, &new_name)
+        self.rename_locked(
+            &mut meta,
+            old_parent,
+            &old_name,
+            new_parent,
+            &new_name,
+            RenamePolicy::default(),
+        )
     }
 
     pub fn rename_at(
@@ -682,10 +754,29 @@ impl ArgosFs {
         new_parent: InodeId,
         new_name: &OsStr,
     ) -> Result<()> {
+        self.rename_at_with_policy(
+            old_parent,
+            old_name,
+            new_parent,
+            new_name,
+            RenamePolicy::default(),
+        )
+    }
+
+    pub fn rename_at_with_policy(
+        &self,
+        old_parent: InodeId,
+        old_name: &OsStr,
+        new_parent: InodeId,
+        new_name: &OsStr,
+        policy: RenamePolicy,
+    ) -> Result<()> {
         let old_name = entry_name_from_os(old_name)?;
         let new_name = entry_name_from_os(new_name)?;
         let mut meta = self.meta.lock();
-        self.rename_locked(&mut meta, old_parent, &old_name, new_parent, &new_name)
+        self.rename_locked(
+            &mut meta, old_parent, &old_name, new_parent, &new_name, policy,
+        )
     }
 
     pub fn symlink_at(&self, parent: InodeId, name: &OsStr, target: &Path) -> Result<NodeAttr> {
@@ -740,6 +831,10 @@ impl ArgosFs {
             read_bytes: 0,
             write_bytes: 0,
             storage_class: StorageTier::Warm,
+            boot_critical: boot_critical_name(&name),
+            workload_score: 0.0,
+            last_accessed_at: now,
+            last_written_at: now,
         };
         meta.inodes.insert(ino, inode);
         self.dir_inode_mut_locked(&mut meta, parent)?
@@ -893,6 +988,7 @@ impl ArgosFs {
     }
 
     pub fn setxattr_inode(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<()> {
+        validate_xattr_write(name)?;
         let mut meta = self.meta.lock();
         let inode = meta
             .inodes
@@ -915,6 +1011,15 @@ impl ArgosFs {
                     .map_err(|err| ArgosError::Invalid(format!("invalid NFSv4 ACL JSON: {err}")))?;
                 inode.nfs4_acl = Some(acl::parse_nfs4_acl_json(text)?);
             }
+            BOOT_CRITICAL_XATTR => {
+                let text = std::str::from_utf8(value).map_err(|err| {
+                    ArgosError::Invalid(format!("invalid boot-critical flag: {err}"))
+                })?;
+                inode.boot_critical = matches!(text.trim(), "1" | "true" | "yes" | "on");
+                if inode.boot_critical {
+                    inode.storage_class = StorageTier::Hot;
+                }
+            }
             _ => {
                 inode.xattrs.insert(name.to_string(), hex::encode(value));
             }
@@ -928,6 +1033,7 @@ impl ArgosFs {
     }
 
     pub fn getxattr_inode(&self, ino: InodeId, name: &str) -> Result<Vec<u8>> {
+        validate_xattr_read(name)?;
         let meta = self.meta.lock();
         let inode = meta
             .inodes
@@ -969,6 +1075,13 @@ impl ArgosFs {
                     .ok_or_else(|| ArgosError::NotFound(format!("xattr {name}")))?;
                 return Ok(acl::nfs4_to_json(acl)?.into_bytes());
             }
+            BOOT_CRITICAL_XATTR => {
+                return Ok(if inode.boot_critical {
+                    b"1".to_vec()
+                } else {
+                    b"0".to_vec()
+                });
+            }
             _ => {}
         }
         let value = inode
@@ -984,7 +1097,14 @@ impl ArgosFs {
             .inodes
             .get(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
-        let mut names = inode.xattrs.keys().cloned().collect::<BTreeSet<_>>();
+        let mut names = inode
+            .xattrs
+            .keys()
+            .filter(|name| {
+                xattr_namespace(name).is_ok_and(|namespace| namespace == XattrNamespace::User)
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
         if inode.posix_acl_access.is_some() {
             names.insert(acl::POSIX_ACL_ACCESS_XATTR.to_string());
             names.insert(acl::ARGOS_POSIX_ACL_ACCESS_XATTR.to_string());
@@ -996,10 +1116,14 @@ impl ArgosFs {
         if inode.nfs4_acl.is_some() {
             names.insert(acl::NFS4_ACL_XATTR.to_string());
         }
+        if inode.boot_critical {
+            names.insert(BOOT_CRITICAL_XATTR.to_string());
+        }
         Ok(names.into_iter().collect())
     }
 
     pub fn removexattr_inode(&self, ino: InodeId, name: &str) -> Result<()> {
+        validate_xattr_write(name)?;
         let mut meta = self.meta.lock();
         let inode = meta
             .inodes
@@ -1013,6 +1137,11 @@ impl ArgosFs {
                 inode.posix_acl_default.take().is_some()
             }
             acl::NFS4_ACL_XATTR => inode.nfs4_acl.take().is_some(),
+            BOOT_CRITICAL_XATTR => {
+                let was_set = inode.boot_critical;
+                inode.boot_critical = false;
+                was_set
+            }
             _ => inode.xattrs.remove(name).is_some(),
         };
         if !removed {
@@ -1189,6 +1318,11 @@ impl ArgosFs {
         let final_tier = tier.unwrap_or(probe.recommended_tier);
         let final_weight = weight.unwrap_or(probe.recommended_weight).max(0.01);
         let final_capacity = capacity_bytes.unwrap_or(probe.capacity_bytes);
+        let capacity_source = if capacity_bytes.is_some() {
+            CapacitySource::UserOverride
+        } else {
+            CapacitySource::AutoProbe
+        };
         atomic_write(
             &disk_root.join("argosfs-disk.json"),
             serde_json::to_vec_pretty(&json!({
@@ -1209,9 +1343,13 @@ impl ArgosFs {
                 weight: final_weight,
                 status: DiskStatus::Online,
                 capacity_bytes: final_capacity,
+                capacity_source,
+                used_bytes: 0,
                 health: HealthCounters::default(),
                 class: probe.class,
                 backing_device: probe.backing_device.clone(),
+                backing_fs_id: probe.backing_fs_id.clone(),
+                failure_domain: probe.backing_fs_id.clone().unwrap_or_else(|| id.clone()),
                 sysfs_block: probe.sysfs_block.clone(),
                 rotational: probe.rotational,
                 numa_node: probe.numa_node,
@@ -1302,10 +1440,17 @@ impl ArgosFs {
             if let Some(disk) = meta.disks.get_mut(&id) {
                 disk.class = probe.class;
                 disk.backing_device = probe.backing_device.clone();
+                disk.backing_fs_id = probe.backing_fs_id.clone();
+                disk.failure_domain = probe
+                    .backing_fs_id
+                    .clone()
+                    .unwrap_or_else(|| disk.id.clone());
                 disk.sysfs_block = probe.sysfs_block.clone();
                 disk.rotational = probe.rotational;
                 disk.numa_node = probe.numa_node;
-                disk.capacity_bytes = probe.capacity_bytes;
+                if disk.capacity_source == CapacitySource::AutoProbe {
+                    disk.capacity_bytes = probe.capacity_bytes;
+                }
                 if apply_recommendations {
                     disk.weight = probe.recommended_weight;
                     disk.tier = probe.recommended_tier;
@@ -1635,6 +1780,18 @@ impl ArgosFs {
             }
         }
         let refs = self.referenced_shards();
+        let mut referenced_usage = BTreeMap::<String, u64>::new();
+        {
+            let meta = self.metadata_snapshot();
+            for inode in meta.inodes.values() {
+                for block in &inode.blocks {
+                    for shard in &block.shards {
+                        *referenced_usage.entry(shard.disk_id.clone()).or_default() +=
+                            shard.size as u64;
+                    }
+                }
+            }
+        }
         let meta = self.metadata_snapshot();
         for (disk_id, disk) in meta.disks {
             let disk_root = relative_or_absolute(&self.root, &disk.path);
@@ -1661,6 +1818,9 @@ impl ArgosFs {
         }
         if repair || remove_orphans {
             let mut meta = self.meta.lock();
+            for (disk_id, disk) in meta.disks.iter_mut() {
+                disk.used_bytes = referenced_usage.get(disk_id).copied().unwrap_or(0);
+            }
             self.commit_locked(&mut meta, "fsck", json!({"report": report}))?;
         }
         Ok(report)
@@ -1797,7 +1957,12 @@ impl ArgosFs {
         }
 
         if !stop_mutations && autopilot_due(state.last_scrub_at, config.scrub_interval_sec, now) {
-            let (fsck, cursor) = self.scrub_limited(config.scrub_files_per_run, state.scrub_cursor);
+            let scrub_budget = latency_throttled_budget(
+                config.scrub_files_per_run,
+                &report,
+                config.foreground_latency_target_ms,
+            );
+            let (fsck, cursor) = self.scrub_limited(scrub_budget, state.scrub_cursor);
             let repaired = fsck.repaired_files;
             let utility = fsck.repaired_files as f64 * 3.0
                 - fsck.unrecoverable_files as f64 * 5.0
@@ -1812,7 +1977,7 @@ impl ArgosFs {
                 0,
                 repaired,
             );
-            actions.push(json!({"action": "scrub-incremental", "budget_files": config.scrub_files_per_run, "cursor": state.scrub_cursor, "report": fsck}));
+            actions.push(json!({"action": "scrub-incremental", "budget_files": scrub_budget, "requested_budget_files": config.scrub_files_per_run, "cursor": state.scrub_cursor, "report": fsck}));
         }
 
         let skew = autopilot_rebalance_skew(&report);
@@ -1820,9 +1985,13 @@ impl ArgosFs {
             && autopilot_due(state.last_rebalance_at, config.rebalance_interval_sec, now)
             && skew >= config.rebalance_min_skew
         {
-            let budget = adaptive_autopilot_budget(
-                config.rebalance_files_per_run,
-                state.action_stats.get("rebalance"),
+            let budget = latency_throttled_budget(
+                adaptive_autopilot_budget(
+                    config.rebalance_files_per_run,
+                    state.action_stats.get("rebalance"),
+                ),
+                &report,
+                config.foreground_latency_target_ms,
             );
             match self.rebalance_limited(budget, state.rebalance_cursor) {
                 Ok((rewritten, cursor)) => {
@@ -1836,7 +2005,7 @@ impl ArgosFs {
                         rewritten,
                         0,
                     );
-                    actions.push(json!({"action": "rebalance-incremental", "budget_files": budget, "rewritten_files": rewritten, "cursor": state.rebalance_cursor, "skew": skew}));
+                    actions.push(json!({"action": "rebalance-incremental", "budget_files": budget, "requested_budget_files": config.rebalance_files_per_run, "rewritten_files": rewritten, "cursor": state.rebalance_cursor, "skew": skew}));
                 }
                 Err(err) => {
                     stop_mutations |= matches!(err, ArgosError::Conflict(_));
@@ -1849,13 +2018,31 @@ impl ArgosFs {
             actions.push(json!({"action": "rebalance-not-needed", "skew": skew, "threshold": config.rebalance_min_skew}));
         }
 
+        let verification = self.fsck(false, false);
+        match &verification {
+            Ok(report) if report.errors.is_empty() && report.unrecoverable_files == 0 => {
+                actions.push(json!({"action": "verify-actions", "result": "ok"}));
+            }
+            Ok(report) => {
+                actions.push(
+                    json!({"action": "verify-actions", "result": "failed", "report": report}),
+                );
+                record_autopilot_action(&mut state, "verify", false, -4.0, 0, 0);
+            }
+            Err(err) => {
+                actions.push(json!({"action": "verify-actions", "result": "error", "error": err.to_string()}));
+                record_autopilot_action(&mut state, "verify", false, -4.0, 0, 0);
+            }
+        }
         let health = self.health_report();
+        let adaptive_mode = adaptive_autopilot_mode(&state);
         let result = json!({
             "actions": actions.clone(),
             "health": health,
             "planner": {
                 "state_version": state.version,
                 "runs": state.runs,
+                "adaptive_mode": adaptive_mode,
                 "scrub_cursor": state.scrub_cursor,
                 "rebalance_cursor": state.rebalance_cursor,
                 "stopped_for_conflict": stop_mutations
@@ -1866,6 +2053,97 @@ impl ArgosFs {
         let meta = self.meta.lock();
         self.journal_locked(&meta, "autopilot", json!({"actions": actions}))?;
         Ok(result)
+    }
+
+    pub fn autopilot_dry_run(&self) -> Result<serde_json::Value> {
+        self.autopilot_dry_run_with_config(AutopilotConfig::default())
+    }
+
+    pub fn autopilot_dry_run_with_config(
+        &self,
+        config: AutopilotConfig,
+    ) -> Result<serde_json::Value> {
+        let now = now_f64();
+        let (mut state, state_warning) = self.load_autopilot_state();
+        let report = self.health_report();
+        update_autopilot_risk_memory(&mut state, &report, now);
+        let online = report
+            .disks
+            .iter()
+            .filter(|disk| disk.status == DiskStatus::Online)
+            .count();
+        let mut decisions = Vec::new();
+        for disk in &report.disks {
+            let disk_state = state.disks.get(&disk.id).cloned().unwrap_or_default();
+            let drain_decision = autopilot_drain_decision(disk, &disk_state, now, &config);
+            let enough_online_disks = online.saturating_sub(1) >= self.rs.total();
+            let chosen_action = if disk.predicted_failure
+                && disk.status == DiskStatus::Online
+                && enough_online_disks
+                && drain_decision == AutopilotDrainDecision::Drain
+            {
+                "drain"
+            } else {
+                "observe"
+            };
+            let rejected_actions = if !enough_online_disks {
+                vec![json!({"action": "drain", "reason": "not enough online disks after drain"})]
+            } else if drain_decision == AutopilotDrainDecision::Cooldown {
+                vec![json!({"action": "drain", "reason": "cooldown"})]
+            } else if !disk.predicted_failure {
+                vec![json!({"action": "drain", "reason": "risk below threshold"})]
+            } else {
+                Vec::new()
+            };
+            decisions.push(json!({
+                "target": disk.id,
+                "chosen_action": chosen_action,
+                "candidates": [
+                    {"action": "observe", "score": 0.2},
+                    {"action": "drain", "score": if disk.predicted_failure { 4.0 + disk.risk_score * 6.0 } else { -1.0 }}
+                ],
+                "rejected_actions": rejected_actions,
+                "safety_checks": {
+                    "enough_online_disks": enough_online_disks,
+                    "metadata_conflict": false,
+                    "boot_critical_safe": enough_online_disks
+                },
+                "expected_utility": if chosen_action == "drain" { 4.0 + disk.risk_score * 6.0 } else { 0.2 },
+                "observations": {
+                    "risk_score": disk.risk_score,
+                    "predicted_failure": disk.predicted_failure,
+                    "smart_fields_observed": disk.health.smart_fields_observed.clone(),
+                    "smart_fields_missing": disk.health.smart_fields_missing.clone(),
+                    "smart_stale": disk.smart_stale
+                }
+            }));
+        }
+        let skew = autopilot_rebalance_skew(&report);
+        let rebalance_budget = latency_throttled_budget(
+            adaptive_autopilot_budget(
+                config.rebalance_files_per_run,
+                state.action_stats.get("rebalance"),
+            ),
+            &report,
+            config.foreground_latency_target_ms,
+        );
+        Ok(json!({
+            "dry_run": true,
+            "mutated": false,
+            "state_warning": state_warning,
+            "decisions": decisions,
+            "planner": {
+                "state_version": autopilot_state_version(),
+                "adaptive_mode": adaptive_autopilot_mode(&state),
+                "rebalance": {
+                    "skew": skew,
+                    "threshold": config.rebalance_min_skew,
+                    "would_run": skew >= config.rebalance_min_skew,
+                    "budget_files": rebalance_budget
+                }
+            },
+            "health": report
+        }))
     }
 
     fn load_autopilot_state(&self) -> (AutopilotState, Option<String>) {
@@ -1998,6 +2276,10 @@ impl ArgosFs {
             read_bytes: 0,
             write_bytes: 0,
             storage_class: StorageTier::Warm,
+            boot_critical: boot_critical_name(name),
+            workload_score: 0.0,
+            last_accessed_at: now,
+            last_written_at: now,
         };
         meta.inodes.insert(ino, inode);
         self.dir_inode_mut_locked(meta, parent)?
@@ -2036,12 +2318,24 @@ impl ArgosFs {
         }
         let file_type = mode & libc::S_IFMT;
         let kind = if file_type == libc::S_IFREG || file_type == 0 {
+            if rdev != 0 {
+                return Err(ArgosError::Invalid(
+                    "regular files must not carry an rdev".to_string(),
+                ));
+            }
             NodeKind::File
         } else if file_type == libc::S_IFCHR
             || file_type == libc::S_IFBLK
             || file_type == libc::S_IFIFO
             || file_type == libc::S_IFSOCK
         {
+            if matches!(file_type, value if value == libc::S_IFIFO || value == libc::S_IFSOCK)
+                && rdev != 0
+            {
+                return Err(ArgosError::Invalid(
+                    "fifo and socket nodes must not carry an rdev".to_string(),
+                ));
+            }
             NodeKind::Special
         } else {
             return Err(ArgosError::Unsupported(format!(
@@ -2083,6 +2377,10 @@ impl ArgosFs {
             read_bytes: 0,
             write_bytes: 0,
             storage_class: StorageTier::Warm,
+            boot_critical: boot_critical_name(name),
+            workload_score: 0.0,
+            last_accessed_at: now,
+            last_written_at: now,
         };
         meta.inodes.insert(ino, inode);
         self.dir_inode_mut_locked(meta, parent)?
@@ -2103,6 +2401,7 @@ impl ArgosFs {
         parent: InodeId,
         name: &str,
         dir: bool,
+        uid: Option<u32>,
     ) -> Result<()> {
         validate_entry_name(name)?;
         let child = *self
@@ -2115,6 +2414,7 @@ impl ArgosFs {
             .get(&child)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {child}")))?
             .clone();
+        self.check_sticky_locked(meta, parent, child, uid)?;
         if dir {
             if child_inode.kind != NodeKind::Directory {
                 return Err(ArgosError::NotDirectory(name.to_string()));
@@ -2129,6 +2429,7 @@ impl ArgosFs {
             .entries
             .remove(name);
         self.touch_inode_locked(meta, parent, true, true);
+        let mut blocks_to_delete = Vec::new();
         if child_inode.kind == NodeKind::Directory {
             if let Some(parent_inode) = meta.inodes.get_mut(&parent) {
                 parent_inode.nlink = parent_inode.nlink.saturating_sub(1).max(2);
@@ -2137,16 +2438,17 @@ impl ArgosFs {
         } else if let Some(live) = meta.inodes.get_mut(&child) {
             live.nlink = live.nlink.saturating_sub(1);
             if live.nlink == 0 {
-                let blocks = live.blocks.clone();
+                blocks_to_delete = live.blocks.clone();
                 meta.inodes.remove(&child);
-                self.delete_blocks_locked(meta, &blocks);
             }
         }
+        self.account_blocks_locked(meta, &blocks_to_delete, false);
         self.commit_locked(
             meta,
             if dir { "rmdir" } else { "unlink" },
             json!({"parent": parent, "name": name, "inode": child}),
         )?;
+        self.delete_blocks_locked(meta, &blocks_to_delete);
         Ok(())
     }
 
@@ -2157,10 +2459,16 @@ impl ArgosFs {
         old_name: &str,
         new_parent: InodeId,
         new_name: &str,
+        policy: RenamePolicy,
     ) -> Result<()> {
         validate_entry_name(old_name)?;
         validate_entry_name(new_name)?;
-        if old_parent == new_parent && old_name == new_name {
+        if policy.no_replace && policy.exchange {
+            return Err(ArgosError::Invalid(
+                "RENAME_NOREPLACE and RENAME_EXCHANGE cannot be combined".to_string(),
+            ));
+        }
+        if old_parent == new_parent && old_name == new_name && !policy.exchange {
             return Ok(());
         }
         let child = *self
@@ -2175,6 +2483,7 @@ impl ArgosFs {
             .clone();
         let child_is_dir = child_inode.kind == NodeKind::Directory;
         self.dir_inode_locked(meta, new_parent)?;
+        self.check_sticky_locked(meta, old_parent, child, policy.uid)?;
         if child_is_dir && Self::directory_contains_inode(meta, child, new_parent) {
             return Err(ArgosError::Invalid(
                 "cannot move a directory into itself".to_string(),
@@ -2185,10 +2494,64 @@ impl ArgosFs {
             .entries
             .get(new_name)
             .copied();
-        if existing == Some(child) {
+        if policy.no_replace && existing.is_some() {
+            return Err(ArgosError::AlreadyExists(new_name.to_string()));
+        }
+        if existing == Some(child) && !policy.exchange {
+            return Ok(());
+        }
+        if policy.exchange {
+            let existing = existing.ok_or_else(|| ArgosError::NotFound(new_name.to_string()))?;
+            self.check_sticky_locked(meta, new_parent, existing, policy.uid)?;
+            let existing_inode = meta
+                .inodes
+                .get(&existing)
+                .ok_or_else(|| ArgosError::NotFound(format!("inode {existing}")))?
+                .clone();
+            if existing_inode.kind == NodeKind::Directory
+                && Self::directory_contains_inode(meta, existing, old_parent)
+            {
+                return Err(ArgosError::Invalid(
+                    "cannot exchange a directory into itself".to_string(),
+                ));
+            }
+            self.dir_inode_mut_locked(meta, old_parent)?
+                .entries
+                .insert(old_name.to_string(), existing);
+            self.dir_inode_mut_locked(meta, new_parent)?
+                .entries
+                .insert(new_name.to_string(), child);
+            if old_parent != new_parent {
+                if child_is_dir {
+                    if let Some(parent_inode) = meta.inodes.get_mut(&old_parent) {
+                        parent_inode.nlink = parent_inode.nlink.saturating_sub(1).max(2);
+                    }
+                    if let Some(parent_inode) = meta.inodes.get_mut(&new_parent) {
+                        parent_inode.nlink = parent_inode.nlink.saturating_add(1);
+                    }
+                }
+                if existing_inode.kind == NodeKind::Directory {
+                    if let Some(parent_inode) = meta.inodes.get_mut(&new_parent) {
+                        parent_inode.nlink = parent_inode.nlink.saturating_sub(1).max(2);
+                    }
+                    if let Some(parent_inode) = meta.inodes.get_mut(&old_parent) {
+                        parent_inode.nlink = parent_inode.nlink.saturating_add(1);
+                    }
+                }
+            }
+            self.touch_inode_locked(meta, old_parent, true, true);
+            self.touch_inode_locked(meta, new_parent, true, true);
+            self.touch_inode_locked(meta, child, false, true);
+            self.touch_inode_locked(meta, existing, false, true);
+            self.commit_locked(
+                meta,
+                "rename-exchange",
+                json!({"old_parent": old_parent, "old_name": old_name, "new_parent": new_parent, "new_name": new_name, "inode": child, "exchanged_inode": existing}),
+            )?;
             return Ok(());
         }
         let existing_inode = if let Some(existing) = existing {
+            self.check_sticky_locked(meta, new_parent, existing, policy.uid)?;
             let inode = meta
                 .inodes
                 .get(&existing)
@@ -2230,6 +2593,7 @@ impl ArgosFs {
                 }
             }
         }
+        self.account_blocks_locked(meta, &blocks_to_delete, false);
         self.dir_inode_mut_locked(meta, old_parent)?
             .entries
             .remove(old_name);
@@ -2287,7 +2651,7 @@ impl ArgosFs {
         exclude_disks: &BTreeSet<String>,
     ) -> Result<()> {
         let rollback = meta.clone();
-        let storage_class = {
+        let (storage_class, boot_critical) = {
             let inode = meta
                 .inodes
                 .get(&ino)
@@ -2301,10 +2665,11 @@ impl ArgosFs {
                     return Err(ArgosError::Unsupported("not a regular file".to_string()));
                 }
             }
-            inode.storage_class
+            (inode.storage_class, inode.boot_critical)
         };
         let old_blocks = meta.inodes.get(&ino).unwrap().blocks.clone();
-        let new_blocks = self.encode_data_locked(meta, data, storage_class, exclude_disks)?;
+        let new_blocks =
+            self.encode_data_locked(meta, data, 0, storage_class, boot_critical, exclude_disks)?;
         let new_blocks_for_cleanup = new_blocks.clone();
         let now = now_f64();
         let inode = meta.inodes.get_mut(&ino).unwrap();
@@ -2312,10 +2677,13 @@ impl ArgosFs {
         inode.size = data.len() as u64;
         inode.write_count = inode.write_count.saturating_add(1);
         inode.write_bytes = inode.write_bytes.saturating_add(data.len() as u64);
+        inode.last_written_at = now;
+        inode.workload_score = inode.workload_score * 0.90 + 2.0;
         if !preserve_mtime {
             inode.mtime = now;
         }
         inode.ctime = now;
+        self.account_blocks_locked(meta, &old_blocks, false);
         if let Err(err) = self.commit_locked(meta, action, details) {
             if matches!(&err, ArgosError::Conflict(_))
                 || matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal")
@@ -2326,6 +2694,112 @@ impl ArgosFs {
             return Err(err);
         }
         self.delete_blocks_locked(meta, &old_blocks);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rewrite_inode_data_from_image_locked(
+        &self,
+        meta: &mut Metadata,
+        ino: InodeId,
+        data: &[u8],
+        changed_start: usize,
+        changed_end: usize,
+        logical_write_bytes: u64,
+        action: &str,
+        details: serde_json::Value,
+    ) -> Result<()> {
+        let rollback = meta.clone();
+        let stripe_raw_size = meta
+            .config
+            .chunk_size
+            .checked_mul(meta.config.k)
+            .ok_or_else(|| ArgosError::Invalid("stripe size overflow".to_string()))?;
+        if stripe_raw_size == 0 {
+            return Err(ArgosError::Invalid(
+                "stripe size must be positive".to_string(),
+            ));
+        }
+        let (old_size, storage_class, boot_critical, old_blocks) = {
+            let inode = meta
+                .inodes
+                .get(&ino)
+                .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+            if inode.kind != NodeKind::File {
+                return Err(ArgosError::Unsupported(
+                    "range updates require a regular file".to_string(),
+                ));
+            }
+            (
+                usize::try_from(inode.size)
+                    .map_err(|_| ArgosError::Invalid("inode size is too large".to_string()))?,
+                inode.storage_class,
+                inode.boot_critical,
+                inode.blocks.clone(),
+            )
+        };
+        let new_size = data.len();
+        let first_changed = changed_start.min(new_size.max(old_size));
+        let affected_start = (first_changed / stripe_raw_size) * stripe_raw_size;
+        let mut affected_end = changed_end.max(changed_start).min(new_size);
+        if new_size != old_size {
+            affected_end = new_size;
+        } else if affected_end > affected_start {
+            affected_end = affected_end.div_ceil(stripe_raw_size) * stripe_raw_size;
+            affected_end = affected_end.min(new_size);
+        }
+        if affected_end < affected_start {
+            affected_end = affected_start;
+        }
+        let preserve_suffix = new_size == old_size;
+        let mut merged = Vec::new();
+        let mut replaced = Vec::new();
+        for block in old_blocks {
+            let block_start = block.raw_offset;
+            let block_end = block.raw_offset.saturating_add(block.raw_size as u64);
+            if block_end <= affected_start as u64
+                || (preserve_suffix && block_start >= affected_end as u64)
+            {
+                merged.push(block);
+            } else {
+                replaced.push(block);
+            }
+        }
+        let mut written_blocks = Vec::new();
+        if affected_start < affected_end {
+            let new_blocks = self.encode_data_locked(
+                meta,
+                &data[affected_start..affected_end],
+                affected_start as u64,
+                storage_class,
+                boot_critical,
+                &BTreeSet::new(),
+            )?;
+            written_blocks = new_blocks.clone();
+            merged.extend(new_blocks);
+        }
+        merged.sort_by_key(|block| block.raw_offset);
+        let now = now_f64();
+        let inode = meta.inodes.get_mut(&ino).unwrap();
+        inode.blocks = merged;
+        inode.size = new_size as u64;
+        inode.write_count = inode.write_count.saturating_add(1);
+        inode.write_bytes = inode.write_bytes.saturating_add(logical_write_bytes);
+        inode.last_written_at = now;
+        inode.workload_score = inode.workload_score * 0.90 + 2.0;
+        inode.mtime = now;
+        inode.ctime = now;
+        self.account_blocks_locked(meta, &replaced, false);
+        if let Err(err) = self.commit_locked(meta, action, details) {
+            if matches!(&err, ArgosError::Conflict(_))
+                || matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal")
+            {
+                *meta = rollback;
+                self.delete_blocks_locked(meta, &written_blocks);
+            }
+            return Err(err);
+        }
+        self.delete_blocks_locked(meta, &replaced);
         Ok(())
     }
 
@@ -2446,7 +2920,9 @@ impl ArgosFs {
         &self,
         meta: &mut Metadata,
         data: &[u8],
+        base_offset: u64,
         storage_class: StorageTier,
+        boot_critical: bool,
         exclude_disks: &BTreeSet<String>,
     ) -> Result<Vec<FileBlock>> {
         let mut blocks = Vec::new();
@@ -2501,6 +2977,7 @@ impl ArgosFs {
                 &stripe_id,
                 self.rs.total(),
                 storage_class,
+                boot_critical,
                 exclude_disks,
                 shard_size as u64,
             )?;
@@ -2526,6 +3003,7 @@ impl ArgosFs {
             let raw_offset = index
                 .checked_mul(stripe_raw_size)
                 .and_then(|offset| u64::try_from(offset).ok())
+                .and_then(|offset| base_offset.checked_add(offset))
                 .ok_or_else(|| ArgosError::Invalid("raw block offset overflow".to_string()))?;
             blocks.push(FileBlock {
                 stripe_id,
@@ -2561,6 +3039,15 @@ impl ArgosFs {
         self.ensure_disk_capacity_locked(meta, disk_id, data.len() as u64)?;
         let start = std::time::Instant::now();
         advanced_io::write_all(&path, data, meta.config.io_mode)?;
+        if let Some(parent) = path.parent() {
+            sync_directory(parent);
+            if let Some(grandparent) = parent.parent() {
+                sync_directory(grandparent);
+            }
+        }
+        if let Some(disk) = meta.disks.get_mut(disk_id) {
+            disk.used_bytes = disk.used_bytes.saturating_add(data.len() as u64);
+        }
         self.update_write_latency_locked(
             meta,
             disk_id,
@@ -2582,6 +3069,7 @@ impl ArgosFs {
         key: &str,
         count: usize,
         storage_class: StorageTier,
+        boot_critical: bool,
         exclude_disks: &BTreeSet<String>,
         required_bytes: u64,
     ) -> Result<Vec<String>> {
@@ -2599,7 +3087,7 @@ impl ArgosFs {
             if !disk_path.join("shards").exists() {
                 continue;
             }
-            if !self.disk_has_capacity(&disk_path, disk, required_bytes) {
+            if !self.disk_has_capacity(meta, disk_id, disk, required_bytes) {
                 continue;
             }
             let tier_bonus = match (storage_class, disk.tier) {
@@ -2621,9 +3109,14 @@ impl ArgosFs {
                 }
             }
             if disk.capacity_bytes > 0 {
-                score += (directory_size(&disk_path.join("shards")) as f64
-                    / disk.capacity_bytes as f64)
-                    .min(2.0);
+                let used = self.effective_used_bytes_locked(meta, disk);
+                let capacity = self.effective_capacity_bytes_locked(meta, disk);
+                if capacity > 0 {
+                    score += (used as f64 / capacity as f64).min(2.0);
+                }
+            }
+            if boot_critical && disk.tier == StorageTier::Cold {
+                score *= 1.35;
             }
             scored.push((score, disk_id.clone()));
         }
@@ -2634,15 +3127,45 @@ impl ArgosFs {
             });
         }
         scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(scored.into_iter().take(count).map(|(_, id)| id).collect())
+        let mut selected = Vec::new();
+        let mut domains = BTreeSet::new();
+        for (_, id) in &scored {
+            let domain = meta
+                .disks
+                .get(id)
+                .map(|disk| disk.failure_domain.as_str())
+                .unwrap_or(id.as_str());
+            if domains.insert(domain.to_string()) {
+                selected.push(id.clone());
+                if selected.len() == count {
+                    return Ok(selected);
+                }
+            }
+        }
+        for (_, id) in scored {
+            if !selected.contains(&id) {
+                selected.push(id);
+                if selected.len() == count {
+                    return Ok(selected);
+                }
+            }
+        }
+        Ok(selected)
     }
 
-    fn disk_has_capacity(&self, disk_path: &Path, disk: &Disk, required_bytes: u64) -> bool {
-        if disk.capacity_bytes == 0 {
+    fn disk_has_capacity(
+        &self,
+        meta: &Metadata,
+        _disk_id: &str,
+        disk: &Disk,
+        required_bytes: u64,
+    ) -> bool {
+        let capacity = self.effective_capacity_bytes_locked(meta, disk);
+        if capacity == 0 {
             return true;
         }
-        let used = directory_size(&disk_path.join("shards"));
-        used.saturating_add(required_bytes) <= disk.capacity_bytes
+        let used = self.effective_used_bytes_locked(meta, disk);
+        used.saturating_add(required_bytes) <= capacity
     }
 
     fn ensure_disk_capacity_locked(
@@ -2655,16 +3178,16 @@ impl ArgosFs {
             .disks
             .get(disk_id)
             .ok_or_else(|| ArgosError::NotFound(disk_id.to_string()))?;
-        if disk.capacity_bytes == 0 {
+        let capacity = self.effective_capacity_bytes_locked(meta, disk);
+        if capacity == 0 {
             return Ok(());
         }
-        let disk_path = relative_or_absolute(&self.root, &disk.path);
-        let used = directory_size(&disk_path.join("shards"));
-        if used.saturating_add(required_bytes) > disk.capacity_bytes {
+        let used = self.effective_used_bytes_locked(meta, disk);
+        if used.saturating_add(required_bytes) > capacity {
             return Err(ArgosError::DiskFull {
                 disk_id: disk_id.to_string(),
                 required: required_bytes,
-                available: disk.capacity_bytes.saturating_sub(used),
+                available: capacity.saturating_sub(used),
             });
         }
         Ok(())
@@ -2726,6 +3249,55 @@ impl ArgosFs {
                 }
             }
         }
+    }
+
+    fn account_blocks_locked(&self, meta: &mut Metadata, blocks: &[FileBlock], add: bool) {
+        for shard in blocks.iter().flat_map(|block| block.shards.iter()) {
+            if let Some(disk) = meta.disks.get_mut(&shard.disk_id) {
+                if add {
+                    disk.used_bytes = disk.used_bytes.saturating_add(shard.size as u64);
+                } else {
+                    disk.used_bytes = disk.used_bytes.saturating_sub(shard.size as u64);
+                }
+            }
+        }
+    }
+
+    fn effective_capacity_bytes_locked(&self, meta: &Metadata, disk: &Disk) -> u64 {
+        if disk.capacity_source == CapacitySource::UserOverride {
+            return disk.capacity_bytes;
+        }
+        let Some(fs_id) = disk.backing_fs_id.as_deref() else {
+            return disk.capacity_bytes;
+        };
+        meta.disks
+            .values()
+            .filter(|candidate| {
+                candidate.capacity_source == CapacitySource::AutoProbe
+                    && candidate.backing_fs_id.as_deref() == Some(fs_id)
+                    && candidate.status == DiskStatus::Online
+            })
+            .map(|candidate| candidate.capacity_bytes)
+            .max()
+            .unwrap_or(disk.capacity_bytes)
+    }
+
+    fn effective_used_bytes_locked(&self, meta: &Metadata, disk: &Disk) -> u64 {
+        if disk.capacity_source == CapacitySource::UserOverride {
+            return disk.used_bytes;
+        }
+        let Some(fs_id) = disk.backing_fs_id.as_deref() else {
+            return disk.used_bytes;
+        };
+        meta.disks
+            .values()
+            .filter(|candidate| {
+                candidate.capacity_source == CapacitySource::AutoProbe
+                    && candidate.backing_fs_id.as_deref() == Some(fs_id)
+                    && candidate.status == DiskStatus::Online
+            })
+            .map(|candidate| candidate.used_bytes)
+            .sum()
     }
 
     fn referenced_shards(&self) -> BTreeSet<(String, PathBuf)> {
@@ -2852,6 +3424,36 @@ impl ArgosFs {
             .entries
             .values()
             .any(|child| Self::directory_contains_inode(meta, *child, needle))
+    }
+
+    fn check_sticky_locked(
+        &self,
+        meta: &Metadata,
+        parent: InodeId,
+        child: InodeId,
+        uid: Option<u32>,
+    ) -> Result<()> {
+        let Some(uid) = uid else {
+            return Ok(());
+        };
+        if uid == 0 {
+            return Ok(());
+        }
+        let parent_inode = self.dir_inode_locked(meta, parent)?;
+        if parent_inode.mode & libc::S_ISVTX == 0 {
+            return Ok(());
+        }
+        let child_inode = meta
+            .inodes
+            .get(&child)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {child}")))?;
+        if uid == parent_inode.uid || uid == child_inode.uid {
+            Ok(())
+        } else {
+            Err(ArgosError::PermissionDenied(format!(
+                "sticky directory denies uid {uid} removing inode {child}"
+            )))
+        }
     }
 
     fn touch_inode_locked(&self, meta: &mut Metadata, ino: InodeId, mtime: bool, ctime: bool) {
@@ -3061,6 +3663,43 @@ fn adaptive_autopilot_budget(base: usize, stats: Option<&AutopilotActionStats>) 
     ((base as f64 * multiplier).round() as usize).clamp(1, base.saturating_mul(4).max(1))
 }
 
+fn latency_throttled_budget(base: usize, report: &HealthReport, target_ms: f64) -> usize {
+    if base <= 1 || target_ms <= 0.0 {
+        return base;
+    }
+    let max_latency = report
+        .disks
+        .iter()
+        .filter(|disk| disk.status == DiskStatus::Online)
+        .map(|disk| disk.read_latency_ewma_ms.max(disk.write_latency_ewma_ms))
+        .fold(0.0_f64, f64::max);
+    if max_latency > target_ms * 2.0 {
+        1
+    } else if max_latency > target_ms {
+        (base / 2).max(1)
+    } else {
+        base
+    }
+}
+
+fn adaptive_autopilot_mode(state: &AutopilotState) -> &'static str {
+    let failures: u64 = state
+        .action_stats
+        .values()
+        .map(|stats| stats.failures)
+        .sum();
+    let successes: u64 = state
+        .action_stats
+        .values()
+        .map(|stats| stats.successes)
+        .sum();
+    if failures > successes && failures >= 2 {
+        "reduced"
+    } else {
+        "normal"
+    }
+}
+
 fn record_autopilot_action(
     state: &mut AutopilotState,
     action: &str,
@@ -3086,14 +3725,21 @@ fn record_autopilot_action(
 }
 
 fn entry_name_from_os(name: &OsStr) -> Result<String> {
-    let name = name
-        .to_str()
-        .ok_or_else(|| ArgosError::Invalid("entry name must be valid UTF-8".to_string()))?;
-    validate_entry_name(name)?;
-    Ok(name.to_string())
+    if let Some(name) = name.to_str() {
+        validate_entry_name(name)?;
+        return Ok(name.to_string());
+    }
+    let bytes = name.as_bytes();
+    validate_entry_name_bytes(bytes)?;
+    Ok(format!("{NON_UTF8_NAME_PREFIX}{}", hex::encode(bytes)))
 }
 
 fn validate_entry_name(name: &str) -> Result<()> {
+    if let Some(hex_name) = name.strip_prefix(NON_UTF8_NAME_PREFIX) {
+        let bytes = hex::decode(hex_name)
+            .map_err(|err| ArgosError::Invalid(format!("invalid encoded entry name: {err}")))?;
+        return validate_entry_name_bytes(&bytes);
+    }
     if name.is_empty() || name == "." || name == ".." {
         return Err(ArgosError::Invalid(format!("invalid entry name: {name:?}")));
     }
@@ -3103,8 +3749,113 @@ fn validate_entry_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_entry_name_bytes(name: &[u8]) -> Result<()> {
+    if name.is_empty() || name == b"." || name == b".." {
+        return Err(ArgosError::Invalid("invalid entry name bytes".to_string()));
+    }
+    if name.iter().any(|byte| *byte == b'/' || *byte == 0) {
+        return Err(ArgosError::Invalid("invalid entry name bytes".to_string()));
+    }
+    Ok(())
+}
+
+fn decode_entry_name_bytes(name: &str) -> Vec<u8> {
+    name.strip_prefix(NON_UTF8_NAME_PREFIX)
+        .and_then(|encoded| hex::decode(encoded).ok())
+        .unwrap_or_else(|| name.as_bytes().to_vec())
+}
+
+fn display_entry_name(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| String::from_utf8_lossy(bytes).to_string())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum XattrNamespace {
+    User,
+    Trusted,
+    Security,
+    System,
+    ArgosSystem,
+}
+
+fn xattr_namespace(name: &str) -> Result<XattrNamespace> {
+    if name.is_empty() || name.as_bytes().contains(&0) {
+        return Err(ArgosError::Invalid(format!("invalid xattr name: {name:?}")));
+    }
+    if name.starts_with("user.") {
+        Ok(XattrNamespace::User)
+    } else if name.starts_with("trusted.") {
+        Ok(XattrNamespace::Trusted)
+    } else if name.starts_with("security.") {
+        Ok(XattrNamespace::Security)
+    } else if name.starts_with("system.argosfs.") {
+        Ok(XattrNamespace::ArgosSystem)
+    } else if name.starts_with("system.") {
+        Ok(XattrNamespace::System)
+    } else {
+        Err(ArgosError::Invalid(format!(
+            "xattr {name:?} must use a Linux namespace prefix"
+        )))
+    }
+}
+
+fn validate_xattr_write(name: &str) -> Result<()> {
+    if is_known_system_xattr(name) {
+        return Ok(());
+    }
+    match xattr_namespace(name)? {
+        XattrNamespace::User => Ok(()),
+        XattrNamespace::Trusted | XattrNamespace::Security => Err(ArgosError::PermissionDenied(
+            format!("xattr namespace is protected: {name}"),
+        )),
+        XattrNamespace::System | XattrNamespace::ArgosSystem => Err(ArgosError::Unsupported(
+            format!("unsupported system xattr: {name}"),
+        )),
+    }
+}
+
+fn validate_xattr_read(name: &str) -> Result<()> {
+    if is_known_system_xattr(name) {
+        return Ok(());
+    }
+    match xattr_namespace(name)? {
+        XattrNamespace::User => Ok(()),
+        XattrNamespace::Trusted | XattrNamespace::Security => Err(ArgosError::PermissionDenied(
+            format!("xattr namespace is protected: {name}"),
+        )),
+        XattrNamespace::System | XattrNamespace::ArgosSystem => Err(ArgosError::Unsupported(
+            format!("unsupported system xattr: {name}"),
+        )),
+    }
+}
+
+fn is_known_system_xattr(name: &str) -> bool {
+    matches!(
+        name,
+        acl::POSIX_ACL_ACCESS_XATTR
+            | acl::POSIX_ACL_DEFAULT_XATTR
+            | acl::ARGOS_POSIX_ACL_ACCESS_XATTR
+            | acl::ARGOS_POSIX_ACL_DEFAULT_XATTR
+            | acl::NFS4_ACL_XATTR
+            | BOOT_CRITICAL_XATTR
+    )
+}
+
+fn boot_critical_name(name: &str) -> bool {
+    matches!(
+        name,
+        "boot" | "etc" | "bin" | "sbin" | "lib" | "lib64" | "usr" | "init"
+    )
+}
+
 fn canonical_or_self(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn sync_directory(path: &Path) {
+    if let Ok(dir) = fs::File::open(path) {
+        let _ = dir.sync_all();
+    }
 }
 
 fn encryption_aad(volume_uuid: &str, stripe_id: &str) -> Vec<u8> {
