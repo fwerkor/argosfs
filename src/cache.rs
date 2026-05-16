@@ -228,9 +228,8 @@ impl BlockCache {
         if inner.l2_loaded {
             return Ok(());
         }
-        let mut index = BTreeMap::new();
-        let mut total = 0u64;
-        let mut clock = 0u64;
+
+        let mut files = Vec::new();
         for entry in walkdir::WalkDir::new(&self.root)
             .min_depth(1)
             .into_iter()
@@ -242,22 +241,32 @@ impl BlockCache {
             let Ok(metadata) = entry.metadata() else {
                 continue;
             };
+            let modified_secs = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            files.push((modified_secs, entry.path().to_path_buf(), metadata.len()));
+        }
+
+        files.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+        let mut index = BTreeMap::new();
+        let mut total = 0u64;
+        let mut clock = 0u64;
+        for (_, path, size) in files {
             clock = clock.saturating_add(1);
-            let size = metadata.len();
             total = total.saturating_add(size);
             index.insert(
-                entry.path().to_path_buf(),
+                path,
                 L2Entry {
                     size,
-                    touched: metadata
-                        .modified()
-                        .ok()
-                        .and_then(|time| time.elapsed().ok())
-                        .map(|elapsed| u64::MAX.saturating_sub(elapsed.as_secs()))
-                        .unwrap_or(clock),
+                    touched: clock,
                 },
             );
         }
+
         inner.l2_loaded = true;
         inner.l2_index = index;
         inner.l2_bytes = total;
