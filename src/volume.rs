@@ -3630,8 +3630,6 @@ impl ArgosFs {
             meta.integrity.meta_hash.clone()
         };
         let previous_txid = meta.txid;
-        let previous_updated_at = meta.updated_at;
-        let previous_integrity = meta.integrity.clone();
         meta.txid += 1;
         meta.updated_at = now_f64();
         let result = journal::append_transaction_checked(
@@ -3641,16 +3639,14 @@ impl ArgosFs {
             action,
             json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details}),
         );
-        let rollback_commit = match &result {
-            Err(ArgosError::Conflict(_)) => true,
-            Err(ArgosError::InjectedCrash(point)) if point == "before-journal" => true,
-            _ => false,
-        };
-        if rollback_commit {
-            meta.txid = previous_txid;
-            meta.updated_at = previous_updated_at;
-            meta.integrity = previous_integrity;
+
+        if result.is_err() {
+            if let Ok(recovered) = journal::load_or_recover(&self.root) {
+                *meta = recovered.metadata;
+                recompute_disk_usage_from_metadata(meta);
+            }
         }
+
         result
     }
 

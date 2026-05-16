@@ -183,6 +183,32 @@ fn readdir_reports_real_parent_for_dotdot() {
 }
 
 #[test]
+fn failed_pre_journal_commit_reloads_in_memory_metadata() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    journal::set_thread_crash_point(Some("before-journal"));
+    let err = fs.mkdir("/ghost", 0o755).unwrap_err();
+    journal::set_thread_crash_point(None);
+
+    assert!(matches!(
+        err,
+        ArgosError::InjectedCrash(point) if point == "before-journal"
+    ));
+    assert_eq!(
+        fs.resolve_path("/ghost", false).unwrap_err().errno(),
+        libc::ENOENT
+    );
+
+    let reopened = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(
+        reopened.resolve_path("/ghost", false).unwrap_err().errno(),
+        libc::ENOENT
+    );
+}
+
+#[test]
 fn read_and_readdir_do_not_commit_metadata_transactions() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
