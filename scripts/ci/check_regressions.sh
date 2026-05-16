@@ -25,20 +25,23 @@ require_present() {
   fi
 }
 
-echo "[1/8] rust formatting / clippy / tests"
+echo "[1/9] rust formatting / clippy / tests"
 cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 
-echo "[2/8] deep roundtrip checks"
+echo "[2/9] deep roundtrip checks"
 bash scripts/compat/run_deep_roundtrip.sh
-if [ -e /dev/fuse ] && command -v fusermount3 >/dev/null 2>&1 && grep -q 'nodev[[:space:]]\+fuse' /proc/filesystems; then
+if [ -e /dev/fuse ] && { command -v fusermount3 >/dev/null 2>&1 || command -v fusermount >/dev/null 2>&1; } && grep -q 'nodev[[:space:]]\+fuse' /proc/filesystems; then
   ARGOSFS_DEEP_FUSE=1 bash scripts/compat/run_deep_roundtrip.sh
 else
-  echo "skip FUSE deep roundtrip: /dev/fuse or fusermount3 unavailable"
+  echo "skip FUSE deep roundtrip: /dev/fuse, fusermount, or kernel fuse unavailable"
 fi
 
-echo "[3/8] block lossy xattr/FUSE regressions"
+echo "[3/9] mounted FUSE compatibility checks"
+bash scripts/compat/run_mounted_fuse_compat.sh
+
+echo "[4/9] block lossy xattr/FUSE regressions"
 require_absent 'name\.to_string_lossy\(\)' src/fusefs.rs \
   "FUSE xattr/name handling must not use to_string_lossy"
 require_present 'fn xattr_name\(name: &OsStr\) -> Result<&str>' src/fusefs.rs \
@@ -48,7 +51,7 @@ require_present 'unsupported setxattr position' src/fusefs.rs \
 require_present 'flags & !supported' src/fusefs.rs \
   "FUSE setxattr/rename should reject unsupported flags"
 
-echo "[4/8] import/export metadata guard"
+echo "[5/9] import/export metadata guard"
 require_present 'iter_path_bytes' src/bin/argosfs.rs \
   "export_tree must use byte-preserving paths"
 require_present 'readlink_inode_bytes' src/bin/argosfs.rs \
@@ -68,7 +71,7 @@ require_absent 'Some\(libc::EPERM\).*return Ok\(Vec::new\(\)\)' src/bin/argosfs.
 require_absent 'Some\(libc::EACCES\).*return Ok\(Vec::new\(\)\)' src/bin/argosfs.rs \
   "import must not treat xattr EACCES as no xattrs"
 
-echo "[5/8] device number / mknod guard"
+echo "[6/9] device number / mknod guard"
 require_present 'rdev: u64' src/types.rs \
   "Inode/NodeAttr rdev must be u64"
 require_present 'rdev: u64' src/volume.rs \
@@ -76,7 +79,7 @@ require_present 'rdev: u64' src/volume.rs \
 require_present 'parse_u64_auto' src/bin/argosfs.rs \
   "CLI mknod --rdev must parse u64"
 
-echo "[6/8] transaction and durability guard"
+echo "[7/9] transaction and durability guard"
 require_present 'load_or_recover' src/volume.rs \
   "failed uncommitted/conflict commits should reload metadata"
 require_present 'before-journal' src/volume.rs \
@@ -84,15 +87,21 @@ require_present 'before-journal' src/volume.rs \
 require_present 'file\.sync_all\(\)\?' src/volume.rs \
   "ArgosFs::sync must flush shard file contents"
 
-echo "[7/8] compat script guard"
+echo "[8/9] compat script guard"
 require_present 'cd "\$mountpoint"' scripts/compat/run_pjdfstest.sh \
   "pjdfstest must run inside requested mountpoint"
-require_present 'mountpoint -q "\$mountpoint"' scripts/compat/run_fuse_smoke.sh \
+require_present 'mountpoint -q "\$mountpoint"' scripts/compat/run_pjdfstest.sh \
+  "pjdfstest must verify actual mountpoint"
+require_present 'mountpoint -q "\$ARGOSFS_COMPAT_MOUNTPOINT"' scripts/compat/run_fuse_smoke.sh \
   "fuse smoke must verify actual mountpoint"
-require_present 'kill -0 "\$pid"' scripts/compat/run_fuse_smoke.sh \
-  "fuse smoke must fail if mount process exits"
+require_present 'kill -0 "\$pid"' scripts/compat/with_fuse_mount.sh \
+  "FUSE helper must fail if mount process exits"
+require_present 'mountpoint -q "\$mountpoint"' scripts/compat/with_fuse_mount.sh \
+  "FUSE helper must wait for mountpoint(1)"
+require_present 'mounted_fuse_ops.py' scripts/compat/run_mounted_fuse_compat.sh \
+  "mounted FUSE compatibility script must run syscall behavior checks"
 
-echo "[8/8] experiment reproducibility guard"
+echo "[9/9] experiment reproducibility guard"
 require_absent 'random\.Random\(424242\)' scripts/experiments/run_failure_matrix.py \
   "failure matrix must not hardcode seed"
 require_present 'ARGOSFS_EXPERIMENT_SEED' scripts/experiments/run_failure_matrix.py \
