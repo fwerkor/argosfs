@@ -783,16 +783,16 @@ fn ensure_virtual_dir(volume: &ArgosFs, path: &str, mode: u32) -> Result<()> {
 
 fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest)?;
-    let mut paths = volume.iter_paths();
-    paths.sort_by_key(|(path, _)| path.matches('/').count());
+    let mut paths = volume.iter_path_bytes();
+    paths.sort_by_key(|(path, _)| path.iter().filter(|byte| **byte == b'/').count());
 
     let mut directories = Vec::new();
     for (path, ino) in paths {
-        if path == "/" {
+        if path.as_slice() == b"/" {
             continue;
         }
         let attr = volume.attr_inode(ino)?;
-        let target = dest.join(path.trim_start_matches('/'));
+        let target = export_target_from_path_bytes(dest, &path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -836,6 +836,17 @@ fn export_tree(volume: &ArgosFs, dest: &Path) -> Result<()> {
         apply_export_metadata(volume, ino, &target, &attr)?;
     }
     Ok(())
+}
+
+fn export_target_from_path_bytes(dest: &Path, path: &[u8]) -> PathBuf {
+    let mut target = dest.to_path_buf();
+    let rel = path.strip_prefix(b"/").unwrap_or(path);
+    for component in rel.split(|byte| *byte == b'/') {
+        if !component.is_empty() {
+            target.push(std::ffi::OsStr::from_bytes(component));
+        }
+    }
+    target
 }
 
 fn apply_export_metadata(
