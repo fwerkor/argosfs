@@ -680,6 +680,8 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
     if dest != "/" {
         ensure_virtual_dir(volume, &dest, 0o755)?;
     }
+
+    let mut directories = Vec::new();
     for entry in walkdir::WalkDir::new(source)
         .follow_links(false)
         .sort_by_file_name()
@@ -700,7 +702,7 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
         let mode = meta.mode();
         if ft.is_dir() {
             ensure_virtual_dir(volume, &virtual_path, mode & 0o7777)?;
-            apply_import_metadata(volume, path, &virtual_path, &meta)?;
+            directories.push((path.to_path_buf(), virtual_path));
         } else if ft.is_file() {
             volume.write_file(&virtual_path, &fs::read(path)?, mode & 0o7777)?;
             apply_import_metadata(volume, path, &virtual_path, &meta)?;
@@ -712,6 +714,11 @@ fn import_tree(volume: &ArgosFs, source: &Path, dest: &str) -> Result<()> {
             volume.mknod_path(&virtual_path, mode, meta.rdev() as u32)?;
             apply_import_metadata(volume, path, &virtual_path, &meta)?;
         }
+    }
+
+    for (path, virtual_path) in directories.into_iter().rev() {
+        let meta = fs::symlink_metadata(&path)?;
+        apply_import_metadata(volume, &path, &virtual_path, &meta)?;
     }
     Ok(())
 }
@@ -826,7 +833,15 @@ fn apply_export_metadata(
     target: &Path,
     attr: &argosfs::volume::NodeAttr,
 ) -> Result<()> {
-    lchown_path(target, attr.uid, attr.gid)?;
+    if let Err(err) = lchown_path(target, attr.uid, attr.gid) {
+        let unprivileged_chown = err
+            .downcast_ref::<io::Error>()
+            .and_then(|err| err.raw_os_error())
+            == Some(libc::EPERM);
+        if !unprivileged_chown {
+            return Err(err);
+        }
+    }
     if attr.kind != argosfs::types::NodeKind::Symlink {
         fs::set_permissions(target, fs::Permissions::from_mode(attr.mode & 0o7777))?;
     }

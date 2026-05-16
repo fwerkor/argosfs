@@ -359,6 +359,25 @@ impl ArgosFs {
 
     pub fn sync(&self) -> Result<()> {
         let meta = self.meta.lock();
+
+        let mut shard_paths = BTreeSet::new();
+        for inode in meta.inodes.values() {
+            for block in &inode.blocks {
+                for shard in &block.shards {
+                    if let Some(path) =
+                        self.shard_path_if_disk_exists_locked(&meta, &shard.disk_id, &shard.relpath)
+                    {
+                        shard_paths.insert(path);
+                    }
+                }
+            }
+        }
+        for path in shard_paths {
+            if let Ok(file) = fs::File::open(&path) {
+                file.sync_all()?;
+            }
+        }
+
         for path in [
             self.root.join(".argosfs/journal.jsonl"),
             self.root.join(".argosfs/meta.primary.json"),
