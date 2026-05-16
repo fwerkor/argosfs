@@ -307,7 +307,10 @@ fn main() -> Result<()> {
         }
         Command::Cat { root, path } => {
             let fs = ArgosFs::open(root)?;
-            io::stdout().write_all(&fs.read_file(&path, true)?)?;
+            let file_bytes = fs.read_file(&path, true)?;
+
+            // codeql[rust/cleartext-logging] `cat` intentionally streams user-requested file bytes; unlock material is not written.
+            io::stdout().lock().write_all(&file_bytes)?;
         }
         Command::Ls { root, path, json } => {
             let fs = ArgosFs::open(root)?;

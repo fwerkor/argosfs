@@ -3,7 +3,6 @@ use crate::types::EncryptionConfig;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
-use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::fs;
 
@@ -22,8 +21,7 @@ pub fn passphrase_from_env() -> Result<Option<String>> {
 }
 
 pub fn new_encryption_config(passphrase: &str, aad: &[u8]) -> Result<EncryptionConfig> {
-    let mut salt = [0u8; SALT_LEN];
-    rand::rng().fill_bytes(&mut salt);
+    let salt: [u8; SALT_LEN] = rand::random();
     let key = derive_key(passphrase, &salt)?;
     let marker = b"argosfs-key-check";
     let (nonce, ciphertext) = encrypt_with_key(&key, marker, aad)?;
@@ -74,8 +72,7 @@ pub fn encrypt_with_key(
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
-    let mut nonce = [0u8; NONCE_LEN];
-    rand::rng().fill_bytes(&mut nonce);
+    let nonce: [u8; NONCE_LEN] = rand::random();
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
     let ciphertext = cipher
         .encrypt(
