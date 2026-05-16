@@ -88,6 +88,76 @@ fn hard_link_does_not_require_source_read_permission() {
 }
 
 #[test]
+fn range_write_rewrites_only_affected_stripe_window() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(2, 2);
+    cfg.chunk_size = 4;
+    let fs = ArgosFs::create(tmp.path(), cfg, 4, false).unwrap();
+
+    let original = b"aaaabbbbccccddddeeeeffff";
+    fs.write_file("/file", original, 0o644).unwrap();
+    let before = fs.metadata_snapshot();
+    let ino = fs.resolve_path("/file", true).unwrap();
+    let before_blocks = before.inodes.get(&ino).unwrap().blocks.clone();
+    assert!(before_blocks.len() >= 3);
+
+    fs.write_inode_range(ino, 10, b"XX").unwrap();
+
+    let after = fs.metadata_snapshot();
+    let after_blocks = after.inodes.get(&ino).unwrap().blocks.clone();
+    assert_eq!(after_blocks.len(), before_blocks.len());
+
+    let unchanged_prefix = before_blocks
+        .iter()
+        .filter(|block| block.raw_offset < 8)
+        .map(|block| block.stripe_id.clone())
+        .collect::<Vec<_>>();
+    let after_prefix = after_blocks
+        .iter()
+        .filter(|block| block.raw_offset < 8)
+        .map(|block| block.stripe_id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(unchanged_prefix, after_prefix);
+
+    let mut expected = original.to_vec();
+    expected[10..12].copy_from_slice(b"XX");
+    assert_eq!(fs.read_file("/file", true).unwrap(), expected);
+}
+
+#[test]
+fn truncate_rewrites_only_tail_stripe_window() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(2, 2);
+    cfg.chunk_size = 4;
+    let fs = ArgosFs::create(tmp.path(), cfg, 4, false).unwrap();
+
+    fs.write_file("/file", b"aaaabbbbccccddddeeeeffff", 0o644)
+        .unwrap();
+    let ino = fs.resolve_path("/file", true).unwrap();
+    let before_blocks = fs
+        .metadata_snapshot()
+        .inodes
+        .get(&ino)
+        .unwrap()
+        .blocks
+        .clone();
+
+    fs.truncate_inode(ino, 10).unwrap();
+
+    let after_blocks = fs
+        .metadata_snapshot()
+        .inodes
+        .get(&ino)
+        .unwrap()
+        .blocks
+        .clone();
+    assert!(after_blocks.len() < before_blocks.len());
+    assert_eq!(fs.read_file("/file", true).unwrap(), b"aaaabbbbcc");
+}
+
+#[test]
 fn write_read_and_posix_metadata() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
