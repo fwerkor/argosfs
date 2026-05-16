@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ArgosFS | Self-driving root filesystem storage</title>
+    <title>ArgosFS | Self-driving Linux storage</title>
     <meta name="description" content="ArgosFS is a Rust, FUSE-based, self-driving filesystem for heterogeneous local disks, erasure-coded redundancy, rootfs experiments, health automation, and auditable storage research.">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
@@ -29,9 +29,9 @@
       <section class="hero hero-home">
         <canvas class="mesh-canvas" data-scene="hero" aria-hidden="true"></canvas>
         <div class="hero-content">
-          <p class="eyebrow">Self-driving local storage for Linux rootfs experiments</p>
-          <h1>Root filesystem storage that can observe, explain, and repair itself.</h1>
-          <p class="hero-lede">ArgosFS is a Rust FUSE filesystem that combines Reed-Solomon redundancy, heterogeneous disk placement, compression, authenticated encryption, health-aware automation, and root filesystem integration.</p>
+          <p class="eyebrow">Self-driving local storage for Linux</p>
+          <h1>Self-driving storage for Linux.</h1>
+          <p class="hero-lede">ArgosFS is a Rust FUSE filesystem for heterogeneous local disks, erasure-coded redundancy, rootfs experiments, and auditable health automation.</p>
           <div class="hero-actions">
             <a class="button primary" href="start.html">Build a test volume</a>
             <a class="button" href="technology.html">Read the architecture</a>
@@ -57,7 +57,7 @@ argosfs autopilot /var/lib/argosfs/root --dry-run --explain --json</code></pre>
       <section class="section">
         <div class="section-heading compact-heading">
           <p class="eyebrow">Implemented features</p>
-          <h2>A complete experimental filesystem surface, not a landing-page mockup.</h2>
+          <h2>A complete experimental filesystem surface.</h2>
           <p>ArgosFS exposes normal filesystem behavior while keeping the redundancy, placement, health, and recovery decisions inspectable from the CLI and retained artifacts.</p>
         </div>
         <div class="feature-grid feature-grid-4">
@@ -107,7 +107,7 @@ argosfs autopilot /var/lib/argosfs/root --dry-run --explain --json</code></pre>
       <section class="section dark-band">
         <div class="section-heading compact-heading">
           <p class="eyebrow">Technical principle</p>
-          <h2>The key idea is a safety-constrained storage control loop.</h2>
+          <h2>Safety-constrained storage automation.</h2>
           <p>ArgosFS does not let automation freely mutate the volume. Every action is proposed, bounded, checked against recoverability constraints, executed in small budgets, and verified before the next step.</p>
         </div>
         <div class="principle-grid">
