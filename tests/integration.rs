@@ -66,6 +66,28 @@ fn tree_contains_bytes(root: &std::path::Path, needle: &[u8]) -> bool {
 }
 
 #[test]
+fn hard_link_does_not_require_source_read_permission() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    let attr = fs
+        .create_file_at_with_owner(1, OsStr::new("secret"), 0o000, 1234, 1234)
+        .unwrap();
+    fs.write_inode_range(attr.ino, 0, b"secret").unwrap();
+
+    assert_eq!(
+        fs.check_access_inode(attr.ino, 5678, 5678, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+
+    let linked = fs.link_at(attr.ino, 1, OsStr::new("secret-hard")).unwrap();
+    assert_eq!(linked.ino, attr.ino);
+    assert_eq!(fs.read_file("/secret-hard", true).unwrap(), b"secret");
+}
+
+#[test]
 fn write_read_and_posix_metadata() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();

@@ -306,8 +306,7 @@ impl Filesystem for ArgosFuse {
         reply: ReplyEntry,
     ) {
         match self
-            .require_access(req, ino, libc::R_OK)
-            .and_then(|()| self.require_access(req, newparent, libc::W_OK | libc::X_OK))
+            .require_access(req, newparent, libc::W_OK | libc::X_OK)
             .and_then(|()| self.volume.link_at(ino.0, newparent.0, newname))
         {
             Ok(attr) => reply.entry(&TTL, &to_file_attr(&attr), Generation(0)),
