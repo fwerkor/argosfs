@@ -183,17 +183,20 @@ fn write_direct(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 fn read_direct(path: &Path, expected_size: usize) -> Result<Vec<u8>> {
-    if expected_size == 0 || !expected_size.is_multiple_of(ALIGN) {
-        return Err(ArgosError::Unsupported(
-            "O_DIRECT requires aligned length".to_string(),
-        ));
-    }
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECT)
         .open(path)?;
-    let aligned = AlignedBuf::new(expected_size)?;
-    let read = unsafe { libc::pread(file.as_raw_fd(), aligned.ptr.cast(), expected_size, 0) };
+    let file_size = usize::try_from(file.metadata()?.len())
+        .map_err(|_| ArgosError::Invalid("file is too large to read".to_string()))?;
+    let read_size = expected_size.max(file_size);
+    if read_size == 0 || !read_size.is_multiple_of(ALIGN) {
+        return Err(ArgosError::Unsupported(
+            "O_DIRECT requires aligned length".to_string(),
+        ));
+    }
+    let aligned = AlignedBuf::new(read_size)?;
+    let read = unsafe { libc::pread(file.as_raw_fd(), aligned.ptr.cast(), read_size, 0) };
     if read < 0 {
         return Err(ArgosError::Io(std::io::Error::last_os_error()));
     }

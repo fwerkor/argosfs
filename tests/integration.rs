@@ -387,6 +387,37 @@ fn detects_corrupt_shard_and_scrubs() {
 }
 
 #[test]
+fn direct_io_detects_aligned_trailing_shard_garbage() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 1);
+    cfg.chunk_size = 4096;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 2, false).unwrap();
+    fs.set_io_policy(IoMode::Direct, true, false, true).unwrap();
+    let payload = vec![7u8; 4096];
+    fs.write_file("/file", &payload, 0o644).unwrap();
+
+    let meta = fs.metadata_snapshot();
+    let inode = meta
+        .inodes
+        .values()
+        .find(|inode| inode.size == 4096)
+        .unwrap();
+    let shard = &inode.blocks[0].shards[0];
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(shard_abs(&fs, &shard.disk_id, &shard.relpath))
+        .unwrap();
+    file.write_all(&vec![9u8; 4096]).unwrap();
+    file.sync_all().unwrap();
+
+    let report = fs.fsck(true, true).unwrap();
+    assert_eq!(report.damaged_files, 1);
+    assert_eq!(report.repaired_files, 1);
+    assert_eq!(fs.read_file("/file", true).unwrap(), payload);
+}
+
+#[test]
 fn drain_remove_and_rebalance_keep_data_available() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 5, false).unwrap();
@@ -763,6 +794,26 @@ fn journal_replay_recovers_transaction_after_power_loss_point() {
 
     let fs = ArgosFs::open(tmp.path()).unwrap();
     assert_eq!(fs.read_file("/crash", true).unwrap(), b"new-after-journal");
+}
+
+#[test]
+fn before_journal_write_failure_rolls_back_live_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/crash", b"old", 0o644).unwrap();
+
+    journal::set_thread_crash_point(Some("before-journal"));
+    let err = fs
+        .write_file("/crash", b"new-before-journal", 0o644)
+        .unwrap_err();
+    journal::set_thread_crash_point(None);
+    assert_eq!(err.errno(), libc::EIO);
+    assert_eq!(fs.read_file("/crash", true).unwrap(), b"old");
+    assert!(fs.fsck(true, true).unwrap().errors.is_empty());
+    drop(fs);
+
+    let fs = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(fs.read_file("/crash", true).unwrap(), b"old");
 }
 
 #[test]

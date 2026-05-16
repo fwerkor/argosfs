@@ -1909,6 +1909,7 @@ impl ArgosFs {
         preserve_mtime: bool,
         exclude_disks: &BTreeSet<String>,
     ) -> Result<()> {
+        let rollback = meta.clone();
         let storage_class = {
             let inode = meta
                 .inodes
@@ -1927,6 +1928,7 @@ impl ArgosFs {
         };
         let old_blocks = meta.inodes.get(&ino).unwrap().blocks.clone();
         let new_blocks = self.encode_data_locked(meta, data, storage_class, exclude_disks)?;
+        let new_blocks_for_cleanup = new_blocks.clone();
         let now = now_f64();
         let inode = meta.inodes.get_mut(&ino).unwrap();
         inode.blocks = new_blocks;
@@ -1937,7 +1939,13 @@ impl ArgosFs {
             inode.mtime = now;
         }
         inode.ctime = now;
-        self.commit_locked(meta, action, details)?;
+        if let Err(err) = self.commit_locked(meta, action, details) {
+            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
+                *meta = rollback;
+                self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
+            }
+            return Err(err);
+        }
         self.delete_blocks_locked(meta, &old_blocks);
         Ok(())
     }
