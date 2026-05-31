@@ -1,3 +1,4 @@
+use crate::acl;
 use crate::error::{ArgosError, Result};
 use crate::types::{CapacitySource, DiskStatus, NodeKind};
 use crate::volume::{ArgosFs, NodeAttr, RenamePolicy};
@@ -7,8 +8,9 @@ use fuser::{
     ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
-use std::ffi::OsStr;
-use std::path::Path;
+use std::ffi::{CString, OsStr};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_secs(1);
@@ -33,6 +35,34 @@ impl ArgosFuse {
         } else {
             FopenFlags::empty()
         }
+    }
+
+    fn require_xattr_write_access(&self, req: &Request, ino: INodeNo, name: &str) -> Result<()> {
+        if name.starts_with("user.") {
+            return self.require_access(req, ino, libc::W_OK);
+        }
+        if is_owner_managed_xattr(name) {
+            let attr = self.volume.attr_inode(ino.0)?;
+            if req.uid() == 0 || req.uid() == attr.uid {
+                return Ok(());
+            }
+            return Err(ArgosError::PermissionDenied(format!(
+                "xattr {name} requires file ownership or root"
+            )));
+        }
+        if name.starts_with("trusted.")
+            || name.starts_with("security.")
+            || name.starts_with("system.argosfs.")
+            || name.starts_with("system.")
+        {
+            if req.uid() == 0 {
+                return Ok(());
+            }
+            return Err(ArgosError::PermissionDenied(format!(
+                "xattr namespace requires root: {name}"
+            )));
+        }
+        self.require_access(req, ino, libc::W_OK)
     }
 }
 
@@ -403,13 +433,27 @@ impl Filesystem for ArgosFuse {
             .filter(|inode| inode.kind == NodeKind::File)
             .map(|inode| inode.size)
             .sum();
-        let usable = if raw_capacity > 0 {
-            raw_capacity.saturating_mul(meta.config.k as u64)
-                / (meta.config.k + meta.config.m) as u64
+        let (raw_capacity, raw_free) = if raw_capacity > 0 {
+            (raw_capacity, 0)
         } else {
-            1024 * 1024 * 1024 * 1024
+            fallback_statfs_capacity(
+                self.volume.root(),
+                meta.disks.values().map(|disk| {
+                    if disk.path.is_absolute() {
+                        disk.path.clone()
+                    } else {
+                        self.volume.root().join(&disk.path)
+                    }
+                }),
+            )
         };
-        let free = usable.saturating_sub(logical_used);
+        let usable = raw_capacity.saturating_mul(meta.config.k as u64)
+            / (meta.config.k + meta.config.m) as u64;
+        let free = if raw_free > 0 {
+            raw_free.saturating_mul(meta.config.k as u64) / (meta.config.k + meta.config.m) as u64
+        } else {
+            usable.saturating_sub(logical_used)
+        };
         reply.statfs(
             usable / block,
             free / block,
@@ -475,8 +519,8 @@ impl Filesystem for ArgosFuse {
                 )));
             }
 
-            self.require_access(req, ino, libc::W_OK)?;
             let name = xattr_name(name)?;
+            self.require_xattr_write_access(req, ino, name)?;
             let exists = self.volume.getxattr_inode(ino.0, name).is_ok();
 
             if flags & libc::XATTR_CREATE != 0 && exists {
@@ -611,6 +655,49 @@ impl Filesystem for ArgosFuse {
             Err(err) => reply.error(errno(&err)),
         }
     }
+}
+
+fn is_owner_managed_xattr(name: &str) -> bool {
+    matches!(
+        name,
+        acl::POSIX_ACL_ACCESS_XATTR
+            | acl::POSIX_ACL_DEFAULT_XATTR
+            | acl::ARGOS_POSIX_ACL_ACCESS_XATTR
+            | acl::ARGOS_POSIX_ACL_DEFAULT_XATTR
+    )
+}
+
+fn fallback_statfs_capacity(root: &Path, paths: impl IntoIterator<Item = PathBuf>) -> (u64, u64) {
+    let mut capacity = 0u64;
+    let mut free = 0u64;
+    let mut seen = std::collections::BTreeSet::new();
+    for path in std::iter::once(root.to_path_buf()).chain(paths) {
+        let Some((fs_id, blocks, available)) = statvfs_capacity(&path) else {
+            continue;
+        };
+        if seen.insert(fs_id) {
+            capacity = capacity.saturating_add(blocks);
+            free = free.saturating_add(available);
+        }
+    }
+    (capacity, free)
+}
+
+fn statvfs_capacity(path: &Path) -> Option<(String, u64, u64)> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let stat = unsafe { stat.assume_init() };
+    let block_size = stat.f_frsize.max(stat.f_bsize);
+    let fs_id = format!("{}:{}", stat.f_fsid, block_size);
+    Some((
+        fs_id,
+        stat.f_blocks.saturating_mul(block_size),
+        stat.f_bavail.saturating_mul(block_size),
+    ))
 }
 
 fn to_file_attr(attr: &NodeAttr) -> FileAttr {

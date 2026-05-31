@@ -168,6 +168,58 @@ fn truncate_rewrites_only_tail_stripe_window() {
 }
 
 #[test]
+fn zero_length_write_is_noop_and_does_not_extend() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/file", b"abc", 0o644).unwrap();
+    let ino = fs.resolve_path("/file", true).unwrap();
+    let before = fs.attr_inode(ino).unwrap();
+    let txid_before = fs.metadata_snapshot().txid;
+
+    assert_eq!(fs.write_inode_range(ino, 1, b"").unwrap(), 0);
+    assert_eq!(fs.read_file("/file", true).unwrap(), b"abc");
+    let after_inside = fs.attr_inode(ino).unwrap();
+    assert_eq!(after_inside.size, before.size);
+    assert_eq!(after_inside.mtime, before.mtime);
+    assert_eq!(fs.metadata_snapshot().txid, txid_before);
+
+    assert_eq!(fs.write_inode_range(ino, 100, b"").unwrap(), 0);
+    assert_eq!(fs.read_file("/file", true).unwrap(), b"abc");
+    assert_eq!(fs.attr_inode(ino).unwrap().size, before.size);
+    assert_eq!(fs.metadata_snapshot().txid, txid_before);
+}
+
+#[test]
+fn sparse_write_beyond_eof_preserves_holes_and_offsets() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(2, 2);
+    cfg.chunk_size = 4;
+    let fs = ArgosFs::create(tmp.path(), cfg, 4, false).unwrap();
+    fs.write_file("/file", b"abc", 0o644).unwrap();
+    let ino = fs.resolve_path("/file", true).unwrap();
+
+    assert_eq!(fs.write_inode_range(ino, 20, b"XYZ").unwrap(), 3);
+    let data = fs.read_file("/file", true).unwrap();
+    assert_eq!(data.len(), 23);
+    assert_eq!(&data[..3], b"abc");
+    assert!(data[3..20].iter().all(|byte| *byte == 0));
+    assert_eq!(&data[20..], b"XYZ");
+
+    assert_eq!(fs.read_inode(ino, 18, 5, true).unwrap(), b"\0\0XYZ");
+}
+
+#[test]
+fn snapshot_names_are_rejected_or_protected_from_overwrite() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    assert_eq!(fs.snapshot("   ").unwrap_err().errno(), libc::EINVAL);
+    let first = fs.snapshot("daily").unwrap();
+    assert!(first.exists());
+    assert_eq!(fs.snapshot("daily").unwrap_err().errno(), libc::EEXIST);
+}
+
+#[test]
 fn write_read_and_posix_metadata() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();

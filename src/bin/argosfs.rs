@@ -1021,31 +1021,41 @@ fn c_path(path: &Path) -> Result<CString> {
     Ok(CString::new(path.as_os_str().as_bytes())?)
 }
 
+const XATTR_READ_RETRIES: usize = 4;
+
 fn read_xattrs(path: &Path) -> Result<Vec<(String, Vec<u8>)>> {
     let c_path = c_path(path)?;
-    let size = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
-    if size < 0 {
-        let err = io::Error::last_os_error();
-        if matches!(err.raw_os_error(), Some(libc::EOPNOTSUPP)) {
-            return Ok(Vec::new());
+    let mut names = Vec::new();
+    for _ in 0..XATTR_READ_RETRIES {
+        let size = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
+        if size < 0 {
+            let err = io::Error::last_os_error();
+            if matches!(err.raw_os_error(), Some(libc::EOPNOTSUPP)) {
+                return Ok(Vec::new());
+            }
+            return Err(err.into());
         }
-        return Err(err.into());
+        if size == 0 {
+            names.clear();
+            break;
+        }
+        names.resize(size as usize, 0);
+        let read = unsafe {
+            libc::llistxattr(
+                c_path.as_ptr(),
+                names.as_mut_ptr().cast::<libc::c_char>(),
+                names.len(),
+            )
+        };
+        if read >= 0 {
+            names.truncate(read as usize);
+            break;
+        }
+        let err = io::Error::last_os_error();
+        if !matches!(err.raw_os_error(), Some(libc::ERANGE)) {
+            return Err(err.into());
+        }
     }
-    if size == 0 {
-        return Ok(Vec::new());
-    }
-    let mut names = vec![0u8; size as usize];
-    let read = unsafe {
-        libc::llistxattr(
-            c_path.as_ptr(),
-            names.as_mut_ptr().cast::<libc::c_char>(),
-            names.len(),
-        )
-    };
-    if read < 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    names.truncate(read as usize);
     let mut out = Vec::new();
     for raw_name in names
         .split(|byte| *byte == 0)
@@ -1063,24 +1073,31 @@ fn read_xattrs(path: &Path) -> Result<Vec<(String, Vec<u8>)>> {
 fn read_xattr(path: &Path, name: &str) -> Result<Vec<u8>> {
     let c_path = c_path(path)?;
     let c_name = CString::new(name)?;
-    let size =
-        unsafe { libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0) };
-    if size < 0 {
-        return Err(io::Error::last_os_error().into());
+    let mut value = Vec::new();
+    for attempt in 0..XATTR_READ_RETRIES {
+        let size =
+            unsafe { libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0) };
+        if size < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        value.resize(size as usize, 0);
+        let read = unsafe {
+            libc::lgetxattr(
+                c_path.as_ptr(),
+                c_name.as_ptr(),
+                value.as_mut_ptr().cast::<libc::c_void>(),
+                value.len(),
+            )
+        };
+        if read >= 0 {
+            value.truncate(read as usize);
+            return Ok(value);
+        }
+        let err = io::Error::last_os_error();
+        if !matches!(err.raw_os_error(), Some(libc::ERANGE)) || attempt + 1 == XATTR_READ_RETRIES {
+            return Err(err.into());
+        }
     }
-    let mut value = vec![0u8; size as usize];
-    let read = unsafe {
-        libc::lgetxattr(
-            c_path.as_ptr(),
-            c_name.as_ptr(),
-            value.as_mut_ptr().cast::<libc::c_void>(),
-            value.len(),
-        )
-    };
-    if read < 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    value.truncate(read as usize);
     Ok(value)
 }
 

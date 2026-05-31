@@ -90,30 +90,37 @@ fn write_iouring(path: &Path, data: &[u8]) -> Result<()> {
         .open(path)?;
     let fd = file.as_raw_fd();
     let mut ring = IoUring::new(2).map_err(ArgosError::Io)?;
-    let entry = opcode::Write::new(types::Fd(fd), data.as_ptr(), data.len() as _)
-        .offset(0)
+    let mut written = 0usize;
+    while written < data.len() {
+        let entry = opcode::Write::new(
+            types::Fd(fd),
+            data[written..].as_ptr(),
+            (data.len() - written) as _,
+        )
+        .offset(written as u64)
         .build()
         .user_data(1);
-    unsafe {
-        ring.submission()
-            .push(&entry)
-            .map_err(|_| ArgosError::Invalid("io_uring submission queue is full".to_string()))?;
-    }
-    ring.submit_and_wait(1).map_err(ArgosError::Io)?;
-    let cqe = ring
-        .completion()
-        .next()
-        .ok_or_else(|| ArgosError::Invalid("io_uring write produced no completion".to_string()))?;
-    if cqe.result() < 0 {
-        return Err(ArgosError::Io(std::io::Error::from_raw_os_error(
-            -cqe.result(),
-        )));
-    }
-    if cqe.result() as usize != data.len() {
-        return Err(ArgosError::Io(std::io::Error::new(
-            std::io::ErrorKind::WriteZero,
-            "short io_uring write",
-        )));
+        unsafe {
+            ring.submission().push(&entry).map_err(|_| {
+                ArgosError::Invalid("io_uring submission queue is full".to_string())
+            })?;
+        }
+        ring.submit_and_wait(1).map_err(ArgosError::Io)?;
+        let cqe = ring.completion().next().ok_or_else(|| {
+            ArgosError::Invalid("io_uring write produced no completion".to_string())
+        })?;
+        if cqe.result() < 0 {
+            return Err(ArgosError::Io(std::io::Error::from_raw_os_error(
+                -cqe.result(),
+            )));
+        }
+        if cqe.result() == 0 {
+            return Err(ArgosError::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short io_uring write",
+            )));
+        }
+        written = written.saturating_add(cqe.result() as usize);
     }
     file.sync_all()?;
     Ok(())
@@ -130,26 +137,36 @@ fn read_iouring(path: &Path, expected_size: usize) -> Result<Vec<u8>> {
     }
     let fd = file.as_raw_fd();
     let mut ring = IoUring::new(2).map_err(ArgosError::Io)?;
-    let entry = opcode::Read::new(types::Fd(fd), data.as_mut_ptr(), size as _)
-        .offset(0)
+    let mut read_total = 0usize;
+    while read_total < size {
+        let entry = opcode::Read::new(
+            types::Fd(fd),
+            data[read_total..].as_mut_ptr(),
+            (size - read_total) as _,
+        )
+        .offset(read_total as u64)
         .build()
         .user_data(1);
-    unsafe {
-        ring.submission()
-            .push(&entry)
-            .map_err(|_| ArgosError::Invalid("io_uring submission queue is full".to_string()))?;
+        unsafe {
+            ring.submission().push(&entry).map_err(|_| {
+                ArgosError::Invalid("io_uring submission queue is full".to_string())
+            })?;
+        }
+        ring.submit_and_wait(1).map_err(ArgosError::Io)?;
+        let cqe = ring.completion().next().ok_or_else(|| {
+            ArgosError::Invalid("io_uring read produced no completion".to_string())
+        })?;
+        if cqe.result() < 0 {
+            return Err(ArgosError::Io(std::io::Error::from_raw_os_error(
+                -cqe.result(),
+            )));
+        }
+        if cqe.result() == 0 {
+            break;
+        }
+        read_total = read_total.saturating_add(cqe.result() as usize);
     }
-    ring.submit_and_wait(1).map_err(ArgosError::Io)?;
-    let cqe = ring
-        .completion()
-        .next()
-        .ok_or_else(|| ArgosError::Invalid("io_uring read produced no completion".to_string()))?;
-    if cqe.result() < 0 {
-        return Err(ArgosError::Io(std::io::Error::from_raw_os_error(
-            -cqe.result(),
-        )));
-    }
-    data.truncate(cqe.result() as usize);
+    data.truncate(read_total);
     Ok(data)
 }
 
@@ -168,15 +185,26 @@ fn write_direct(path: &Path, data: &[u8]) -> Result<()> {
         .open(path)?;
     let mut aligned = AlignedBuf::new(data.len())?;
     aligned.as_mut_slice().copy_from_slice(data);
-    let written = unsafe { libc::pwrite(file.as_raw_fd(), aligned.ptr.cast(), data.len(), 0) };
-    if written < 0 {
-        return Err(ArgosError::Io(std::io::Error::last_os_error()));
-    }
-    if written as usize != data.len() {
-        return Err(ArgosError::Io(std::io::Error::new(
-            std::io::ErrorKind::WriteZero,
-            "short O_DIRECT write",
-        )));
+    let mut written_total = 0usize;
+    while written_total < data.len() {
+        let written = unsafe {
+            libc::pwrite(
+                file.as_raw_fd(),
+                aligned.ptr.add(written_total).cast(),
+                data.len() - written_total,
+                written_total as libc::off_t,
+            )
+        };
+        if written < 0 {
+            return Err(ArgosError::Io(std::io::Error::last_os_error()));
+        }
+        if written == 0 {
+            return Err(ArgosError::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short O_DIRECT write",
+            )));
+        }
+        written_total = written_total.saturating_add(written as usize);
     }
     file.sync_all()?;
     Ok(())
@@ -196,11 +224,28 @@ fn read_direct(path: &Path, expected_size: usize) -> Result<Vec<u8>> {
         ));
     }
     let aligned = AlignedBuf::new(read_size)?;
-    let read = unsafe { libc::pread(file.as_raw_fd(), aligned.ptr.cast(), read_size, 0) };
-    if read < 0 {
-        return Err(ArgosError::Io(std::io::Error::last_os_error()));
+    let mut read_total = 0usize;
+    while read_total < read_size {
+        let read = unsafe {
+            libc::pread(
+                file.as_raw_fd(),
+                aligned.ptr.add(read_total).cast(),
+                read_size - read_total,
+                read_total as libc::off_t,
+            )
+        };
+        if read < 0 {
+            return Err(ArgosError::Io(std::io::Error::last_os_error()));
+        }
+        if read == 0 {
+            break;
+        }
+        read_total = read_total.saturating_add(read as usize);
+        if read_total < read_size && !(read_total.is_multiple_of(ALIGN)) {
+            break;
+        }
     }
-    Ok(aligned.as_slice()[..read as usize].to_vec())
+    Ok(aligned.as_slice()[..read_total].to_vec())
 }
 
 struct AlignedBuf {
