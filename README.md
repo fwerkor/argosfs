@@ -66,12 +66,16 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
 
 ## Build
 
+ArgosFS requires Rust 1.87 or newer. The FUSE frontend also needs libfuse3
+headers and `pkg-config` at build time.
+
 Install the required system packages:
 
 ```bash
 sudo apt-get install -y build-essential pkg-config libfuse3-dev fuse3 smartmontools
 curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
+rustup default stable
 ```
 
 Build and test:

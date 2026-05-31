@@ -2,6 +2,7 @@
 name = "argosfs"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 license = "Apache-2.0"
 description = "ArgosFS self-driving erasure-coded root filesystem"
 authors = ["FWERKOR"]
