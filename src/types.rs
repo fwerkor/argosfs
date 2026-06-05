@@ -270,6 +270,30 @@ pub struct VolumeConfig {
     pub numa_aware: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LayoutConfig {
+    pub id: String,
+    pub k: usize,
+    pub m: usize,
+    pub chunk_size: usize,
+    pub created_txid: u64,
+    #[serde(default)]
+    pub sealed: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ReshapeState {
+    pub id: String,
+    pub target_layout: String,
+    pub from_layouts: Vec<String>,
+    #[serde(default)]
+    pub cursor: Option<InodeId>,
+    #[serde(default)]
+    pub rewritten_files: u64,
+    #[serde(default)]
+    pub complete: bool,
+}
+
 impl Default for VolumeConfig {
     fn default() -> Self {
         Self {
@@ -398,6 +422,8 @@ pub struct PhysicalExtent {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FileBlock {
+    #[serde(default)]
+    pub layout_id: String,
     pub stripe_id: String,
     pub raw_offset: u64,
     pub raw_size: usize,
@@ -474,6 +500,12 @@ pub struct Metadata {
     pub next_inode: InodeId,
     pub next_stripe: u64,
     pub config: VolumeConfig,
+    #[serde(default)]
+    pub layouts: BTreeMap<String, LayoutConfig>,
+    #[serde(default)]
+    pub current_write_layout: String,
+    #[serde(default)]
+    pub reshape: Option<ReshapeState>,
     #[serde(default)]
     pub encryption: EncryptionConfig,
     #[serde(default)]

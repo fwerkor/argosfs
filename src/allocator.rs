@@ -93,7 +93,7 @@ pub fn validate_allocations(
 ) -> Result<()> {
     extents.sort_by_key(|extent| extent.offset);
     let mut previous_end = state.data_start;
-    for extent in extents {
+    for extent in &extents {
         if extent.offset < state.data_start
             || extent.offset.saturating_add(extent.length) > state.data_end
         {
@@ -109,6 +109,38 @@ pub fn validate_allocations(
             )));
         }
         previous_end = extent.offset.saturating_add(extent.length);
+    }
+    let mut free_extents = state.free_extents.clone();
+    free_extents.sort_by_key(|extent| extent.offset);
+    let mut previous_free_end = state.data_start;
+    for free in &free_extents {
+        if free.offset < state.data_start
+            || free.offset.saturating_add(free.length) > state.data_end
+        {
+            return Err(ArgosError::CorruptedMetadata(format!(
+                "free extent outside data region: {}+{}",
+                free.offset, free.length
+            )));
+        }
+        if free.offset < previous_free_end {
+            return Err(ArgosError::CorruptedMetadata(format!(
+                "overlapping free extent at {}",
+                free.offset
+            )));
+        }
+        previous_free_end = free.offset.saturating_add(free.length);
+    }
+    for allocated in &extents {
+        for free in &free_extents {
+            let allocated_end = allocated.offset.saturating_add(allocated.length);
+            let free_end = free.offset.saturating_add(free.length);
+            if allocated.offset < free_end && free.offset < allocated_end {
+                return Err(ArgosError::CorruptedMetadata(format!(
+                    "allocated extent on {} overlaps allocator free list at {}+{}",
+                    allocated.disk_id, free.offset, free.length
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -165,6 +197,20 @@ mod tests {
         };
         assert!(matches!(
             validate_allocations(&state, vec![a, b]).unwrap_err(),
+            ArgosError::CorruptedMetadata(_)
+        ));
+    }
+
+    #[test]
+    fn allocator_detects_free_list_overlapping_allocated_extent() {
+        let mut state = init_allocator(4096, 16 * 4096, 4096);
+        let allocated = allocate(&mut state, "disk-0000", 4096, 1).unwrap();
+        state.free_extents.push(RawFreeExtent {
+            offset: allocated.offset,
+            length: allocated.length,
+        });
+        assert!(matches!(
+            validate_allocations(&state, vec![allocated]).unwrap_err(),
             ArgosError::CorruptedMetadata(_)
         ));
     }

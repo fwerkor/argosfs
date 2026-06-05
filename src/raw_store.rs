@@ -274,7 +274,12 @@ pub fn audit(
     backend: &dyn StorageBackend,
     superblocks: &[RawSuperblock],
 ) -> Result<TransactionReport> {
-    let (_, report) = load_or_recover(backend, superblocks)?;
+    let (_, mut report) = load_or_recover(backend, superblocks)?;
+    if superblocks.iter().any(|sb| !sb.clean) {
+        report
+            .errors
+            .push("pool was not cleanly unmounted".to_string());
+    }
     Ok(report)
 }
 

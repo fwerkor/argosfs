@@ -22,8 +22,16 @@ The image builder creates a loop-backed ArgosFS pool and imports the prepared
 CapOS root tree with:
 
 ```bash
-argosfs mkfs --backend loop --images disk0.img,disk1.img,disk2.img --k 2 --m 1
-argosfs import-tree --backend loop --images disk0.img,disk1.img,disk2.img ROOT /
+argosfs mkfs --backend loop --images disk0.img --k 1 --m 0
+argosfs import-tree --backend loop --images disk0.img ROOT /
+```
+
+The single-device image can evolve online into redundant layouts as devices are
+added:
+
+```bash
+argosfs add-device --backend loop --images disk0.img --device disk1.img
+argosfs reshape --backend loop --images disk0.img,disk1.img --k 1 --m 1
 ```
 
 ## initramfs Flow
@@ -56,7 +64,7 @@ scripts/test_initramfs_dry_run.sh
 Example:
 
 ```text
-argosfs.images=/boot/disk0.img,/boot/disk1.img,/boot/disk2.img argosfs.mode=rw argosfs.root=/sysroot argosfs.replay=auto argosfs.fsck=auto
+argosfs.images=/boot/disk0.img argosfs.mode=rw argosfs.root=/sysroot argosfs.replay=auto argosfs.fsck=auto
 ```
 
 For real block devices use `argosfs.devices=/dev/disk/by-id/...`.

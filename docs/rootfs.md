@@ -8,12 +8,19 @@ filesystem.
 ```bash
 cargo build --release
 sudo install -m 0755 target/release/argosfs /usr/local/sbin/argosfs
-sudo argosfs mkfs /var/lib/argosfs/root --disks 6 --k 4 --m 2 --compression zstd
+sudo argosfs mkfs /var/lib/argosfs/root --disks 1 --k 1 --m 0 --compression zstd
 sudo argosfs import-tree /var/lib/argosfs/root /srv/rootfs /
 sudo argosfs probe-disks /var/lib/argosfs/root
 sudo argosfs refresh-smart /var/lib/argosfs/root || true
 sudo argosfs set-io-mode /var/lib/argosfs/root --mode io-uring
 sudo argosfs fsck /var/lib/argosfs/root --repair --remove-orphans
+```
+
+To add redundancy later, add disks and reshape the live layout:
+
+```bash
+sudo argosfs add-disk /var/lib/argosfs/root --path /var/lib/argosfs/disk1
+sudo argosfs reshape /var/lib/argosfs/root --k 1 --m 1
 ```
 
 `import-tree` preserves directories, regular files, symlinks, ownership,

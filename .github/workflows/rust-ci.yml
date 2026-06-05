@@ -98,7 +98,7 @@ jobs:
         run: python3 -m py_compile scripts/run_full_validation.py
 
       - name: Check initramfs shell syntax
-        run: bash -n contrib/initramfs/argosfs-root.sh contrib/capos/initramfs/argosfs-root.sh contrib/capos/initramfs/hooks/argosfs scripts/test_loop_backend.sh scripts/test_crash_consistency.sh scripts/test_initramfs_dry_run.sh scripts/test_rootfs_smoke.sh scripts/test_privileged_fuse.sh scripts/test_raw_backend.sh scripts/test_qemu_boot.sh scripts/test_capos_build.sh
+        run: bash -n contrib/initramfs/argosfs-root.sh contrib/capos/initramfs/argosfs-root.sh contrib/capos/initramfs/hooks/argosfs scripts/test_loop_backend.sh scripts/test_crash_consistency.sh scripts/test_initramfs_dry_run.sh scripts/test_rootfs_smoke.sh scripts/test_privileged_fuse.sh scripts/test_raw_backend.sh scripts/test_qemu_boot.sh scripts/test_capos_build.sh scripts/test_single_device_fuse_rootfs.sh
 
       - name: Run retained validation workflow
         run: python3 scripts/run_full_validation.py --output "$RUNNER_TEMP/argosfs-validation"
