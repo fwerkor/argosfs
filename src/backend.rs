@@ -2,6 +2,8 @@ use crate::error::{ArgosError, Result};
 use crate::types::{BackendKind, DiskStatus};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
+use std::io::{Seek, SeekFrom};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -257,15 +259,46 @@ impl StorageBackend for FileBlockBackend {
 }
 
 fn open_block_device(path: &Path, write: bool) -> Result<BlockDevice> {
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
         .write(write)
         .create(false)
         .open(path)?;
-    let capacity = file.metadata()?.len();
+    let capacity = detect_capacity(&mut file)?;
     Ok(BlockDevice {
         path: path.to_path_buf(),
         file,
         capacity,
     })
+}
+
+fn detect_capacity(file: &mut File) -> Result<u64> {
+    let len = file.metadata()?.len();
+    if len != 0 {
+        return Ok(len);
+    }
+
+    if let Some(bytes) = block_device_capacity(file)? {
+        return Ok(bytes);
+    }
+
+    Ok(file.seek(SeekFrom::End(0))?)
+}
+
+#[cfg(target_os = "linux")]
+fn block_device_capacity(file: &File) -> Result<Option<u64>> {
+    const BLKGETSIZE64: libc::c_ulong = 0x8008_1272;
+
+    let mut bytes = 0u64;
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), BLKGETSIZE64, &mut bytes) };
+    if result == 0 && bytes != 0 {
+        Ok(Some(bytes))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn block_device_capacity(_file: &File) -> Result<Option<u64>> {
+    Ok(None)
 }
