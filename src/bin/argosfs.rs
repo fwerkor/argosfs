@@ -1772,8 +1772,8 @@ fn timespec_from_f64(value: f64) -> libc::timespec {
     let seconds = value.trunc().max(0.0);
     let nanos = ((value - seconds) * 1_000_000_000.0).clamp(0.0, 999_999_999.0);
     libc::timespec {
-        tv_sec: seconds as libc::time_t,
-        tv_nsec: nanos as libc::c_long,
+        tv_sec: seconds as _,
+        tv_nsec: nanos as _,
     }
 }
 
