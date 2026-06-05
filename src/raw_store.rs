@@ -52,7 +52,10 @@ struct RawJournalRecord {
     action: String,
     details: serde_json::Value,
     meta_hash: String,
-    metadata: Metadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<Metadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata_delta: Option<Vec<journal::MetadataDeltaOp>>,
     record_hash: String,
 }
 
@@ -106,6 +109,7 @@ pub fn initialize_pool(
         &*backend,
         superblocks,
         metadata,
+        None,
         "mkfs",
         serde_json::json!({}),
     )?;
@@ -185,7 +189,7 @@ pub fn open_pool(kind: BackendKind, paths: &[PathBuf], write: bool) -> Result<Ra
     }
 
     let backend = Arc::new(FileBlockBackend::open_with_ids(kind, devices, write)?);
-    let (mut metadata, mut report) = load_or_recover(&*backend, &superblocks)?;
+    let (mut metadata, mut report) = load_or_recover(&*backend, &superblocks, write)?;
     if metadata.backend != kind {
         return Err(ArgosError::IncompatibleFormat(format!(
             "metadata backend {:?} does not match requested {:?}",
@@ -204,7 +208,7 @@ pub fn open_pool(kind: BackendKind, paths: &[PathBuf], write: bool) -> Result<Ra
     if !scan_errors.is_empty() {
         report.errors.extend(scan_errors);
     }
-    if write && superblocks.iter().any(|sb| !sb.clean) {
+    if superblocks.iter().any(|sb| !sb.clean) {
         report
             .errors
             .push("pool was not cleanly unmounted".to_string());
@@ -227,10 +231,26 @@ pub fn append_transaction(
     action: &str,
     details: serde_json::Value,
 ) -> Result<()> {
-    append_journal(backend, superblocks, metadata, action, details)?;
+    append_transaction_with_previous(backend, superblocks, metadata, None, action, details)
+}
+
+pub fn append_transaction_with_previous(
+    backend: &dyn StorageBackend,
+    superblocks: &[RawSuperblock],
+    metadata: &Metadata,
+    previous_metadata: Option<&Metadata>,
+    action: &str,
+    details: serde_json::Value,
+) -> Result<()> {
+    append_journal(
+        backend,
+        superblocks,
+        metadata,
+        previous_metadata,
+        action,
+        details,
+    )?;
     journal::inject_crash(FaultPoint::AfterJournalCommitBeforeMetadataCommit.as_str())?;
-    write_metadata_copies(backend, superblocks, metadata)?;
-    journal::inject_crash(FaultPoint::AfterMetadataCommitBeforeSuperblockUpdate.as_str())?;
     Ok(())
 }
 
@@ -274,7 +294,7 @@ pub fn audit(
     backend: &dyn StorageBackend,
     superblocks: &[RawSuperblock],
 ) -> Result<TransactionReport> {
-    let (_, mut report) = load_or_recover(backend, superblocks)?;
+    let (_, mut report) = load_or_recover(backend, superblocks, false)?;
     if superblocks.iter().any(|sb| !sb.clean) {
         report
             .errors
@@ -363,9 +383,22 @@ fn append_journal(
     backend: &dyn StorageBackend,
     superblocks: &[RawSuperblock],
     metadata: &Metadata,
+    previous_metadata: Option<&Metadata>,
     action: &str,
     details: serde_json::Value,
 ) -> Result<()> {
+    let write_checkpoint = previous_metadata.is_none()
+        || metadata
+            .txid
+            .is_multiple_of(journal::checkpoint_interval_txids());
+    let metadata_delta = if write_checkpoint {
+        None
+    } else {
+        Some(journal::metadata_delta(
+            previous_metadata.expect("checked above"),
+            metadata,
+        )?)
+    };
     let mut record = RawJournalRecord {
         version: RAW_STORE_VERSION,
         time: now_f64(),
@@ -375,7 +408,12 @@ fn append_journal(
         action: action.to_string(),
         details,
         meta_hash: journal::canonical_metadata_hash(metadata)?,
-        metadata: metadata.clone(),
+        metadata: if metadata_delta.is_some() {
+            None
+        } else {
+            Some(metadata.clone())
+        },
+        metadata_delta,
         record_hash: String::new(),
     };
     record.record_hash = raw_record_hash(&record)?;
@@ -399,11 +437,8 @@ fn append_journal(
             .checked_add(entry.len() as u64)
             .ok_or_else(|| ArgosError::Invalid("journal append overflow".to_string()))?;
         if end > sb.journal.length {
-            return Err(ArgosError::DiskFull {
-                disk_id: sb.disk_id.clone(),
-                required: entry.len() as u64,
-                available: sb.journal.length.saturating_sub(write_offset),
-            });
+            checkpoint_and_reset_journal(backend, sb, metadata)?;
+            continue;
         }
         backend.write_at(&sb.disk_id, sb.journal.offset + write_offset, &entry)?;
         put_u64(&mut header, 24, end);
@@ -413,9 +448,20 @@ fn append_journal(
     Ok(())
 }
 
+fn checkpoint_and_reset_journal(
+    backend: &dyn StorageBackend,
+    sb: &RawSuperblock,
+    metadata: &Metadata,
+) -> Result<()> {
+    write_metadata_copies(backend, std::slice::from_ref(sb), metadata)?;
+    initialize_journal_region(backend, &sb.disk_id, sb)?;
+    backend.flush_device(&sb.disk_id)
+}
+
 fn load_or_recover(
     backend: &dyn StorageBackend,
     superblocks: &[RawSuperblock],
+    checkpoint_replay: bool,
 ) -> Result<(Metadata, TransactionReport)> {
     let mut candidates = Vec::new();
     for sb in superblocks {
@@ -432,7 +478,8 @@ fn load_or_recover(
         .max_by(|left, right| {
             (left.txid, left.integrity.generation).cmp(&(right.txid, right.integrity.generation))
         });
-    let journal_best = read_latest_journal_metadata(backend, superblocks, &mut report)?;
+    let journal_best =
+        read_latest_journal_metadata(backend, superblocks, &mut report, best.as_ref())?;
     if let Some(journal_meta) = journal_best {
         if best
             .as_ref()
@@ -449,7 +496,7 @@ fn load_or_recover(
         ));
     };
     report.selected_metadata_source = "raw-metadata-or-journal".to_string();
-    if report.replayed {
+    if checkpoint_replay && report.replayed {
         journal::inject_crash(FaultPoint::DuringReplay.as_str())?;
         write_metadata_copies(backend, superblocks, &metadata)?;
     }
@@ -522,9 +569,11 @@ fn read_latest_journal_metadata(
     backend: &dyn StorageBackend,
     superblocks: &[RawSuperblock],
     report: &mut TransactionReport,
+    base_metadata: Option<&Metadata>,
 ) -> Result<Option<Metadata>> {
     let mut best = None;
     for sb in superblocks {
+        let mut latest = base_metadata.cloned();
         let mut header = vec![0u8; RAW_HEADER_SIZE];
         if backend
             .read_at(&sb.disk_id, sb.journal.offset, &mut header)
@@ -569,13 +618,41 @@ fn read_latest_journal_metadata(
                     report.last_valid_txid = report.last_valid_txid.max(record.txid);
                     report.last_valid_generation =
                         report.last_valid_generation.max(record.generation);
+                    let candidate = if let Some(metadata) = record.metadata {
+                        Some(metadata)
+                    } else if let (Some(base), Some(delta)) =
+                        (latest.as_ref(), record.metadata_delta.as_ref())
+                    {
+                        match journal::apply_metadata_delta(base, delta) {
+                            Ok(metadata) => Some(metadata),
+                            Err(err) => {
+                                report.invalid_entries += 1;
+                                report.errors.push(format!(
+                                    "raw journal delta at {}:{} is invalid: {err}",
+                                    sb.disk_id, cursor
+                                ));
+                                break;
+                            }
+                        }
+                    } else {
+                        report.invalid_entries += 1;
+                        report.errors.push(format!(
+                            "raw journal record at {}:{} lacks a metadata checkpoint base",
+                            sb.disk_id, cursor
+                        ));
+                        break;
+                    };
+                    let Some(candidate) = candidate else {
+                        break;
+                    };
                     if best
                         .as_ref()
-                        .map(|metadata: &Metadata| record.metadata.txid > metadata.txid)
+                        .map(|metadata: &Metadata| candidate.txid > metadata.txid)
                         .unwrap_or(true)
                     {
-                        best = Some(record.metadata);
+                        best = Some(candidate.clone());
                     }
+                    latest = Some(candidate);
                 }
                 Err(err) => {
                     report.invalid_entries += 1;
