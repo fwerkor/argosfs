@@ -322,6 +322,7 @@ main() {
 		emergency "no init found in $sysroot"
 	fi
 	log "mounted ArgosFS root at $sysroot pid=$mount_pid"
+	unset INITRAMFS
 	exec switch_root "$sysroot" /sbin/init
 }
 
