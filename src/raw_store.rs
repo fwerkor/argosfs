@@ -188,6 +188,10 @@ pub fn open_pool(kind: BackendKind, paths: &[PathBuf], write: bool) -> Result<Ra
         )));
     }
 
+    let present_paths = devices
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeMap<_, _>>();
     let backend = Arc::new(FileBlockBackend::open_with_ids(kind, devices, write)?);
     let (mut metadata, mut report) = load_or_recover(&*backend, &superblocks, write)?;
     if metadata.backend != kind {
@@ -201,7 +205,9 @@ pub fn open_pool(kind: BackendKind, paths: &[PathBuf], write: bool) -> Result<Ra
         .map(|sb| sb.disk_id.clone())
         .collect::<std::collections::BTreeSet<_>>();
     for (disk_id, disk) in &mut metadata.disks {
-        if !present.contains(disk_id) {
+        if let Some(path) = present_paths.get(disk_id) {
+            disk.path = path.clone();
+        } else if !present.contains(disk_id) {
             disk.status = crate::types::DiskStatus::Offline;
         }
     }
@@ -319,7 +325,9 @@ pub fn write_superblock_clean_state(
             copy.last_mount_time = now;
         }
         let encoded = copy.encode();
+        let label = copy.device_label().encode();
         backend.write_at(&copy.disk_id, PRIMARY_SUPERBLOCK_OFFSET, &encoded)?;
+        backend.write_at(&copy.disk_id, DEVICE_LABEL_OFFSET, &label)?;
         backend.write_at(&copy.disk_id, copy.backup_superblock_offset, &encoded)?;
         backend.flush_device(&copy.disk_id)?;
     }
@@ -774,20 +782,44 @@ fn scan_one_path(kind: BackendKind, path: &PathBuf) -> ScannedDevice {
     let id = "disk-0000".to_string();
     let capacity = backend.capacity(&id).unwrap_or(0);
     match read_superblock_with_backup(&backend, &id, capacity) {
-        Ok((sb, source)) => ScannedDevice {
-            path: path.clone(),
-            valid: true,
-            error: None,
-            pool_uuid: Some(sb.pool_uuid.to_string()),
-            device_uuid: Some(sb.device_uuid.to_string()),
-            disk_id: Some(sb.disk_id),
-            disk_index: Some(sb.disk_index),
-            generation: Some(sb.generation),
-            clean: Some(sb.clean),
-            label: Some(sb.label),
-            capacity,
-            superblock_source: Some(source.to_string()),
-        },
+        Ok((sb, source)) => {
+            let label_result = (|| {
+                let mut label = vec![0u8; DEVICE_LABEL_SIZE];
+                backend.read_at(&id, DEVICE_LABEL_OFFSET, &mut label)?;
+                let label = RawDeviceLabel::decode(&label)?;
+                validate_label_matches_superblock(&sb, &label)
+            })();
+            if let Err(err) = label_result {
+                return ScannedDevice {
+                    path: path.clone(),
+                    valid: false,
+                    error: Some(err.to_string()),
+                    pool_uuid: Some(sb.pool_uuid.to_string()),
+                    device_uuid: Some(sb.device_uuid.to_string()),
+                    disk_id: Some(sb.disk_id),
+                    disk_index: Some(sb.disk_index),
+                    generation: Some(sb.generation),
+                    clean: Some(sb.clean),
+                    label: Some(sb.label),
+                    capacity,
+                    superblock_source: Some(source.to_string()),
+                };
+            }
+            ScannedDevice {
+                path: path.clone(),
+                valid: true,
+                error: None,
+                pool_uuid: Some(sb.pool_uuid.to_string()),
+                device_uuid: Some(sb.device_uuid.to_string()),
+                disk_id: Some(sb.disk_id),
+                disk_index: Some(sb.disk_index),
+                generation: Some(sb.generation),
+                clean: Some(sb.clean),
+                label: Some(sb.label),
+                capacity,
+                superblock_source: Some(source.to_string()),
+            }
+        }
         Err(err) => ScannedDevice {
             path: path.clone(),
             valid: false,
@@ -866,7 +898,6 @@ fn validate_label_matches_superblock(
         || superblock.device_uuid != label.device_uuid
         || superblock.disk_id != label.disk_id
         || superblock.disk_index != label.disk_index
-        || superblock.generation != label.generation
     {
         return Err(ArgosError::CorruptedMetadata(
             "device label does not match raw superblock".to_string(),

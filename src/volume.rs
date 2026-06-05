@@ -4918,6 +4918,9 @@ fn prepare_loop_images(paths: &[PathBuf], image_size: u64, force: bool) -> Resul
 }
 
 fn block_cache_root(volume_uuid: &str, paths: &[PathBuf]) -> PathBuf {
+    if let Some(root) = std::env::var_os("ARGOSFS_BLOCK_CACHE_DIR") {
+        return PathBuf::from(root).join(volume_uuid);
+    }
     let mut root = paths
         .first()
         .and_then(|path| path.parent())

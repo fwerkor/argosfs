@@ -4,7 +4,8 @@ use argosfs::cache::BlockCache;
 use argosfs::crypto;
 use argosfs::journal;
 use argosfs::raw_format::{
-    JOURNAL_REGION_OFFSET, METADATA_REGION_OFFSET, PRIMARY_SUPERBLOCK_OFFSET, SUPERBLOCK_SIZE,
+    DEVICE_LABEL_OFFSET, JOURNAL_REGION_OFFSET, METADATA_REGION_OFFSET, PRIMARY_SUPERBLOCK_OFFSET,
+    SUPERBLOCK_SIZE,
 };
 use argosfs::types::{
     BackendKind, Compression, DiskStatus, IoMode, Metadata, RawFreeExtent, ShardLocation,
@@ -344,6 +345,39 @@ fn single_device_loop_rootfs_smoke_import_export() {
 }
 
 #[test]
+fn loop_block_open_remaps_metadata_paths_to_current_devices() {
+    let tmp = TempDir::new().unwrap();
+    let original = tmp.path().join("original.img");
+    let moved = tmp.path().join("moved.img");
+    let original_images = vec![original.clone()];
+    let fs = ArgosFs::create_loop(
+        &original_images,
+        config(1, 0),
+        32 * 1024 * 1024,
+        "capos-root",
+        false,
+    )
+    .unwrap();
+    fs.write_file("/booted-from-current-path", b"ok", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    fs::copy(&original, &moved).unwrap();
+    fs::remove_file(&original).unwrap();
+    let moved_images = vec![moved.clone()];
+    let reopened = ArgosFs::open_loop(&moved_images, true).unwrap();
+    assert_eq!(reopened.metadata_snapshot().disks["disk-0000"].path, moved);
+    assert_eq!(
+        reopened
+            .read_file("/booted-from-current-path", true)
+            .unwrap(),
+        b"ok"
+    );
+    reopened.sync().unwrap();
+}
+
+#[test]
 fn reshape_single_to_redundant_resume_keeps_multilayout_readable() {
     let tmp = TempDir::new().unwrap();
     let mut images = loop_images(&tmp, 1);
@@ -543,6 +577,23 @@ fn loop_block_scan_inspect_and_repair_corrupt_extent() {
         fs.read_file("/payload", true).unwrap(),
         b"abcdefghijklmnopqrstuvwxyz"
     );
+}
+
+#[test]
+fn clean_state_updates_device_label_generation() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/payload", b"label-generation", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let (superblock, label) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert_eq!(superblock.generation, label.generation);
+    assert_eq!(superblock.disk_id, label.disk_id);
 }
 
 #[test]
@@ -862,6 +913,9 @@ fn loop_block_open_rejects_duplicate_disk_id_conflict() {
     superblock.disk_id = "disk-0000".to_string();
     disk1
         .write_at(&superblock.encode(), PRIMARY_SUPERBLOCK_OFFSET)
+        .unwrap();
+    disk1
+        .write_at(&superblock.device_label().encode(), DEVICE_LABEL_OFFSET)
         .unwrap();
     disk1
         .write_at(&superblock.encode(), superblock.backup_superblock_offset)
@@ -1807,6 +1861,23 @@ fn l2_cache_enforces_limit_and_evicts_bad_entries() {
     assert!(cache.get("bad", Some(&sha256_hex(b"fresh"))).is_none());
     assert_eq!(cache.stats()["memory_items"], serde_json::json!(0));
     assert_eq!(directory_size(&corrupt_root), 0);
+}
+
+#[test]
+fn l2_cache_write_failure_does_not_break_memory_cache() {
+    let tmp = TempDir::new().unwrap();
+    let blocked_root = tmp.path().join("not-a-directory");
+    fs::write(&blocked_root, b"file blocks cache directory creation").unwrap();
+    let cache = BlockCache::new(&blocked_root, 16, 1024);
+
+    cache.put("block", b"data").unwrap();
+
+    assert_eq!(
+        cache.get("block", Some(&sha256_hex(b"data"))).unwrap(),
+        b"data"
+    );
+    assert_eq!(cache.stats()["l2_errors"].as_u64().unwrap(), 1);
+    assert_eq!(cache.stats()["l2_writes"].as_u64().unwrap(), 0);
 }
 
 #[test]
