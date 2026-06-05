@@ -3,7 +3,9 @@ use argosfs::acl;
 use argosfs::crypto;
 use argosfs::fusefs;
 use argosfs::metrics;
-use argosfs::types::{Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
+use argosfs::rootfs::{self, RootMountMode};
+use argosfs::scan;
+use argosfs::types::{BackendKind, Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
 use argosfs::util::clean_path;
 use argosfs::{ArgosError, ArgosFs};
 use clap::{Parser, Subcommand};
@@ -28,7 +30,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Mkfs {
-        root: PathBuf,
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "host")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long, default_value_t = 64 * 1024 * 1024)]
+        image_size: u64,
+        #[arg(long, default_value = "argosfs-root")]
+        pool_name: String,
         #[arg(long, default_value_t = 6)]
         disks: usize,
         #[arg(long, default_value_t = 4)]
@@ -44,6 +56,99 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    Scan {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    InspectDevice {
+        path: PathBuf,
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+    },
+    InspectPool {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+    },
+    ListDevices {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+    },
+    AddDevice {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long)]
+        device: PathBuf,
+        #[arg(long, default_value_t = 64 * 1024 * 1024)]
+        image_size: u64,
+        #[arg(long)]
+        force: bool,
+    },
+    DrainDevice {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long)]
+        device: String,
+    },
+    ReplaceDevice {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long)]
+        old: String,
+        #[arg(long)]
+        new: PathBuf,
+        #[arg(long, default_value_t = 64 * 1024 * 1024)]
+        image_size: u64,
+        #[arg(long)]
+        force: bool,
+    },
+    RemoveDevice {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long)]
+        device: String,
+    },
     Mount {
         root: PathBuf,
         mountpoint: PathBuf,
@@ -51,6 +156,58 @@ enum Command {
         foreground: bool,
         #[arg(short = 'o', long = "option")]
         option: Vec<String>,
+    },
+    MountRoot {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long, default_value = "/sysroot")]
+        target: PathBuf,
+        #[arg(long, default_value = "rw")]
+        mode: RootMountMode,
+        #[arg(long)]
+        foreground: bool,
+        #[arg(short = 'o', long = "option")]
+        option: Vec<String>,
+    },
+    PreflightRoot {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long, default_value = "rw")]
+        mode: RootMountMode,
+    },
+    ReplayJournal {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+    },
+    MountRecovery {
+        #[arg(long, default_value = "loop")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long)]
+        target: PathBuf,
     },
     Put {
         root: PathBuf,
@@ -117,14 +274,24 @@ enum Command {
         size: u64,
     },
     ImportTree {
-        root: PathBuf,
-        source: PathBuf,
-        #[arg(default_value = "/")]
-        dest: String,
+        #[arg(long, default_value = "host")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(required = true, num_args = 1..=3)]
+        args: Vec<PathBuf>,
     },
     ExportTree {
-        root: PathBuf,
-        dest: PathBuf,
+        #[arg(long, default_value = "host")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(required = true, num_args = 1..=2)]
+        args: Vec<PathBuf>,
     },
     AddDisk {
         root: PathBuf,
@@ -180,14 +347,30 @@ enum Command {
         json: bool,
     },
     Fsck {
-        root: PathBuf,
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "host")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
         #[arg(long)]
         repair: bool,
         #[arg(long)]
         remove_orphans: bool,
     },
     Scrub {
-        root: PathBuf,
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "host")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
     },
     Rebalance {
         root: PathBuf,
@@ -274,6 +457,11 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Mkfs {
             root,
+            backend,
+            images,
+            devices,
+            image_size,
+            pool_name,
             disks,
             k,
             m,
@@ -290,8 +478,197 @@ fn main() -> Result<()> {
                 compression_level,
                 ..VolumeConfig::default()
             };
-            let fs = ArgosFs::create(root, config, disks, force)?;
+            let fs = match backend {
+                BackendKind::Host => {
+                    let root = root.context("host mkfs requires ROOT")?;
+                    ArgosFs::create(root, config, disks, force)?
+                }
+                BackendKind::LoopBlock => {
+                    let paths = require_paths(images, "loop mkfs requires --images")?;
+                    ArgosFs::create_loop(&paths, config, image_size, &pool_name, force)?
+                }
+                BackendKind::RawBlock => {
+                    let paths = require_paths(devices, "raw mkfs requires --devices")?;
+                    ArgosFs::create_raw(&paths, config, &pool_name, force)?
+                }
+            };
             println!("{}", serde_json::to_string_pretty(&fs.health_report())?);
+        }
+        Command::Scan {
+            backend,
+            images,
+            devices,
+            json,
+        } => {
+            let paths = backend_paths(backend, images, devices)?;
+            let report = match backend {
+                BackendKind::LoopBlock => scan::scan_images(&paths),
+                BackendKind::RawBlock => scan::scan_devices(&paths),
+                BackendKind::Host => bail!("scan is only supported for loop/raw backends"),
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for device in report {
+                    println!(
+                        "{} valid={} pool={} disk={} generation={} clean={}{}",
+                        device.path.display(),
+                        device.valid,
+                        device.pool_uuid.unwrap_or_else(|| "-".to_string()),
+                        device.disk_id.unwrap_or_else(|| "-".to_string()),
+                        device
+                            .generation
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        device
+                            .clean
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        device
+                            .error
+                            .map(|err| format!(" error={err}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        }
+        Command::InspectDevice { path, backend } => {
+            let (superblock, label) = argosfs::raw_store::inspect_device(backend, path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "superblock": {
+                        "pool_uuid": superblock.pool_uuid.to_string(),
+                        "device_uuid": superblock.device_uuid.to_string(),
+                        "disk_id": superblock.disk_id,
+                        "disk_index": superblock.disk_index,
+                        "k": superblock.k,
+                        "m": superblock.m,
+                        "chunk_size": superblock.chunk_size,
+                        "generation": superblock.generation,
+                        "clean": superblock.clean,
+                        "journal": {"offset": superblock.journal.offset, "length": superblock.journal.length},
+                        "metadata": {"offset": superblock.metadata.offset, "length": superblock.metadata.length},
+                        "allocator": {"offset": superblock.allocator.offset, "length": superblock.allocator.length},
+                        "data": {"offset": superblock.data.offset, "length": superblock.data.length},
+                        "backup_superblock_offset": superblock.backup_superblock_offset,
+                        "label": superblock.label
+                    },
+                    "label": {
+                        "pool_uuid": label.pool_uuid.to_string(),
+                        "device_uuid": label.device_uuid.to_string(),
+                        "disk_id": label.disk_id,
+                        "disk_index": label.disk_index,
+                        "generation": label.generation,
+                        "label": label.label
+                    }
+                }))?
+            );
+        }
+        Command::InspectPool {
+            backend,
+            images,
+            devices,
+            pool,
+        } => {
+            let fs = open_backend(None, backend, images, devices, false)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&fs.health_report())?);
+        }
+        Command::ListDevices {
+            backend,
+            images,
+            devices,
+            pool,
+        } => {
+            let fs = open_backend(None, backend, images, devices, false)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&fs.metadata_snapshot().disks)?
+            );
+        }
+        Command::AddDevice {
+            backend,
+            images,
+            devices,
+            pool,
+            device,
+            image_size,
+            force,
+        } => {
+            let fs = open_backend(None, backend, images, devices, true)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            let disk_id = fs.add_block_device(device, image_size, force)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"disk_id": disk_id}))?
+            );
+        }
+        Command::DrainDevice {
+            backend,
+            images,
+            devices,
+            pool,
+            device,
+        } => {
+            let fs = open_backend(None, backend, images, devices, true)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            let rewritten = fs.drain_disk(&device)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"disk_id": device, "rewritten_files": rewritten})
+                )?
+            );
+        }
+        Command::ReplaceDevice {
+            backend,
+            mut images,
+            mut devices,
+            pool,
+            old,
+            new,
+            image_size,
+            force,
+        } => {
+            let fs = open_backend(None, backend, images.clone(), devices.clone(), true)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            let new_id = fs.add_block_device(new.clone(), image_size, force)?;
+            drop(fs);
+            match backend {
+                BackendKind::LoopBlock => images.push(new),
+                BackendKind::RawBlock => devices.push(new),
+                BackendKind::Host => bail!("replace-device is only supported for loop/raw pools"),
+            }
+            let fs = open_backend(None, backend, images, devices, true)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            let rewritten = fs.remove_disk(&old)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "old_disk_id": old,
+                    "new_disk_id": new_id,
+                    "rewritten_files": rewritten
+                }))?
+            );
+        }
+        Command::RemoveDevice {
+            backend,
+            images,
+            devices,
+            pool,
+            device,
+        } => {
+            let fs = open_backend(None, backend, images, devices, true)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            let rewritten = fs.remove_disk(&device)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"disk_id": device, "rewritten_files": rewritten})
+                )?
+            );
         }
         Command::Mount {
             root,
@@ -300,6 +677,64 @@ fn main() -> Result<()> {
             option,
         } => {
             fusefs::mount(root, mountpoint, foreground, option)?;
+        }
+        Command::MountRoot {
+            backend,
+            images,
+            devices,
+            pool,
+            target,
+            mode,
+            foreground,
+            option,
+        } => {
+            let write = matches!(
+                mode,
+                RootMountMode::ReadWrite | RootMountMode::DegradedReadWrite
+            );
+            let fs = open_backend(None, backend, images, devices, write)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            rootfs::preflight_volume(&fs, mode)?;
+            fusefs::mount_volume(fs, target, foreground, option)?;
+        }
+        Command::PreflightRoot {
+            backend,
+            images,
+            devices,
+            pool,
+            mode,
+        } => {
+            let fs = open_backend(None, backend, images, devices, false)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rootfs::preflight_volume(&fs, mode)?)?
+            );
+        }
+        Command::ReplayJournal {
+            backend,
+            images,
+            devices,
+            pool,
+        } => {
+            let fs = open_backend(None, backend, images, devices, true)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&fs.transaction_report()?)?
+            );
+        }
+        Command::MountRecovery {
+            backend,
+            images,
+            devices,
+            pool,
+            target,
+        } => {
+            let fs = open_backend(None, backend, images, devices, false)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            rootfs::preflight_volume(&fs, RootMountMode::Recovery)?;
+            fusefs::mount_volume(fs, target, true, vec!["ro".to_string()])?;
         }
         Command::Put { root, local, path } => {
             let fs = ArgosFs::open(root)?;
@@ -381,12 +816,24 @@ fn main() -> Result<()> {
         Command::Truncate { root, path, size } => {
             ArgosFs::open(root)?.truncate_path(&path, size)?;
         }
-        Command::ImportTree { root, source, dest } => {
-            let fs = ArgosFs::open(root)?;
+        Command::ImportTree {
+            backend,
+            images,
+            devices,
+            args,
+        } => {
+            let (root, source, dest) = import_args(backend, args)?;
+            let fs = open_backend(root, backend, images, devices, true)?;
             import_tree(&fs, &source, &dest)?;
         }
-        Command::ExportTree { root, dest } => {
-            let fs = ArgosFs::open(root)?;
+        Command::ExportTree {
+            backend,
+            images,
+            devices,
+            args,
+        } => {
+            let (root, dest) = export_args(backend, args)?;
+            let fs = open_backend(root, backend, images, devices, false)?;
             export_tree(&fs, &dest)?;
         }
         Command::AddDisk {
@@ -488,14 +935,28 @@ fn main() -> Result<()> {
         }
         Command::Fsck {
             root,
+            backend,
+            images,
+            devices,
+            pool,
             repair,
             remove_orphans,
         } => {
-            let report = ArgosFs::open(root)?.fsck(repair, remove_orphans)?;
+            let fs = open_backend(root, backend, images, devices, repair || remove_orphans)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            let report = fs.fsck(repair, remove_orphans)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::Scrub { root } => {
-            let report = ArgosFs::open(root)?.scrub()?;
+        Command::Scrub {
+            root,
+            backend,
+            images,
+            devices,
+            pool,
+        } => {
+            let fs = open_backend(root, backend, images, devices, true)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            let report = fs.scrub()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Rebalance { root } => {
@@ -641,6 +1102,120 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn require_paths(paths: Vec<PathBuf>, message: &str) -> Result<Vec<PathBuf>> {
+    if paths.is_empty() {
+        bail!("{message}");
+    }
+    Ok(paths)
+}
+
+fn backend_paths(
+    backend: BackendKind,
+    images: Vec<PathBuf>,
+    devices: Vec<PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    match backend {
+        BackendKind::Host => bail!("host backend uses a volume ROOT, not --images/--devices"),
+        BackendKind::LoopBlock => require_paths(images, "loop backend requires --images"),
+        BackendKind::RawBlock => {
+            if devices.is_empty() {
+                let discovered = scan::discover_raw_devices();
+                if discovered.is_empty() {
+                    bail!("raw scan found no /dev/disk/by-id or /dev/disk/by-uuid candidates; pass --devices explicitly");
+                }
+                Ok(discovered)
+            } else {
+                Ok(devices)
+            }
+        }
+    }
+}
+
+fn open_backend(
+    root: Option<PathBuf>,
+    backend: BackendKind,
+    images: Vec<PathBuf>,
+    devices: Vec<PathBuf>,
+    write: bool,
+) -> Result<ArgosFs> {
+    Ok(match backend {
+        BackendKind::Host => ArgosFs::open(root.context("host backend requires ROOT")?)?,
+        BackendKind::LoopBlock => ArgosFs::open_loop(
+            &require_paths(images, "loop backend requires --images")?,
+            write,
+        )?,
+        BackendKind::RawBlock => ArgosFs::open_raw(
+            &require_paths(devices, "raw backend requires --devices")?,
+            write,
+        )?,
+    })
+}
+
+fn import_args(
+    backend: BackendKind,
+    args: Vec<PathBuf>,
+) -> Result<(Option<PathBuf>, PathBuf, String)> {
+    match backend {
+        BackendKind::Host => {
+            if args.len() < 2 || args.len() > 3 {
+                bail!("host import-tree syntax: import-tree ROOT SOURCE [DEST]");
+            }
+            let dest = args
+                .get(2)
+                .map(|path| path_to_cli_string(path))
+                .unwrap_or_else(|| "/".to_string());
+            Ok((Some(args[0].clone()), args[1].clone(), dest))
+        }
+        BackendKind::LoopBlock | BackendKind::RawBlock => {
+            if args.is_empty() || args.len() > 2 {
+                bail!("block import-tree syntax: import-tree --backend loop|raw --images/--devices SOURCE [DEST]");
+            }
+            let dest = args
+                .get(1)
+                .map(|path| path_to_cli_string(path))
+                .unwrap_or_else(|| "/".to_string());
+            Ok((None, args[0].clone(), dest))
+        }
+    }
+}
+
+fn export_args(backend: BackendKind, args: Vec<PathBuf>) -> Result<(Option<PathBuf>, PathBuf)> {
+    match backend {
+        BackendKind::Host => {
+            if args.len() != 2 {
+                bail!("host export-tree syntax: export-tree ROOT DEST");
+            }
+            Ok((Some(args[0].clone()), args[1].clone()))
+        }
+        BackendKind::LoopBlock | BackendKind::RawBlock => {
+            if args.len() != 1 {
+                bail!("block export-tree syntax: export-tree --backend loop|raw --images/--devices DEST");
+            }
+            Ok((None, args[0].clone()))
+        }
+    }
+}
+
+fn path_to_cli_string(path: &Path) -> String {
+    path.as_os_str().to_string_lossy().to_string()
+}
+
+fn validate_requested_pool(fs: &ArgosFs, pool: Option<&str>) -> Result<()> {
+    let Some(pool) = pool else {
+        return Ok(());
+    };
+    let meta = fs.metadata_snapshot();
+    if meta.uuid == pool || meta.raw_pool.pool_name == pool {
+        Ok(())
+    } else {
+        bail!(
+            "opened ArgosFS pool is {} ({}) but --pool requested {pool}",
+            meta.uuid,
+            meta.raw_pool.pool_name
+        )
+    }
 }
 
 fn load_passphrase(

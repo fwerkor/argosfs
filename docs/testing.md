@@ -8,6 +8,33 @@ ArgosFS uses two layers of filesystem tests.
 encoding, repair, and command-line paths without mounting FUSE. These tests are
 fast, deterministic, and suitable for every CI runner.
 
+Raw/loop backend checks:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+scripts/test_loop_backend.sh
+scripts/test_crash_consistency.sh --unprivileged
+scripts/test_initramfs_dry_run.sh
+scripts/test_rootfs_smoke.sh
+```
+
+Privileged checks are provided but skip unless the environment is ready:
+
+```bash
+sudo ARGOSFS_RAW_TEST_DEVICES=/dev/...,/dev/... scripts/test_raw_backend.sh --force
+scripts/test_privileged_fuse.sh
+scripts/test_qemu_boot.sh
+```
+
+Loop/raw integration tests include raw superblock backup recovery, duplicate
+device detection, one-missing-image degraded read, rootfs fail-closed preflight,
+raw extent corruption repair, and raw data-write crash injection before journal
+commit. The crash script runs only unprivileged crash/replay cases by default;
+raw block devices, FUSE mounts, and QEMU boot are explicit privileged/local
+checks and print a skip reason when unavailable.
+
 `scripts/compat/run_deep_roundtrip.sh` adds host-filesystem import/export
 coverage for byte-preserving names, hardlinks, symlinks, xattrs, metadata, and
 CLI path literals. Its default mode does not require `/dev/fuse`.

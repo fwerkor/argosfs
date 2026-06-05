@@ -1,5 +1,7 @@
 use crate::acl;
 use crate::advanced_io;
+use crate::allocator;
+use crate::backend::{FileBlockBackend, HostFsBackend, StorageBackend};
 use crate::cache::BlockCache;
 use crate::compression::{compress, decompress};
 use crate::crypto;
@@ -7,6 +9,8 @@ use crate::erasure::RsCodec;
 use crate::error::{ArgosError, Result};
 use crate::health::{classify_inode, probe_disk_path, refresh_smart, risk_report};
 use crate::journal;
+use crate::raw_format::{self, RawSuperblock};
+use crate::raw_store;
 use crate::types::*;
 use crate::util::{
     append_json_line, atomic_write, clean_path, ensure_dir, now_f64, parent_name,
@@ -32,6 +36,8 @@ const BOOT_CRITICAL_XATTR: &str = "system.argosfs.boot_critical";
 #[derive(Clone)]
 pub struct ArgosFs {
     root: Arc<PathBuf>,
+    backend: Arc<dyn StorageBackend>,
+    raw_superblocks: Arc<Vec<RawSuperblock>>,
     meta: Arc<Mutex<Metadata>>,
     rs: Arc<RsCodec>,
     cache: Arc<BlockCache>,
@@ -306,6 +312,8 @@ impl ArgosFs {
         let meta = Metadata {
             format: FORMAT_VERSION.to_string(),
             uuid,
+            backend: BackendKind::Host,
+            raw_pool: RawPoolMetadata::default(),
             created_at,
             updated_at: created_at,
             txid: 0,
@@ -326,6 +334,7 @@ impl ArgosFs {
         let root = root.as_ref().to_path_buf();
         let recovered = journal::load_or_recover(&root)?;
         let mut meta = recovered.metadata;
+        meta.backend = BackendKind::Host;
         recompute_disk_usage_from_metadata(&mut meta);
         if meta.format != FORMAT_VERSION {
             return Err(ArgosError::Invalid(format!(
@@ -340,7 +349,190 @@ impl ArgosFs {
             meta.config.l2_cache_bytes,
         );
         Ok(Self {
+            backend: Arc::new(HostFsBackend::new(&root)),
+            raw_superblocks: Arc::new(Vec::new()),
             root: Arc::new(root),
+            meta: Arc::new(Mutex::new(meta)),
+            rs: Arc::new(rs),
+            cache: Arc::new(cache),
+        })
+    }
+
+    pub fn create_loop(
+        images: &[PathBuf],
+        config: VolumeConfig,
+        image_size: u64,
+        pool_name: &str,
+        force: bool,
+    ) -> Result<Self> {
+        prepare_loop_images(images, image_size, force)?;
+        Self::create_block_backend(BackendKind::LoopBlock, images, config, pool_name, force)
+    }
+
+    pub fn create_raw(
+        devices: &[PathBuf],
+        config: VolumeConfig,
+        pool_name: &str,
+        force: bool,
+    ) -> Result<Self> {
+        Self::create_block_backend(BackendKind::RawBlock, devices, config, pool_name, force)
+    }
+
+    pub fn open_loop(images: &[PathBuf], write: bool) -> Result<Self> {
+        Self::open_block_backend(BackendKind::LoopBlock, images, write)
+    }
+
+    pub fn open_raw(devices: &[PathBuf], write: bool) -> Result<Self> {
+        Self::open_block_backend(BackendKind::RawBlock, devices, write)
+    }
+
+    fn create_block_backend(
+        kind: BackendKind,
+        paths: &[PathBuf],
+        mut config: VolumeConfig,
+        pool_name: &str,
+        force: bool,
+    ) -> Result<Self> {
+        if config.k == 0 || config.m == 0 {
+            return Err(ArgosError::Invalid("k and m must be positive".to_string()));
+        }
+        if paths.len() < config.k + config.m {
+            return Err(ArgosError::NotEnoughDisks {
+                need: config.k + config.m,
+                have: paths.len(),
+            });
+        }
+        if config.chunk_size == 0 {
+            config.chunk_size = VolumeConfig::default().chunk_size;
+        }
+        let backend_file = match kind {
+            BackendKind::LoopBlock => FileBlockBackend::open_loop(paths, true)?,
+            BackendKind::RawBlock => FileBlockBackend::open_raw(paths, true)?,
+            BackendKind::Host => {
+                return Err(ArgosError::Unsupported(
+                    "create_block_backend requires loop or raw backend".to_string(),
+                ))
+            }
+        };
+        let pool_uuid = Uuid::new_v4();
+        let created_at = now_f64();
+        let mut superblocks = Vec::new();
+        let mut disks = BTreeMap::new();
+        let mut allocators = BTreeMap::new();
+        for (index, info) in backend_file.list_devices()?.into_iter().enumerate() {
+            let id = format!("disk-{index:04}");
+            let sb = raw_store::superblock_for_device(
+                pool_uuid,
+                index,
+                &id,
+                config.k,
+                config.m,
+                config.chunk_size,
+                info.capacity,
+                pool_name,
+            )?;
+            let allocator = allocator::init_allocator(
+                sb.data.offset,
+                sb.data.length,
+                raw_format::RAW_BLOCK_SIZE,
+            );
+            allocators.insert(id.clone(), allocator);
+            disks.insert(
+                id.clone(),
+                Disk {
+                    id,
+                    path: info.path,
+                    tier: StorageTier::Warm,
+                    weight: 1.0,
+                    status: DiskStatus::Online,
+                    capacity_bytes: info.capacity,
+                    capacity_source: CapacitySource::UserOverride,
+                    used_bytes: 0,
+                    health: HealthCounters {
+                        temperature_c: 30.0,
+                        ..HealthCounters::default()
+                    },
+                    class: DiskClass::Unknown,
+                    backing_device: None,
+                    backing_fs_id: None,
+                    failure_domain: format!("raw-device-{index:04}"),
+                    sysfs_block: None,
+                    rotational: None,
+                    numa_node: None,
+                    read_latency_ewma_ms: 0.0,
+                    write_latency_ewma_ms: 0.0,
+                    observed_read_mib_s: 0.0,
+                    observed_write_mib_s: 0.0,
+                    io_samples: 0,
+                    last_probe: DiskProbe::default(),
+                    created_at,
+                },
+            );
+            superblocks.push(sb);
+        }
+        let root_inode = root_inode(created_at);
+        let mut inodes = BTreeMap::new();
+        inodes.insert(ROOT_INO, root_inode);
+        let mut meta = Metadata {
+            format: FORMAT_VERSION.to_string(),
+            uuid: pool_uuid.to_string(),
+            backend: kind,
+            raw_pool: RawPoolMetadata {
+                pool_name: pool_name.to_string(),
+                format_version: RAW_FORMAT_VERSION,
+                clean: true,
+                dirty_since_txid: 0,
+                mount_generation: 1,
+                allocators,
+            },
+            created_at,
+            updated_at: created_at,
+            txid: 0,
+            next_inode: ROOT_INO + 1,
+            next_stripe: 1,
+            config,
+            encryption: EncryptionConfig::default(),
+            integrity: MetadataIntegrity::default(),
+            disks,
+            inodes,
+        };
+        journal::prepare_metadata_integrity_for_external_store(&mut meta)?;
+        let backend: Arc<dyn StorageBackend> = Arc::new(backend_file);
+        raw_store::initialize_pool(backend.clone(), &superblocks, &mut meta, force)?;
+        Self::from_block_parts(paths, backend, superblocks, meta)
+    }
+
+    fn open_block_backend(kind: BackendKind, paths: &[PathBuf], write: bool) -> Result<Self> {
+        let opened = raw_store::open_pool(kind, paths, write)?;
+        let mut meta = opened.metadata;
+        recompute_disk_usage_from_metadata(&mut meta);
+        Self::from_block_parts(paths, opened.backend, opened.superblocks, meta)
+    }
+
+    fn from_block_parts(
+        paths: &[PathBuf],
+        backend: Arc<dyn StorageBackend>,
+        superblocks: Vec<RawSuperblock>,
+        meta: Metadata,
+    ) -> Result<Self> {
+        if meta.format != FORMAT_VERSION {
+            return Err(ArgosError::Invalid(format!(
+                "unsupported format {}",
+                meta.format
+            )));
+        }
+        let rs = RsCodec::new(meta.config.k, meta.config.m)?;
+        let cache_root = block_cache_root(&meta.uuid, paths);
+        let cache = BlockCache::new(cache_root, 64 * 1024 * 1024, meta.config.l2_cache_bytes);
+        let root = paths
+            .first()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        Ok(Self {
+            root: Arc::new(root),
+            backend,
+            raw_superblocks: Arc::new(superblocks),
             meta: Arc::new(Mutex::new(meta)),
             rs: Arc::new(rs),
             cache: Arc::new(cache),
@@ -356,11 +548,20 @@ impl ArgosFs {
     }
 
     pub fn transaction_report(&self) -> Result<TransactionReport> {
+        if self.metadata_snapshot().backend != BackendKind::Host {
+            return raw_store::audit(&*self.backend, &self.raw_superblocks);
+        }
         journal::scan(&self.root)
     }
 
     pub fn sync(&self) -> Result<()> {
         let meta = self.meta.lock();
+        if meta.backend != BackendKind::Host {
+            raw_store::write_metadata_copies(&*self.backend, &self.raw_superblocks, &meta)?;
+            raw_store::write_superblock_clean_state(&*self.backend, &self.raw_superblocks, true)?;
+            self.backend.flush_all()?;
+            return Ok(());
+        }
 
         let mut shard_paths = BTreeSet::new();
         for inode in meta.inodes.values() {
@@ -1500,6 +1701,101 @@ impl ArgosFs {
         Ok(id)
     }
 
+    pub fn add_block_device(&self, path: PathBuf, image_size: u64, force: bool) -> Result<String> {
+        let kind = self.metadata_snapshot().backend;
+        if kind == BackendKind::Host {
+            return Err(ArgosError::Unsupported(
+                "add-device is only for loop/raw block pools; use add-disk for host volumes"
+                    .to_string(),
+            ));
+        }
+        if kind == BackendKind::LoopBlock {
+            prepare_loop_images(std::slice::from_ref(&path), image_size, force)?;
+        }
+        let new_backend_file = match kind {
+            BackendKind::LoopBlock => {
+                FileBlockBackend::open_loop(std::slice::from_ref(&path), true)?
+            }
+            BackendKind::RawBlock => FileBlockBackend::open_raw(std::slice::from_ref(&path), true)?,
+            BackendKind::Host => unreachable!(),
+        };
+        let info = new_backend_file
+            .list_devices()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ArgosError::MissingDevice(path.display().to_string()))?;
+        let mut meta = self.meta.lock();
+        let next = meta
+            .disks
+            .keys()
+            .filter_map(|id| id.strip_prefix("disk-")?.parse::<usize>().ok())
+            .max()
+            .map(|value| value + 1)
+            .unwrap_or(0);
+        let id = format!("disk-{next:04}");
+        let pool_uuid = Uuid::parse_str(&meta.uuid)
+            .map_err(|err| ArgosError::Invalid(format!("invalid pool UUID: {err}")))?;
+        let sb = raw_store::superblock_for_device(
+            pool_uuid,
+            next,
+            &id,
+            meta.config.k,
+            meta.config.m,
+            meta.config.chunk_size,
+            info.capacity,
+            &meta.raw_pool.pool_name,
+        )?;
+        let new_backend_with_id =
+            FileBlockBackend::open_with_ids(kind, vec![(id.clone(), path.clone())], true)?;
+        raw_store::preflight_devices_empty(&new_backend_with_id, std::slice::from_ref(&sb), force)?;
+
+        let created_at = now_f64();
+        meta.raw_pool.allocators.insert(
+            id.clone(),
+            allocator::init_allocator(sb.data.offset, sb.data.length, raw_format::RAW_BLOCK_SIZE),
+        );
+        meta.disks.insert(
+            id.clone(),
+            Disk {
+                id: id.clone(),
+                path: info.path,
+                tier: StorageTier::Warm,
+                weight: 1.0,
+                status: DiskStatus::Online,
+                capacity_bytes: info.capacity,
+                capacity_source: CapacitySource::UserOverride,
+                used_bytes: 0,
+                health: HealthCounters::default(),
+                class: DiskClass::Unknown,
+                backing_device: None,
+                backing_fs_id: None,
+                failure_domain: format!("raw-device-{next:04}"),
+                sysfs_block: None,
+                rotational: None,
+                numa_node: None,
+                read_latency_ewma_ms: 0.0,
+                write_latency_ewma_ms: 0.0,
+                observed_read_mib_s: 0.0,
+                observed_write_mib_s: 0.0,
+                io_samples: 0,
+                last_probe: DiskProbe::default(),
+                created_at,
+            },
+        );
+        self.commit_locked(
+            &mut meta,
+            "add-device",
+            json!({"disk_id": id, "path": path, "backend": kind.as_str()}),
+        )?;
+        raw_store::initialize_pool(
+            Arc::new(new_backend_with_id),
+            std::slice::from_ref(&sb),
+            &mut meta,
+            true,
+        )?;
+        Ok(id)
+    }
+
     pub fn mark_disk(&self, disk_id: &str, status: DiskStatus) -> Result<()> {
         let mut meta = self.meta.lock();
         let disk = meta
@@ -1852,20 +2148,7 @@ impl ArgosFs {
                     for block in &inode.blocks {
                         for shard in &block.shards {
                             let meta = self.meta.lock();
-                            let Some(path) = self.shard_path_if_disk_exists_locked(
-                                &meta,
-                                &shard.disk_id,
-                                &shard.relpath,
-                            ) else {
-                                drop(meta);
-                                report.missing_shards += 1;
-                                damaged = true;
-                                continue;
-                            };
-                            let io_mode = meta.config.io_mode;
-                            let zero_copy = meta.config.zero_copy;
-                            drop(meta);
-                            match advanced_io::read_all(&path, shard.size, io_mode, zero_copy) {
+                            match self.read_shard_locked(&meta, shard) {
                                 Ok(data) => {
                                     if sha256_hex(&data) != shard.sha256 {
                                         report.checksum_errors += 1;
@@ -1911,32 +2194,52 @@ impl ArgosFs {
                 for block in &inode.blocks {
                     for shard in &block.shards {
                         *referenced_usage.entry(shard.disk_id.clone()).or_default() +=
-                            shard.size as u64;
+                            shard_accounted_size(shard);
                     }
                 }
             }
         }
         let meta = self.metadata_snapshot();
-        for (disk_id, disk) in meta.disks {
-            let disk_root = relative_or_absolute(&self.root, &disk.path);
-            let shard_root = disk_root.join("shards");
-            if !shard_root.exists() {
-                continue;
-            }
-            for entry in walkdir::WalkDir::new(&shard_root)
-                .into_iter()
-                .filter_map(|entry| entry.ok())
-            {
-                if !entry.file_type().is_file() {
+        if meta.backend == BackendKind::Host {
+            for (disk_id, disk) in meta.disks {
+                let disk_root = relative_or_absolute(&self.root, &disk.path);
+                let shard_root = disk_root.join("shards");
+                if !shard_root.exists() {
                     continue;
                 }
-                let rel = entry.path().strip_prefix(&disk_root).unwrap().to_path_buf();
-                if !refs.contains(&(disk_id.clone(), rel.clone())) {
-                    report.orphan_shards += 1;
-                    if remove_orphans {
-                        fs::remove_file(entry.path())?;
-                        report.removed_orphans += 1;
+                for entry in walkdir::WalkDir::new(&shard_root)
+                    .into_iter()
+                    .filter_map(|entry| entry.ok())
+                {
+                    if !entry.file_type().is_file() {
+                        continue;
                     }
+                    let rel = entry.path().strip_prefix(&disk_root).unwrap().to_path_buf();
+                    if !refs.contains(&(disk_id.clone(), rel.clone())) {
+                        report.orphan_shards += 1;
+                        if remove_orphans {
+                            fs::remove_file(entry.path())?;
+                            report.removed_orphans += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            for (disk_id, allocator_state) in &meta.raw_pool.allocators {
+                let extents = meta
+                    .inodes
+                    .values()
+                    .flat_map(|inode| inode.blocks.iter())
+                    .flat_map(|block| block.shards.iter())
+                    .filter_map(|shard| match shard.location.as_ref() {
+                        Some(ShardLocation::RawExtent(extent)) if &extent.disk_id == disk_id => {
+                            Some(extent.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if let Err(err) = allocator::validate_allocations(allocator_state, extents) {
+                    report.errors.push(err.to_string());
                 }
             }
         }
@@ -3062,14 +3365,8 @@ impl ArgosFs {
                 damaged.push(format!("{}:unavailable", shard.disk_id));
                 continue;
             }
-            let path = self.shard_path_locked(meta, &shard.disk_id, &shard.relpath);
             let start = std::time::Instant::now();
-            match advanced_io::read_all(
-                &path,
-                shard.size,
-                meta.config.io_mode,
-                meta.config.zero_copy,
-            ) {
+            match self.read_shard_locked(meta, shard) {
                 Ok(data) => {
                     self.update_read_latency_locked(
                         meta,
@@ -3211,17 +3508,12 @@ impl ArgosFs {
                     Ok(shard) => shards.push(shard),
                     Err(err) => {
                         for shard in &shards {
-                            if let Some(path) = self.shard_path_if_disk_exists_locked(
-                                meta,
-                                &shard.disk_id,
-                                &shard.relpath,
-                            ) {
-                                let _ = fs::remove_file(path);
-                            }
+                            let _ = self.delete_shard_locked(meta, shard);
                         }
                         for shard in &shards {
                             if let Some(disk) = meta.disks.get_mut(&shard.disk_id) {
-                                disk.used_bytes = disk.used_bytes.saturating_sub(shard.size as u64);
+                                disk.used_bytes =
+                                    disk.used_bytes.saturating_sub(shard_accounted_size(shard));
                             }
                         }
                         return Err(err);
@@ -3258,6 +3550,39 @@ impl ArgosFs {
         slot: usize,
         data: &[u8],
     ) -> Result<Shard> {
+        if meta.backend != BackendKind::Host {
+            self.ensure_disk_capacity_locked(meta, disk_id, data.len() as u64)?;
+            let allocator = meta
+                .raw_pool
+                .allocators
+                .get_mut(disk_id)
+                .ok_or_else(|| ArgosError::MissingDevice(disk_id.to_string()))?;
+            let extent = allocator::allocate(allocator, disk_id, data.len() as u64, meta.txid + 1)?;
+            let start = std::time::Instant::now();
+            journal::inject_crash(FaultPoint::BeforeDataWrite.as_str())?;
+            self.backend
+                .write_at(&disk_id.to_string(), extent.offset, data)?;
+            journal::inject_crash(FaultPoint::AfterDataWriteBeforeFlush.as_str())?;
+            self.backend.flush_device(&disk_id.to_string())?;
+            journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
+            if let Some(disk) = meta.disks.get_mut(disk_id) {
+                disk.used_bytes = disk.used_bytes.saturating_add(extent.length);
+            }
+            self.update_write_latency_locked(
+                meta,
+                disk_id,
+                data.len() as u64,
+                start.elapsed().as_secs_f64(),
+            );
+            return Ok(Shard {
+                slot,
+                disk_id: disk_id.to_string(),
+                location: Some(ShardLocation::RawExtent(extent)),
+                relpath: PathBuf::new(),
+                sha256: sha256_hex(data),
+                size: data.len(),
+            });
+        }
         let subdir = &stripe_id[stripe_id.len().saturating_sub(2)..];
         let relpath = PathBuf::from(format!("shards/{subdir}/{stripe_id}.{slot:03}.blk"));
         let path = self.shard_path_locked(meta, disk_id, &relpath);
@@ -3285,6 +3610,10 @@ impl ArgosFs {
         Ok(Shard {
             slot,
             disk_id: disk_id.to_string(),
+            location: Some(ShardLocation::HostPath {
+                disk_id: disk_id.to_string(),
+                relpath: relpath.clone(),
+            }),
             relpath,
             sha256: sha256_hex(data),
             size: data.len(),
@@ -3306,9 +3635,11 @@ impl ArgosFs {
             if request.exclude_disks.contains(disk_id) || disk.status != DiskStatus::Online {
                 continue;
             }
-            let disk_path = relative_or_absolute(&self.root, &disk.path);
-            if !disk_path.join("shards").exists() {
-                continue;
+            if meta.backend == BackendKind::Host {
+                let disk_path = relative_or_absolute(&self.root, &disk.path);
+                if !disk_path.join("shards").exists() {
+                    continue;
+                }
             }
             if !self.disk_has_capacity(meta, disk_id, disk, request.required_bytes) {
                 continue;
@@ -3510,18 +3841,62 @@ impl ArgosFs {
         }
     }
 
-    fn delete_blocks_locked(&self, meta: &Metadata, blocks: &[FileBlock]) {
+    fn delete_blocks_locked(&self, meta: &mut Metadata, blocks: &[FileBlock]) {
         for block in blocks {
             self.cache.remove(&format!(
                 "{}:{}:{}",
                 meta.uuid, block.stripe_id, block.raw_sha256
             ));
             for shard in &block.shards {
+                let _ = self.delete_shard_locked(meta, shard);
+            }
+        }
+    }
+
+    fn read_shard_locked(&self, meta: &Metadata, shard: &Shard) -> Result<Vec<u8>> {
+        match shard.location.as_ref() {
+            Some(ShardLocation::RawExtent(extent)) => {
+                let mut data = vec![0u8; shard.size];
+                self.backend
+                    .read_at(&extent.disk_id, extent.offset, &mut data)?;
+                Ok(data)
+            }
+            Some(ShardLocation::HostPath { disk_id, relpath }) => advanced_io::read_all(
+                &self.shard_path_locked(meta, disk_id, relpath),
+                shard.size,
+                meta.config.io_mode,
+                meta.config.zero_copy,
+            ),
+            None => advanced_io::read_all(
+                &self.shard_path_locked(meta, &shard.disk_id, &shard.relpath),
+                shard.size,
+                meta.config.io_mode,
+                meta.config.zero_copy,
+            ),
+        }
+    }
+
+    fn delete_shard_locked(&self, meta: &mut Metadata, shard: &Shard) -> Result<()> {
+        match shard.location.as_ref() {
+            Some(ShardLocation::RawExtent(extent)) => {
+                if let Some(allocator) = meta.raw_pool.allocators.get_mut(&extent.disk_id) {
+                    allocator::free(allocator, extent)?;
+                }
+                Ok(())
+            }
+            Some(ShardLocation::HostPath { disk_id, relpath }) => {
+                if let Some(path) = self.shard_path_if_disk_exists_locked(meta, disk_id, relpath) {
+                    let _ = fs::remove_file(path);
+                }
+                Ok(())
+            }
+            None => {
                 if let Some(path) =
                     self.shard_path_if_disk_exists_locked(meta, &shard.disk_id, &shard.relpath)
                 {
                     let _ = fs::remove_file(path);
                 }
+                Ok(())
             }
         }
     }
@@ -3529,10 +3904,11 @@ impl ArgosFs {
     fn account_blocks_locked(&self, meta: &mut Metadata, blocks: &[FileBlock], add: bool) {
         for shard in blocks.iter().flat_map(|block| block.shards.iter()) {
             if let Some(disk) = meta.disks.get_mut(&shard.disk_id) {
+                let accounted = shard_accounted_size(shard);
                 if add {
-                    disk.used_bytes = disk.used_bytes.saturating_add(shard.size as u64);
+                    disk.used_bytes = disk.used_bytes.saturating_add(accounted);
                 } else {
-                    disk.used_bytes = disk.used_bytes.saturating_sub(shard.size as u64);
+                    disk.used_bytes = disk.used_bytes.saturating_sub(accounted);
                 }
             }
         }
@@ -3793,6 +4169,16 @@ impl ArgosFs {
         let previous_txid = meta.txid;
         meta.txid += 1;
         meta.updated_at = now_f64();
+        if meta.backend != BackendKind::Host {
+            journal::prepare_metadata_integrity_with_previous(meta, previous_meta_hash.clone())?;
+            return raw_store::append_transaction(
+                &*self.backend,
+                &self.raw_superblocks,
+                meta,
+                action,
+                json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details}),
+            );
+        }
         let result = journal::append_transaction_checked(
             &self.root,
             meta,
@@ -3822,6 +4208,15 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
+        if meta.backend != BackendKind::Host {
+            return raw_store::append_transaction(
+                &*self.backend,
+                &self.raw_superblocks,
+                meta,
+                action,
+                details,
+            );
+        }
         journal::append_event(&self.root, meta, action, details)
     }
 
@@ -4158,6 +4553,83 @@ fn canonical_or_self(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn prepare_loop_images(paths: &[PathBuf], image_size: u64, force: bool) -> Result<()> {
+    if paths.is_empty() {
+        return Err(ArgosError::Invalid(
+            "at least one loop image is required".to_string(),
+        ));
+    }
+    if image_size < raw_format::MIN_DEVICE_BYTES {
+        return Err(ArgosError::Invalid(format!(
+            "loop image size must be at least {} bytes",
+            raw_format::MIN_DEVICE_BYTES
+        )));
+    }
+    for path in paths {
+        if path.exists() && !force && fs::metadata(path)?.len() > 0 {
+            return Err(ArgosError::AlreadyExists(format!(
+                "{} exists and is non-empty; pass --force to overwrite",
+                path.display()
+            )));
+        }
+        if let Some(parent) = path.parent() {
+            ensure_dir(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(force)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.set_len(image_size)?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+fn block_cache_root(volume_uuid: &str, paths: &[PathBuf]) -> PathBuf {
+    let mut root = paths
+        .first()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    root.push(".argosfs-block-cache");
+    root.push(volume_uuid);
+    root
+}
+
+fn root_inode(created_at: f64) -> Inode {
+    Inode {
+        id: ROOT_INO,
+        kind: NodeKind::Directory,
+        mode: libc::S_IFDIR | 0o755,
+        uid: current_uid(),
+        gid: current_gid(),
+        nlink: 2,
+        size: 0,
+        rdev: 0,
+        atime: created_at,
+        mtime: created_at,
+        ctime: created_at,
+        entries: BTreeMap::new(),
+        target: None,
+        blocks: Vec::new(),
+        xattrs: BTreeMap::new(),
+        posix_acl_access: None,
+        posix_acl_default: None,
+        nfs4_acl: None,
+        access_count: 0,
+        write_count: 0,
+        read_bytes: 0,
+        write_bytes: 0,
+        storage_class: StorageTier::Warm,
+        boot_critical: true,
+        workload_score: 0.0,
+        last_accessed_at: created_at,
+        last_written_at: created_at,
+    }
+}
+
 fn sync_directory(path: &Path) {
     if let Ok(dir) = fs::File::open(path) {
         let _ = dir.sync_all();
@@ -4169,12 +4641,20 @@ fn recompute_disk_usage_from_metadata(meta: &mut Metadata) {
     for inode in meta.inodes.values() {
         for block in &inode.blocks {
             for shard in &block.shards {
-                *referenced_usage.entry(shard.disk_id.clone()).or_default() += shard.size as u64;
+                *referenced_usage.entry(shard.disk_id.clone()).or_default() +=
+                    shard_accounted_size(shard);
             }
         }
     }
     for (disk_id, disk) in meta.disks.iter_mut() {
         disk.used_bytes = referenced_usage.get(disk_id).copied().unwrap_or(0);
+    }
+}
+
+fn shard_accounted_size(shard: &Shard) -> u64 {
+    match shard.location.as_ref() {
+        Some(ShardLocation::RawExtent(extent)) => extent.length,
+        _ => shard.size as u64,
     }
 }
 

@@ -3,7 +3,68 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub const FORMAT_VERSION: &str = "argosfs-rust-v1";
+pub const RAW_FORMAT_VERSION: u32 = 1;
 pub type InodeId = u64;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FaultPoint {
+    BeforeDataWrite,
+    AfterDataWriteBeforeFlush,
+    AfterDataFlushBeforeJournalCommit,
+    AfterJournalCommitBeforeMetadataCommit,
+    AfterMetadataCommitBeforeSuperblockUpdate,
+    DuringReplay,
+}
+
+impl FaultPoint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeDataWrite => "before-data-write",
+            Self::AfterDataWriteBeforeFlush => "after-data-write-before-flush",
+            Self::AfterDataFlushBeforeJournalCommit => "after-data-flush-before-journal-commit",
+            Self::AfterJournalCommitBeforeMetadataCommit => {
+                "after-journal-commit-before-metadata-commit"
+            }
+            Self::AfterMetadataCommitBeforeSuperblockUpdate => {
+                "after-metadata-commit-before-superblock-update"
+            }
+            Self::DuringReplay => "during-replay",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackendKind {
+    #[default]
+    Host,
+    LoopBlock,
+    RawBlock,
+}
+
+impl BackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::LoopBlock => "loop",
+            Self::RawBlock => "raw",
+        }
+    }
+}
+
+impl std::str::FromStr for BackendKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "host" | "hostfs" => Ok(Self::Host),
+            "loop" | "loop-block" | "loopblock" => Ok(Self::LoopBlock),
+            "raw" | "raw-block" | "rawblock" => Ok(Self::RawBlock),
+            other => Err(format!("unknown backend: {other}")),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -311,9 +372,28 @@ pub struct Disk {
 pub struct Shard {
     pub slot: usize,
     pub disk_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<ShardLocation>,
     pub relpath: PathBuf,
     pub sha256: String,
     pub size: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ShardLocation {
+    HostPath { disk_id: String, relpath: PathBuf },
+    RawExtent(PhysicalExtent),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PhysicalExtent {
+    pub disk_id: String,
+    pub offset: u64,
+    pub length: u64,
+    pub generation: u64,
+    #[serde(default)]
+    pub flags: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -384,6 +464,10 @@ pub struct Inode {
 pub struct Metadata {
     pub format: String,
     pub uuid: String,
+    #[serde(default)]
+    pub backend: BackendKind,
+    #[serde(default)]
+    pub raw_pool: RawPoolMetadata,
     pub created_at: f64,
     pub updated_at: f64,
     pub txid: u64,
@@ -396,6 +480,37 @@ pub struct Metadata {
     pub integrity: MetadataIntegrity,
     pub disks: BTreeMap<String, Disk>,
     pub inodes: BTreeMap<InodeId, Inode>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RawPoolMetadata {
+    pub pool_name: String,
+    #[serde(default)]
+    pub format_version: u32,
+    #[serde(default)]
+    pub clean: bool,
+    #[serde(default)]
+    pub dirty_since_txid: u64,
+    #[serde(default)]
+    pub mount_generation: u64,
+    #[serde(default)]
+    pub allocators: BTreeMap<String, RawAllocatorState>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RawAllocatorState {
+    pub block_size: u64,
+    pub data_start: u64,
+    pub data_end: u64,
+    pub next_offset: u64,
+    #[serde(default)]
+    pub free_extents: Vec<RawFreeExtent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RawFreeExtent {
+    pub offset: u64,
+    pub length: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
