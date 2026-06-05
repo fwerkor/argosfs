@@ -298,6 +298,17 @@ prepare_new_root_dev() {
 	[ -d "$sysroot/dev" ]
 }
 
+prepare_new_root_runtime_dirs() {
+	mkdir -p "$sysroot/tmp" "$sysroot/run"
+	chmod 1777 "$sysroot/tmp" 2>/dev/null || true
+
+	mkdir -p "$sysroot/tmp/lock" "$sysroot/tmp/log" "$sysroot/tmp/run" \
+		"$sysroot/tmp/state" "$sysroot/tmp/ubus" "$sysroot/var/run/ubus"
+	chmod 0755 "$sysroot/tmp/run" "$sysroot/var/run" 2>/dev/null || true
+	chmod 0755 "$sysroot/var/run/ubus" 2>/dev/null || true
+	chown 81:81 "$sysroot/var/run/ubus" 2>/dev/null || true
+}
+
 mark_argosfs_root_active() {
 	mkdir -p "$sysroot/run"
 	: >"$sysroot/run/argosfs-root-active" 2>/dev/null || true
@@ -305,6 +316,7 @@ mark_argosfs_root_active() {
 
 prepare_switch_root_mounts() {
 	mkdir -p "$sysroot/proc" "$sysroot/sys" "$sysroot/dev" "$sysroot/run"
+	prepare_new_root_runtime_dirs
 	prepare_new_root_dev || emergency "failed to prepare /dev"
 	move_mount_or_mount /run "$sysroot/run" tmpfs tmpfs || emergency "failed to hand off /run"
 	mark_argosfs_root_active
