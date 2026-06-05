@@ -617,6 +617,7 @@ fn main() -> Result<()> {
             let fs = open_backend(None, backend, images, devices, true)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             let disk_id = fs.add_block_device(device, image_size, force)?;
+            fs.sync()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({"disk_id": disk_id}))?
@@ -632,6 +633,7 @@ fn main() -> Result<()> {
             let fs = open_backend(None, backend, images, devices, true)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             let rewritten = fs.drain_disk(&device)?;
+            fs.sync()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -652,6 +654,7 @@ fn main() -> Result<()> {
             let fs = open_backend(None, backend, images.clone(), devices.clone(), true)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             let new_id = fs.add_block_device(new.clone(), image_size, force)?;
+            fs.sync()?;
             drop(fs);
             match backend {
                 BackendKind::LoopBlock => images.push(new),
@@ -661,6 +664,7 @@ fn main() -> Result<()> {
             let fs = open_backend(None, backend, images, devices, true)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             let rewritten = fs.remove_disk(&old)?;
+            fs.sync()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -680,6 +684,7 @@ fn main() -> Result<()> {
             let fs = open_backend(None, backend, images, devices, true)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             let rewritten = fs.remove_disk(&device)?;
+            fs.sync()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -736,10 +741,9 @@ fn main() -> Result<()> {
         } => {
             let fs = open_backend(None, backend, images, devices, true)?;
             validate_requested_pool(&fs, pool.as_deref())?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&fs.transaction_report()?)?
-            );
+            let report = fs.transaction_report()?;
+            fs.sync()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::MountRecovery {
             backend,
@@ -842,6 +846,7 @@ fn main() -> Result<()> {
             let (root, source, dest) = import_args(backend, args)?;
             let fs = open_backend(root, backend, images, devices, true)?;
             import_tree(&fs, &source, &dest)?;
+            fs.sync()?;
         }
         Command::ExportTree {
             backend,
@@ -962,6 +967,9 @@ fn main() -> Result<()> {
             let fs = open_backend(root, backend, images, devices, repair || remove_orphans)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             let report = fs.fsck(repair, remove_orphans)?;
+            if repair || remove_orphans {
+                fs.sync()?;
+            }
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Scrub {
@@ -974,6 +982,7 @@ fn main() -> Result<()> {
             let fs = open_backend(root, backend, images, devices, true)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             let report = fs.scrub()?;
+            fs.sync()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Rebalance { root } => {
@@ -996,6 +1005,7 @@ fn main() -> Result<()> {
             let fs = open_backend(root, backend, images, devices, true)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             let report = fs.reshape_layout(k, m, max_files)?;
+            fs.sync()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Autopilot {

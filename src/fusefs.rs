@@ -66,6 +66,12 @@ impl ArgosFuse {
     }
 }
 
+impl Drop for ArgosFuse {
+    fn drop(&mut self) {
+        let _ = self.volume.sync();
+    }
+}
+
 pub fn mount(
     volume_root: impl AsRef<Path>,
     mountpoint: impl AsRef<Path>,
