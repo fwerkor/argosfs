@@ -260,13 +260,42 @@ main() {
 	fi
 	mount_mode="$mode"
 	[ "$mount_mode" = "recovery" ] && mount_mode="ro"
+	mount_log="$run_dir/argosfs-mount.log"
+	rm -f "$mount_log"
 	# shellcheck disable=SC2086
-	"$argosfs_bin" mount-root $args $pool_filter --target "$sysroot" --mode "$mount_mode" --foreground -o allow_other &
-	for _ in $(seq 1 100); do
+	"$argosfs_bin" mount-root $args $pool_filter --target "$sysroot" --mode "$mount_mode" --foreground -o allow_other >"$mount_log" 2>&1 &
+	mount_pid="$!"
+	tries=0
+	while [ "$tries" -lt 30 ]; do
 		[ -x "$sysroot/sbin/init" ] || [ -x "$sysroot/init" ] || [ -x "$sysroot/lib/systemd/systemd" ] && break
-		sleep 0.1
+		if ! kill -0 "$mount_pid" 2>/dev/null; then
+			mount_status=0
+			wait "$mount_pid" || mount_status="$?"
+			log "mount-root exited before init appeared status=$mount_status"
+			if [ -s "$mount_log" ]; then
+				while IFS= read -r line; do
+					log "mount-root: $line"
+				done <"$mount_log"
+			fi
+			umount "$sysroot" 2>/dev/null || umount -l "$sysroot" 2>/dev/null || true
+			emergency "argosfs mount-root failed"
+		fi
+		tries=$((tries + 1))
+		sleep 1
 	done
-	[ -x "$sysroot/sbin/init" ] || [ -x "$sysroot/init" ] || [ -x "$sysroot/lib/systemd/systemd" ] || emergency "no init found in $sysroot"
+	if ! [ -x "$sysroot/sbin/init" ] && ! [ -x "$sysroot/init" ] && ! [ -x "$sysroot/lib/systemd/systemd" ]; then
+		log "mount-root did not expose init before timeout"
+		kill "$mount_pid" 2>/dev/null || true
+		wait "$mount_pid" 2>/dev/null || true
+		umount "$sysroot" 2>/dev/null || umount -l "$sysroot" 2>/dev/null || true
+		if [ -s "$mount_log" ]; then
+			while IFS= read -r line; do
+				log "mount-root: $line"
+			done <"$mount_log"
+		fi
+		emergency "no init found in $sysroot"
+	fi
+	log "mounted ArgosFS root at $sysroot pid=$mount_pid"
 	exec switch_root "$sysroot" /sbin/init
 }
 
