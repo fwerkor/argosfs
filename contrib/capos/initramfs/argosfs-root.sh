@@ -80,6 +80,22 @@ pool_args() {
 	fi
 }
 
+is_mounted() {
+	target="$1"
+	[ -r /proc/mounts ] || return 1
+	while read -r _ mount_path _; do
+		[ "$mount_path" = "$target" ] && return 0
+	done </proc/mounts
+	return 1
+}
+
+mount_if_needed() {
+	target="$1"
+	fs_type="$2"
+	source="$3"
+	is_mounted "$target" || mount -t "$fs_type" "$source" "$target" || is_mounted "$target"
+}
+
 main() {
 	parse_cmdline
 	parse_args "$@"
@@ -89,10 +105,10 @@ main() {
 	fi
 	mkdir -p "$(dirname "$log_file")" "$run_dir" "$sysroot" /proc /sys /dev /run
 	if [ "$dry_run" != "1" ]; then
-		mountpoint -q /proc || mount -t proc proc /proc
-		mountpoint -q /sys || mount -t sysfs sysfs /sys
-		mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev || true
-		mountpoint -q /run || mount -t tmpfs tmpfs /run || true
+		mount_if_needed /proc proc proc || emergency "failed to mount /proc"
+		mount_if_needed /sys sysfs sysfs || emergency "failed to mount /sys"
+		mount_if_needed /dev devtmpfs devtmpfs || true
+		mount_if_needed /run tmpfs tmpfs || true
 		modprobe fuse 2>/dev/null || true
 	fi
 
