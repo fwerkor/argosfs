@@ -6,7 +6,7 @@ artifacts="${ARGOSFS_TEST_ARTIFACTS:-$repo/target/argosfs-test-artifacts/initram
 rm -rf "$artifacts"
 mkdir -p "$artifacts/source/sbin" "$artifacts/sysroot" "$artifacts/run"
 
-bash -n "$repo/contrib/capos/initramfs/argosfs-root.sh"
+sh -n "$repo/contrib/capos/initramfs/argosfs-root.sh"
 cargo build --manifest-path "$repo/Cargo.toml" --bin argosfs
 argosfs="$repo/target/debug/argosfs"
 
