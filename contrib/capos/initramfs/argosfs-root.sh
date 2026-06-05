@@ -202,6 +202,31 @@ mount_if_needed() {
 	is_mounted "$target" || mount -t "$fs_type" "$source" "$target" || is_mounted "$target"
 }
 
+ensure_block_device_nodes() {
+	for uevent in "$sys_class_block"/*/uevent; do
+		[ -r "$uevent" ] || continue
+		devname=""
+		major=""
+		minor=""
+		while IFS='=' read -r key value; do
+			case "$key" in
+				DEVNAME) devname="$value" ;;
+				MAJOR) major="$value" ;;
+				MINOR) minor="$value" ;;
+			esac
+		done <"$uevent"
+		[ -n "$devname" ] || continue
+		[ -n "$major" ] || continue
+		[ -n "$minor" ] || continue
+		node="$dev_root/$devname"
+		[ -b "$node" ] && continue
+		mkdir -p "$(dirname "$node")"
+		rm -f "$node" 2>/dev/null || true
+		mknod "$node" b "$major" "$minor" 2>/dev/null || true
+		chmod 0600 "$node" 2>/dev/null || true
+	done
+}
+
 ensure_fuse_device() {
 	fuse_dev="$dev_root/fuse"
 	[ -c "$fuse_dev" ] && return 0
@@ -230,6 +255,7 @@ main() {
 		mount_if_needed /dev devtmpfs devtmpfs || true
 		mount_if_needed /run tmpfs tmpfs || true
 		modprobe fuse 2>/dev/null || true
+		ensure_block_device_nodes
 		ensure_fuse_device
 	fi
 
