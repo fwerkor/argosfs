@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 log_file="${ARGOSFS_INITRD_LOG:-/run/argosfs-initrd.log}"
 run_dir="${ARGOSFS_INITRD_RUN_DIR:-/run}"
@@ -46,12 +46,18 @@ parse_args() {
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			--dry-run) dry_run="1"; shift ;;
-			--images) images="$2"; shift 2 ;;
-			--devices) devices="$2"; shift 2 ;;
-			--pool) pool="$2"; shift 2 ;;
-			--sysroot|--root) sysroot="$2"; shift 2 ;;
-			--mode) mode="$2"; shift 2 ;;
-			--argosfs-bin) argosfs_bin="$2"; shift 2 ;;
+			--images|--devices|--pool|--sysroot|--root|--mode|--argosfs-bin)
+				[ "$#" -ge 2 ] || emergency "$1 requires a value"
+				case "$1" in
+					--images) images="$2" ;;
+					--devices) devices="$2" ;;
+					--pool) pool="$2" ;;
+					--sysroot|--root) sysroot="$2" ;;
+					--mode) mode="$2" ;;
+					--argosfs-bin) argosfs_bin="$2" ;;
+				esac
+				shift 2
+				;;
 			--debug) debug="1"; shift ;;
 			*) emergency "unknown argument $1" ;;
 		esac

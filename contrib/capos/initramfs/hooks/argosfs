@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 dest="${DESTDIR:-${1:-}}"
 if [ -z "$dest" ]; then
