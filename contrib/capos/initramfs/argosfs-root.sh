@@ -186,6 +186,15 @@ pool_args() {
 	fi
 }
 
+resolve_argosfs_binary() {
+	case "$argosfs_bin" in
+		*/*) return 0 ;;
+	esac
+	resolved="$(command -v "$argosfs_bin" 2>/dev/null || true)"
+	[ -n "$resolved" ] || emergency "argosfs binary not found in PATH: $argosfs_bin"
+	argosfs_bin="$resolved"
+}
+
 is_mounted() {
 	target="$1"
 	[ -r /proc/mounts ] || return 1
@@ -266,6 +275,7 @@ main() {
 	parse_cmdline
 	parse_args "$@"
 	[ "$debug" = "1" ] && set -x
+	resolve_argosfs_binary
 	if [ "$dry_run" = "1" ] && [ -z "${ARGOSFS_INITRD_RUN_DIR:-}" ]; then
 		run_dir="$sysroot/run"
 	fi
