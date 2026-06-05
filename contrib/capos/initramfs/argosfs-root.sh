@@ -98,6 +98,48 @@ resolve_by_partuuid() {
 	return 1
 }
 
+part_number_from_partuuid() {
+	partuuid="$1"
+	case "$partuuid" in
+		*-[0-9][0-9])
+			partn="${partuuid##*-}"
+			partn="${partn#0}"
+			[ -n "$partn" ] || partn="0"
+			printf '%s\n' "$partn"
+			return 0
+			;;
+	esac
+	return 1
+}
+
+resolve_by_part_number() {
+	want="$1"
+	match=""
+	matches=0
+	for uevent in "$sys_class_block"/*/uevent; do
+		[ -r "$uevent" ] || continue
+		devname=""
+		devtype=""
+		partn=""
+		while IFS='=' read -r key value; do
+			case "$key" in
+				DEVNAME) devname="$value" ;;
+				DEVTYPE) devtype="$value" ;;
+				PARTN) partn="$value" ;;
+			esac
+		done <"$uevent"
+		[ "$devtype" = "partition" ] || continue
+		[ "$partn" = "$want" ] || continue
+		[ -n "$devname" ] || continue
+		candidate="$dev_root/$devname"
+		[ -e "$candidate" ] || continue
+		match="$candidate"
+		matches=$((matches + 1))
+	done
+	[ "$matches" -eq 1 ] || return 1
+	printf '%s\n' "$match"
+}
+
 resolve_device_path() {
 	path="$1"
 	[ -e "$path" ] && {
@@ -109,6 +151,12 @@ resolve_device_path() {
 			partuuid="${path##*/}"
 			if resolved="$(resolve_by_partuuid "$partuuid")"; then
 				log "resolved $path to $resolved"
+				printf '%s\n' "$resolved"
+				return 0
+			fi
+			if partn="$(part_number_from_partuuid "$partuuid")" &&
+				resolved="$(resolve_by_part_number "$partn")"; then
+				log "resolved $path by partition number $partn to $resolved"
 				printf '%s\n' "$resolved"
 				return 0
 			fi
