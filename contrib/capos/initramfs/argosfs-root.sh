@@ -202,6 +202,18 @@ mount_if_needed() {
 	is_mounted "$target" || mount -t "$fs_type" "$source" "$target" || is_mounted "$target"
 }
 
+ensure_fuse_device() {
+	fuse_dev="$dev_root/fuse"
+	[ -c "$fuse_dev" ] && return 0
+	rm -f "$fuse_dev" 2>/dev/null || true
+	if command -v mknod >/dev/null 2>&1; then
+		mknod "$fuse_dev" c 10 229 2>/dev/null || true
+		chmod 0666 "$fuse_dev" 2>/dev/null || true
+	fi
+	[ -c "$fuse_dev" ] || emergency "missing fuse device node at $fuse_dev"
+	log "fuse device ready at $fuse_dev"
+}
+
 main() {
 	parse_cmdline
 	parse_args "$@"
@@ -216,6 +228,7 @@ main() {
 		mount_if_needed /dev devtmpfs devtmpfs || true
 		mount_if_needed /run tmpfs tmpfs || true
 		modprobe fuse 2>/dev/null || true
+		ensure_fuse_device
 	fi
 
 	[ -z "$images" ] || images="$(resolve_device_list "$images")"
