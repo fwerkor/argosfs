@@ -62,10 +62,15 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
         std::process::id(),
         now_f64().to_bits()
     ));
-    {
+    let write_result = (|| -> Result<()> {
         let mut file = File::create(&tmp)?;
         file.write_all(data)?;
         file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
     fs::rename(&tmp, path)?;
     if let Some(parent) = path.parent() {

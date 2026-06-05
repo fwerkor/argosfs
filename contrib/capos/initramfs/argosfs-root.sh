@@ -221,6 +221,8 @@ main() {
 	if [ "$dry_run" = "1" ] && [ -z "${ARGOSFS_INITRD_RUN_DIR:-}" ]; then
 		run_dir="$sysroot/run"
 	fi
+	: "${ARGOSFS_L2_CACHE_BYTES:=0}"
+	export ARGOSFS_L2_CACHE_BYTES
 	mkdir -p "$(dirname "$log_file")" "$run_dir" "$sysroot" /proc /sys /dev /run
 	if [ "$dry_run" != "1" ]; then
 		mount_if_needed /proc proc proc || emergency "failed to mount /proc"
