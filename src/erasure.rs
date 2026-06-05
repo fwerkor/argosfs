@@ -2,14 +2,21 @@ use crate::error::{ArgosError, Result};
 use erase::galois_8::ReedSolomon;
 
 pub struct RsCodec {
-    inner: ReedSolomon,
+    inner: Option<ReedSolomon>,
     k: usize,
     m: usize,
 }
 
 impl RsCodec {
     pub fn new(k: usize, m: usize) -> Result<Self> {
-        let inner = ReedSolomon::new(k, m).map_err(|err| ArgosError::Erasure(err.to_string()))?;
+        if k == 0 {
+            return Err(ArgosError::Invalid("k must be positive".to_string()));
+        }
+        let inner = if m == 0 {
+            None
+        } else {
+            Some(ReedSolomon::new(k, m).map_err(|err| ArgosError::Erasure(err.to_string()))?)
+        };
         Ok(Self { inner, k, m })
     }
 
@@ -32,8 +39,13 @@ impl RsCodec {
             ));
         }
         let mut shards = data_shards.to_vec();
+        if self.m == 0 {
+            return Ok(shards);
+        }
         shards.extend((0..self.m).map(|_| vec![0u8; shard_size]));
         self.inner
+            .as_ref()
+            .expect("m > 0 codec has Reed-Solomon inner")
             .encode(&mut shards)
             .map_err(|err| ArgosError::Erasure(err.to_string()))?;
         Ok(shards)
@@ -48,9 +60,19 @@ impl RsCodec {
             )));
         }
         let mut refs: Vec<Option<Vec<u8>>> = shards;
-        self.inner
-            .reconstruct(&mut refs)
-            .map_err(|err| ArgosError::Erasure(err.to_string()))?;
+        if self.m == 0 {
+            if refs.iter().any(Option::is_none) {
+                return Err(ArgosError::Erasure(
+                    "layout has no parity shards for reconstruction".to_string(),
+                ));
+            }
+        } else {
+            self.inner
+                .as_ref()
+                .expect("m > 0 codec has Reed-Solomon inner")
+                .reconstruct(&mut refs)
+                .map_err(|err| ArgosError::Erasure(err.to_string()))?;
+        }
         refs.into_iter()
             .map(|shard| {
                 shard.ok_or_else(|| {

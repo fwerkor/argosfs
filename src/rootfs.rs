@@ -1,5 +1,5 @@
 use crate::error::{ArgosError, Result};
-use crate::types::{BackendKind, DiskStatus};
+use crate::types::{BackendKind, DiskStatus, Metadata};
 use crate::ArgosFs;
 use serde::Serialize;
 
@@ -74,10 +74,11 @@ pub fn preflight_volume(fs: &ArgosFs, mode: RootMountMode) -> Result<RootPreflig
             .any(|disk| disk.status != DiskStatus::Online);
     preflight_root(backend, mode, degraded)?;
 
-    if missing_devices > meta.config.m {
+    let redundancy = minimum_active_redundancy(&meta);
+    if missing_devices > redundancy {
         return Err(ArgosError::DegradedPool(format!(
             "rootfs has {missing_devices} missing/offline devices but only {} parity devices",
-            meta.config.m
+            redundancy
         )));
     }
     if mode == RootMountMode::DegradedReadWrite && !degraded {
@@ -122,7 +123,7 @@ pub fn preflight_volume(fs: &ArgosFs, mode: RootMountMode) -> Result<RootPreflig
         total_devices,
         available_devices,
         missing_devices,
-        redundancy: meta.config.m,
+        redundancy,
         degraded,
         readonly: matches!(
             mode,
@@ -132,4 +133,30 @@ pub fn preflight_volume(fs: &ArgosFs, mode: RootMountMode) -> Result<RootPreflig
         invalid_journal_entries: report.invalid_entries,
         errors: report.errors,
     })
+}
+
+fn minimum_active_redundancy(meta: &Metadata) -> usize {
+    let mut values = meta
+        .inodes
+        .values()
+        .flat_map(|inode| inode.blocks.iter())
+        .filter_map(|block| {
+            let layout_id = if block.layout_id.is_empty() {
+                "layout-0000"
+            } else {
+                &block.layout_id
+            };
+            meta.layouts.get(layout_id).map(|layout| layout.m)
+        })
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        values.push(
+            meta.layouts
+                .get(&meta.current_write_layout)
+                .or_else(|| meta.layouts.get("layout-0000"))
+                .map(|layout| layout.m)
+                .unwrap_or(meta.config.m),
+        );
+    }
+    values.into_iter().min().unwrap_or(0)
 }

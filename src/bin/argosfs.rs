@@ -375,6 +375,23 @@ enum Command {
     Rebalance {
         root: PathBuf,
     },
+    Reshape {
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "host")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long)]
+        k: usize,
+        #[arg(long)]
+        m: usize,
+        #[arg(long)]
+        max_files: Option<usize>,
+    },
     Autopilot {
         root: PathBuf,
         #[arg(long)]
@@ -965,6 +982,21 @@ fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({"rewritten_files": rewritten}))?
             );
+        }
+        Command::Reshape {
+            root,
+            backend,
+            images,
+            devices,
+            pool,
+            k,
+            m,
+            max_files,
+        } => {
+            let fs = open_backend(root, backend, images, devices, true)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            let report = fs.reshape_layout(k, m, max_files)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Autopilot {
             root,
