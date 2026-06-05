@@ -1,0 +1,17 @@
+[Unit]
+Description=ArgosFS rootfs post-switch verification
+DefaultDependencies=no
+After=initrd-switch-root.target
+Before=local-fs.target
+ConditionPathExists=/usr/sbin/argosfs
+
+[Service]
+Type=oneshot
+Environment=ARGOSFS_BACKEND=raw
+Environment=ARGOSFS_MODE=ro
+Environment=ARGOSFS_DEVICES=
+ExecStart=/bin/sh -c 'test -n "$ARGOSFS_DEVICES" && /usr/sbin/argosfs preflight-root --backend "$ARGOSFS_BACKEND" --devices "$ARGOSFS_DEVICES" --mode "$ARGOSFS_MODE" || exit 0'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

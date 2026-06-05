@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+dest="${DESTDIR:-${1:-}}"
+if [ -z "$dest" ]; then
+	printf '%s\n' "usage: DESTDIR=/path/to/initramfs $0" >&2
+	exit 2
+fi
+
+install -d "$dest/usr/sbin" "$dest/lib/argosfs" "$dest/etc/modules-load.d"
+install -m 0755 "${ARGOSFS_BIN:-/usr/sbin/argosfs}" "$dest/usr/sbin/argosfs"
+install -m 0755 "${ARGOSFS_INITRD_SCRIPT:-/lib/argosfs/argosfs-root.sh}" \
+	"$dest/lib/argosfs/argosfs-root.sh"
+printf '%s\n' fuse >"$dest/etc/modules-load.d/argosfs.conf"

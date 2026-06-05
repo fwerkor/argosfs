@@ -73,6 +73,15 @@ pub fn mount(
     options: Vec<String>,
 ) -> Result<()> {
     let volume = ArgosFs::open(volume_root)?;
+    mount_volume(volume, mountpoint, foreground, options)
+}
+
+pub fn mount_volume(
+    volume: ArgosFs,
+    mountpoint: impl AsRef<Path>,
+    foreground: bool,
+    options: Vec<String>,
+) -> Result<()> {
     let mut mount_options = vec![
         MountOption::FSName("argosfs".to_string()),
         MountOption::Subtype("argosfs".to_string()),

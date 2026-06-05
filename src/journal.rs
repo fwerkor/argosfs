@@ -376,6 +376,17 @@ pub fn canonical_metadata_hash(meta: &Metadata) -> Result<String> {
     Ok(sha256_hex(&serde_json::to_vec_pretty(&round_trip)?))
 }
 
+pub fn prepare_metadata_integrity_for_external_store(meta: &mut Metadata) -> Result<()> {
+    prepare_metadata_integrity(meta, String::new())
+}
+
+pub fn prepare_metadata_integrity_with_previous(
+    meta: &mut Metadata,
+    previous_meta_hash: String,
+) -> Result<()> {
+    prepare_metadata_integrity(meta, previous_meta_hash)
+}
+
 pub fn inject_crash(point: &str) -> Result<()> {
     let thread_spec = THREAD_CRASH_POINT.with(|value| value.borrow().clone());
     let spec = match thread_spec {

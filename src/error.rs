@@ -40,6 +40,22 @@ pub enum ArgosError {
     InjectedCrash(String),
     #[error("unsupported operation: {0}")]
     Unsupported(String),
+    #[error("checksum error: {0}")]
+    Checksum(String),
+    #[error("corrupted metadata: {0}")]
+    CorruptedMetadata(String),
+    #[error("incompatible format: {0}")]
+    IncompatibleFormat(String),
+    #[error("missing device: {0}")]
+    MissingDevice(String),
+    #[error("degraded pool: {0}")]
+    DegradedPool(String),
+    #[error("unsafe mount: {0}")]
+    UnsafeMount(String),
+    #[error("journal replay required: {0}")]
+    JournalReplayRequired(String),
+    #[error("readonly mount required: {0}")]
+    ReadonlyRequired(String),
 }
 
 impl ArgosError {
@@ -58,6 +74,14 @@ impl ArgosError {
             ArgosError::Conflict(_) => libc::EAGAIN,
             ArgosError::InjectedCrash(_) => libc::EIO,
             ArgosError::Unsupported(_) => libc::ENOTSUP,
+            ArgosError::Checksum(_) => libc::EIO,
+            ArgosError::CorruptedMetadata(_) => libc::EIO,
+            ArgosError::IncompatibleFormat(_) => libc::EINVAL,
+            ArgosError::MissingDevice(_) => libc::ENODEV,
+            ArgosError::DegradedPool(_) => libc::EIO,
+            ArgosError::UnsafeMount(_) => libc::EROFS,
+            ArgosError::JournalReplayRequired(_) => libc::EAGAIN,
+            ArgosError::ReadonlyRequired(_) => libc::EROFS,
             ArgosError::Io(err) => err.raw_os_error().unwrap_or(libc::EIO),
             _ => libc::EIO,
         }

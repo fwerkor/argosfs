@@ -1,0 +1,10 @@
+[Unit]
+Description=ArgosFS rootfs health check
+After=local-fs.target
+ConditionPathExists=/usr/sbin/argosfs
+
+[Service]
+Type=oneshot
+Environment=ARGOSFS_BACKEND=raw
+Environment=ARGOSFS_DEVICES=
+ExecStart=/bin/sh -c 'test -n "$ARGOSFS_DEVICES" && /usr/sbin/argosfs fsck --backend "$ARGOSFS_BACKEND" --devices "$ARGOSFS_DEVICES" || exit 0'
