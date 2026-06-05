@@ -216,21 +216,99 @@ move_mount_or_mount() {
 	target="$2"
 	fs_type="$3"
 	fs_source="$4"
+	tries=0
 	mkdir -p "$target"
-	if is_mounted "$source"; then
-		mount -o move "$source" "$target" 2>/dev/null ||
-			mount --move "$source" "$target" 2>/dev/null ||
-			return 1
-	else
-		mount_if_needed "$target" "$fs_type" "$fs_source" || return 1
+	while [ "$tries" -lt 10 ]; do
+		is_mounted "$target" && return 0
+		if is_mounted "$source"; then
+			mount -o move "$source" "$target" 2>/dev/null ||
+				mount --move "$source" "$target" 2>/dev/null ||
+				true
+			is_mounted "$target" && return 0
+		else
+			mount_if_needed "$target" "$fs_type" "$fs_source" && return 0
+		fi
+		tries=$((tries + 1))
+		sleep 1
+	done
+	return 1
+}
+
+create_dev_node() {
+	node="$1"
+	node_type="$2"
+	major="$3"
+	minor="$4"
+	mode="$5"
+	[ -e "$node" ] || mknod "$node" "$node_type" "$major" "$minor" 2>/dev/null || true
+	chmod "$mode" "$node" 2>/dev/null || true
+}
+
+populate_block_device_nodes() {
+	root="$1"
+	for uevent in "$sys_class_block"/*/uevent; do
+		[ -r "$uevent" ] || continue
+		devname=""
+		major=""
+		minor=""
+		while IFS='=' read -r key value; do
+			case "$key" in
+				DEVNAME) devname="$value" ;;
+				MAJOR) major="$value" ;;
+				MINOR) minor="$value" ;;
+			esac
+		done <"$uevent"
+		[ -n "$devname" ] || continue
+		[ -n "$major" ] || continue
+		[ -n "$minor" ] || continue
+		node="$root/$devname"
+		[ -b "$node" ] && continue
+		mkdir -p "$(dirname "$node")"
+		rm -f "$node" 2>/dev/null || true
+		mknod "$node" b "$major" "$minor" 2>/dev/null || true
+		chmod 0600 "$node" 2>/dev/null || true
+	done
+}
+
+populate_minimal_dev_nodes() {
+	root="$1"
+	mkdir -p "$root"
+	create_dev_node "$root/console" c 5 1 0600
+	create_dev_node "$root/tty" c 5 0 0666
+	create_dev_node "$root/ttyS0" c 4 64 0660
+	create_dev_node "$root/null" c 1 3 0666
+	create_dev_node "$root/zero" c 1 5 0666
+	create_dev_node "$root/random" c 1 8 0666
+	create_dev_node "$root/urandom" c 1 9 0666
+	create_dev_node "$root/fuse" c 10 229 0666
+	populate_block_device_nodes "$root"
+}
+
+prepare_new_root_dev() {
+	if is_mounted /dev; then
+		move_mount_or_mount /dev "$sysroot/dev" devtmpfs devtmpfs || return 1
+		return 0
 	fi
+	mkdir -p "$sysroot/dev"
+	is_mounted "$sysroot/dev" ||
+		mount -t devtmpfs devtmpfs "$sysroot/dev" 2>/dev/null ||
+		mount -t tmpfs tmpfs "$sysroot/dev" 2>/dev/null ||
+		true
+	populate_minimal_dev_nodes "$sysroot/dev"
+	[ -d "$sysroot/dev" ]
+}
+
+mark_argosfs_root_active() {
+	mkdir -p "$sysroot/run"
+	: >"$sysroot/run/argosfs-root-active" 2>/dev/null || true
 }
 
 prepare_switch_root_mounts() {
 	mkdir -p "$sysroot/proc" "$sysroot/sys" "$sysroot/dev" "$sysroot/run"
-	move_mount_or_mount /sys "$sysroot/sys" sysfs sysfs || emergency "failed to hand off /sys"
-	move_mount_or_mount /dev "$sysroot/dev" devtmpfs devtmpfs || emergency "failed to hand off /dev"
+	prepare_new_root_dev || emergency "failed to prepare /dev"
 	move_mount_or_mount /run "$sysroot/run" tmpfs tmpfs || emergency "failed to hand off /run"
+	mark_argosfs_root_active
+	move_mount_or_mount /sys "$sysroot/sys" sysfs sysfs || emergency "failed to hand off /sys"
 	move_mount_or_mount /proc "$sysroot/proc" proc proc || emergency "failed to hand off /proc"
 }
 
