@@ -3,6 +3,8 @@ set -eu
 
 log_file="${ARGOSFS_INITRD_LOG:-/run/argosfs-initrd.log}"
 run_dir="${ARGOSFS_INITRD_RUN_DIR:-/run}"
+dev_root="${ARGOSFS_INITRD_DEV_ROOT:-/dev}"
+sys_class_block="${ARGOSFS_INITRD_SYS_CLASS_BLOCK:-/sys/class/block}"
 sysroot="/sysroot"
 mode="rw"
 pool=""
@@ -74,6 +76,62 @@ backend_args() {
 	fi
 }
 
+resolve_by_partuuid() {
+	want="$1"
+	for uevent in "$sys_class_block"/*/uevent; do
+		[ -r "$uevent" ] || continue
+		devname=""
+		partuuid=""
+		while IFS='=' read -r key value; do
+			case "$key" in
+				DEVNAME) devname="$value" ;;
+				PARTUUID) partuuid="$value" ;;
+			esac
+		done <"$uevent"
+		[ "$partuuid" = "$want" ] || continue
+		[ -n "$devname" ] || continue
+		candidate="$dev_root/$devname"
+		[ -e "$candidate" ] || continue
+		printf '%s\n' "$candidate"
+		return 0
+	done
+	return 1
+}
+
+resolve_device_path() {
+	path="$1"
+	[ -e "$path" ] && {
+		printf '%s\n' "$path"
+		return 0
+	}
+	case "$path" in
+		/dev/disk/by-partuuid/*)
+			partuuid="${path##*/}"
+			if resolved="$(resolve_by_partuuid "$partuuid")"; then
+				log "resolved $path to $resolved"
+				printf '%s\n' "$resolved"
+				return 0
+			fi
+			;;
+	esac
+	printf '%s\n' "$path"
+}
+
+resolve_device_list() {
+	list="$1"
+	resolved_list=""
+	old_ifs="$IFS"
+	IFS=,
+	set -- $list
+	IFS="$old_ifs"
+	for path in "$@"; do
+		[ -n "$path" ] || continue
+		resolved_path="$(resolve_device_path "$path")"
+		resolved_list="${resolved_list:+$resolved_list,}$resolved_path"
+	done
+	printf '%s\n' "$resolved_list"
+}
+
 pool_args() {
 	if [ -n "$pool" ]; then
 		printf '%s\n' "--pool $pool"
@@ -112,6 +170,8 @@ main() {
 		modprobe fuse 2>/dev/null || true
 	fi
 
+	[ -z "$images" ] || images="$(resolve_device_list "$images")"
+	[ -z "$devices" ] || devices="$(resolve_device_list "$devices")"
 	args="$(backend_args)"
 	pool_filter="$(pool_args)"
 	log "scan $args pool=${pool:-auto} mode=$mode replay=$replay fsck=$fsck_mode"
