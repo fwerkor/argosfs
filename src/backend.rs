@@ -287,10 +287,10 @@ fn detect_capacity(file: &mut File) -> Result<u64> {
 
 #[cfg(target_os = "linux")]
 fn block_device_capacity(file: &File) -> Result<Option<u64>> {
-    const BLKGETSIZE64: libc::c_ulong = 0x8008_1272;
+    const BLKGETSIZE64: u64 = 0x8008_1272;
 
     let mut bytes = 0u64;
-    let result = unsafe { libc::ioctl(file.as_raw_fd(), BLKGETSIZE64, &mut bytes) };
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), BLKGETSIZE64 as _, &mut bytes) };
     if result == 0 && bytes != 0 {
         Ok(Some(bytes))
     } else {
