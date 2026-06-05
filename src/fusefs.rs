@@ -6,7 +6,7 @@ use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
     FopenFlags, Generation, INodeNo, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags,
     ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
+    ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow, WriteFlags,
 };
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
@@ -100,9 +100,52 @@ pub fn mount_volume(
             "argosfs mount runs in the foreground; --foreground is accepted for CLI compatibility"
         );
     }
-    let mut config = Config::default();
-    config.mount_options = mount_options;
+    let config = mount_config(mount_options);
     fuser::mount2(ArgosFuse::new(volume), mountpoint, &config).map_err(ArgosError::Io)
+}
+
+fn mount_config(options: Vec<MountOption>) -> Config {
+    let mut config = Config::default();
+    for option in options {
+        match option {
+            MountOption::CUSTOM(ref value) if value == "allow_other" => {
+                config.acl = SessionACL::All;
+            }
+            MountOption::CUSTOM(ref value) if value == "allow_root" => {
+                if config.acl != SessionACL::All {
+                    config.acl = SessionACL::RootAndOwner;
+                }
+            }
+            other => config.mount_options.push(normalize_mount_option(other)),
+        }
+    }
+    config
+}
+
+fn normalize_mount_option(option: MountOption) -> MountOption {
+    match option {
+        MountOption::CUSTOM(value) => match value.as_str() {
+            "auto_unmount" => MountOption::AutoUnmount,
+            "default_permissions" => MountOption::DefaultPermissions,
+            "dev" => MountOption::Dev,
+            "nodev" => MountOption::NoDev,
+            "suid" => MountOption::Suid,
+            "nosuid" => MountOption::NoSuid,
+            "ro" => MountOption::RO,
+            "rw" => MountOption::RW,
+            "exec" => MountOption::Exec,
+            "noexec" => MountOption::NoExec,
+            "atime" => MountOption::Atime,
+            "noatime" => MountOption::NoAtime,
+            "dirsync" => MountOption::DirSync,
+            "sync" => MountOption::Sync,
+            "async" => MountOption::Async,
+            _ if value.starts_with("fsname=") => MountOption::FSName(value[7..].to_string()),
+            _ if value.starts_with("subtype=") => MountOption::Subtype(value[8..].to_string()),
+            _ => MountOption::CUSTOM(value),
+        },
+        other => other,
+    }
 }
 
 impl Filesystem for ArgosFuse {
@@ -795,4 +838,37 @@ fn open_mask(flags: OpenFlags) -> i32 {
 fn xattr_name(name: &OsStr) -> Result<&str> {
     name.to_str()
         .ok_or_else(|| ArgosError::Invalid("non-UTF-8 xattr names are unsupported".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_other_sets_fuser_session_acl() {
+        let config = mount_config(vec![
+            MountOption::FSName("argosfs".to_string()),
+            MountOption::Subtype("argosfs".to_string()),
+            MountOption::CUSTOM("allow_other".to_string()),
+            MountOption::CUSTOM("default_permissions".to_string()),
+        ]);
+
+        assert_eq!(config.acl, SessionACL::All);
+        assert!(config
+            .mount_options
+            .contains(&MountOption::DefaultPermissions));
+        assert!(!config
+            .mount_options
+            .contains(&MountOption::CUSTOM("allow_other".to_string())));
+    }
+
+    #[test]
+    fn allow_other_wins_over_allow_root() {
+        let config = mount_config(vec![
+            MountOption::CUSTOM("allow_root".to_string()),
+            MountOption::CUSTOM("allow_other".to_string()),
+        ]);
+
+        assert_eq!(config.acl, SessionACL::All);
+    }
 }

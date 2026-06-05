@@ -717,7 +717,7 @@ fn main() -> Result<()> {
             let fs = open_backend(None, backend, images, devices, write)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             rootfs::preflight_volume(&fs, mode)?;
-            fusefs::mount_volume(fs, target, foreground, option)?;
+            fusefs::mount_volume(fs, target, foreground, root_mount_options(option))?;
         }
         Command::PreflightRoot {
             backend,
@@ -755,7 +755,7 @@ fn main() -> Result<()> {
             let fs = open_backend(None, backend, images, devices, false)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             rootfs::preflight_volume(&fs, RootMountMode::Recovery)?;
-            fusefs::mount_volume(fs, target, true, vec!["ro".to_string()])?;
+            fusefs::mount_volume(fs, target, true, root_mount_options(vec!["ro".to_string()]))?;
         }
         Command::Put { root, local, path } => {
             let fs = ArgosFs::open(root)?;
@@ -1278,6 +1278,16 @@ fn validate_requested_pool(fs: &ArgosFs, pool: Option<&str>) -> Result<()> {
             meta.raw_pool.pool_name
         )
     }
+}
+
+fn root_mount_options(mut options: Vec<String>) -> Vec<String> {
+    let has_acl = options
+        .iter()
+        .any(|option| option == "allow_other" || option == "allow_root");
+    if !has_acl {
+        options.push("allow_other".to_string());
+    }
+    options
 }
 
 fn load_passphrase(
