@@ -577,8 +577,12 @@ impl ArgosFs {
     }
 
     pub fn sync(&self) -> Result<()> {
-        let meta = self.meta.lock();
+        let mut meta = self.meta.lock();
         if meta.backend != BackendKind::Host {
+            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+                let previous_meta_hash = meta.integrity.meta_hash.clone();
+                journal::prepare_metadata_integrity_with_previous(&mut meta, previous_meta_hash)?;
+            }
             let superblocks = self.active_superblocks_locked(&meta)?;
             let backend = self.active_block_backend_locked(&meta, true)?;
             raw_store::write_metadata_copies(&backend, &superblocks, &meta)?;
@@ -3757,8 +3761,10 @@ impl ArgosFs {
             journal::inject_crash(FaultPoint::BeforeDataWrite.as_str())?;
             self.backend_write_at_locked(meta, disk_id, extent.offset, data)?;
             journal::inject_crash(FaultPoint::AfterDataWriteBeforeFlush.as_str())?;
-            self.backend_flush_locked(meta, disk_id)?;
-            journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
+            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_none() {
+                self.backend_flush_locked(meta, disk_id)?;
+                journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
+            }
             if let Some(disk) = meta.disks.get_mut(disk_id) {
                 disk.used_bytes = disk.used_bytes.saturating_add(extent.length);
             }
@@ -3820,11 +3826,14 @@ impl ArgosFs {
         request: PlacementRequest<'_>,
     ) -> Result<Vec<String>> {
         let mut scored = Vec::new();
-        let local_numa = meta
-            .config
-            .numa_aware
-            .then(advanced_io::current_numa_node)
-            .flatten();
+        let local_numa = if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+            None
+        } else {
+            meta.config
+                .numa_aware
+                .then(advanced_io::current_numa_node)
+                .flatten()
+        };
         for (disk_id, disk) in &meta.disks {
             if request.exclude_disks.contains(disk_id) || disk.status != DiskStatus::Online {
                 continue;
@@ -4413,6 +4422,13 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
+        if meta.backend != BackendKind::Host
+            && std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
+        {
+            meta.txid += 1;
+            meta.updated_at = now_f64();
+            return Ok(());
+        }
         let previous_meta_hash = if meta.integrity.meta_hash.is_empty() {
             journal::canonical_metadata_hash(meta)?
         } else {
@@ -4423,6 +4439,9 @@ impl ArgosFs {
         meta.updated_at = now_f64();
         if meta.backend != BackendKind::Host {
             journal::prepare_metadata_integrity_with_previous(meta, previous_meta_hash.clone())?;
+            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+                return Ok(());
+            }
             let superblocks = self.active_superblocks_locked(meta)?;
             let backend = self.active_block_backend_locked(meta, true)?;
             return raw_store::append_transaction(

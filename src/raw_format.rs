@@ -14,6 +14,9 @@ pub const ALLOCATOR_REGION_OFFSET: u64 = 12 * 1024 * 1024;
 pub const ALLOCATOR_REGION_SIZE: u64 = 4 * 1024 * 1024;
 pub const DATA_REGION_OFFSET: u64 = 16 * 1024 * 1024;
 pub const BACKUP_REGION_SIZE: u64 = 1024 * 1024;
+const LARGE_LAYOUT_MIN_DEVICE_BYTES: u64 = 128 * 1024 * 1024;
+const LARGE_JOURNAL_REGION_SIZE: u64 = 8 * 1024 * 1024;
+const LARGE_METADATA_REGION_SIZE: u64 = 64 * 1024 * 1024;
 pub const SUPERBLOCK_SIZE: usize = 4096;
 pub const DEVICE_LABEL_SIZE: usize = 4096;
 pub const MIN_DEVICE_BYTES: u64 = 20 * 1024 * 1024;
@@ -81,10 +84,11 @@ impl RawSuperblock {
                 "device too small for raw ArgosFS layout: {capacity} bytes, need at least {MIN_DEVICE_BYTES}"
             )));
         }
+        let regions = raw_regions_for_capacity(capacity);
         let backup_superblock_offset =
             align_down(capacity.saturating_sub(BACKUP_REGION_SIZE), 4096);
         let data_end = backup_superblock_offset;
-        if data_end <= DATA_REGION_OFFSET {
+        if data_end <= regions.data.offset {
             return Err(ArgosError::Invalid(
                 "device has no usable data region after metadata layout".to_string(),
             ));
@@ -103,21 +107,12 @@ impl RawSuperblock {
             required_feature_flags: 0,
             block_size: RAW_BLOCK_SIZE as u32,
             sector_size: 512,
-            journal: RawRegion {
-                offset: JOURNAL_REGION_OFFSET,
-                length: JOURNAL_REGION_SIZE,
-            },
-            metadata: RawRegion {
-                offset: METADATA_REGION_OFFSET,
-                length: METADATA_REGION_SIZE,
-            },
-            allocator: RawRegion {
-                offset: ALLOCATOR_REGION_OFFSET,
-                length: ALLOCATOR_REGION_SIZE,
-            },
+            journal: regions.journal,
+            metadata: regions.metadata,
+            allocator: regions.allocator,
             data: RawRegion {
-                offset: DATA_REGION_OFFSET,
-                length: data_end - DATA_REGION_OFFSET,
+                offset: regions.data.offset,
+                length: data_end - regions.data.offset,
             },
             backup_superblock_offset,
             label,
@@ -234,6 +229,58 @@ impl RawSuperblock {
             last_mount_time: get_u64(bytes, 200)?,
             last_clean_unmount_time: get_u64(bytes, 208)?,
         })
+    }
+}
+
+struct RawLayoutRegions {
+    journal: RawRegion,
+    metadata: RawRegion,
+    allocator: RawRegion,
+    data: RawRegion,
+}
+
+fn raw_regions_for_capacity(capacity: u64) -> RawLayoutRegions {
+    if capacity >= LARGE_LAYOUT_MIN_DEVICE_BYTES {
+        let journal = RawRegion {
+            offset: JOURNAL_REGION_OFFSET,
+            length: LARGE_JOURNAL_REGION_SIZE,
+        };
+        let metadata = RawRegion {
+            offset: journal.offset + journal.length,
+            length: LARGE_METADATA_REGION_SIZE,
+        };
+        let allocator = RawRegion {
+            offset: metadata.offset + metadata.length,
+            length: ALLOCATOR_REGION_SIZE,
+        };
+        let data = RawRegion {
+            offset: allocator.offset + allocator.length,
+            length: 0,
+        };
+        return RawLayoutRegions {
+            journal,
+            metadata,
+            allocator,
+            data,
+        };
+    }
+    RawLayoutRegions {
+        journal: RawRegion {
+            offset: JOURNAL_REGION_OFFSET,
+            length: JOURNAL_REGION_SIZE,
+        },
+        metadata: RawRegion {
+            offset: METADATA_REGION_OFFSET,
+            length: METADATA_REGION_SIZE,
+        },
+        allocator: RawRegion {
+            offset: ALLOCATOR_REGION_OFFSET,
+            length: ALLOCATOR_REGION_SIZE,
+        },
+        data: RawRegion {
+            offset: DATA_REGION_OFFSET,
+            length: 0,
+        },
     }
 }
 

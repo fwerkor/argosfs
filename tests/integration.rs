@@ -487,6 +487,7 @@ fn loop_block_backend_round_trips_raw_extents_without_host_shards() {
     assert!(shard.relpath.as_os_str().is_empty());
     assert!(matches!(shard.location, Some(ShardLocation::RawExtent(_))));
     assert!(!tmp.path().join(".argosfs/meta.json").exists());
+    fs.sync().unwrap();
     drop(fs);
 
     let reopened = ArgosFs::open_loop(&images, true).unwrap();
@@ -671,6 +672,7 @@ fn raw_journal_partial_tail_is_audited_and_data_remains_readable() {
         ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
     fs.write_file("/journal-tail", b"valid-before-tail", 0o644)
         .unwrap();
+    fs.sync().unwrap();
     drop(fs);
 
     let disk = fs::OpenOptions::new()
@@ -698,12 +700,65 @@ fn raw_journal_partial_tail_is_audited_and_data_remains_readable() {
 }
 
 #[test]
+fn raw_journal_rollover_checkpoints_large_import_style_workloads() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    let mut meta = fs.metadata_snapshot();
+    drop(fs);
+
+    let devices = images
+        .iter()
+        .enumerate()
+        .map(|(index, path)| (format!("disk-{index:04}"), path.clone()))
+        .collect::<Vec<_>>();
+    let backend = FileBlockBackend::open_with_ids(BackendKind::LoopBlock, devices, true).unwrap();
+    let superblocks = images
+        .iter()
+        .map(|path| {
+            argosfs::raw_store::inspect_device(BackendKind::LoopBlock, path.clone())
+                .unwrap()
+                .0
+        })
+        .collect::<Vec<_>>();
+
+    const PAYLOAD_SIZE: usize = 384 * 1024;
+    for index in 0..8 {
+        let previous = meta.integrity.meta_hash.clone();
+        meta.txid += 1;
+        meta.inodes.get_mut(&1).unwrap().xattrs.insert(
+            format!("user.rollover.{index:04}"),
+            "x".repeat(PAYLOAD_SIZE),
+        );
+        journal::prepare_metadata_integrity_with_previous(&mut meta, previous).unwrap();
+        argosfs::raw_store::append_transaction(
+            &backend,
+            &superblocks,
+            &meta,
+            "test-rollover",
+            serde_json::json!({ "index": index }),
+        )
+        .unwrap();
+    }
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    let reopened_meta = reopened.metadata_snapshot();
+    assert_eq!(
+        reopened_meta.inodes[&1].xattrs["user.rollover.0007"].len(),
+        PAYLOAD_SIZE
+    );
+    assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
 fn raw_primary_metadata_corruption_recovers_from_mirror_or_other_device() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
     let fs =
         ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
     fs.write_file("/metadata", b"metadata-copy", 0o644).unwrap();
+    fs.sync().unwrap();
     drop(fs);
 
     let disk = fs::OpenOptions::new().write(true).open(&images[0]).unwrap();
@@ -750,6 +805,7 @@ fn raw_allocator_inconsistency_is_reported_by_fsck() {
             offset: extent.offset,
             length: extent.length,
         });
+    meta.txid += 1;
     let previous = meta.integrity.meta_hash.clone();
     journal::prepare_metadata_integrity_with_previous(&mut meta, previous).unwrap();
 

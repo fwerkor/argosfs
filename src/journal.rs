@@ -753,7 +753,7 @@ fn has_valid_checkpoint(root: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn metadata_delta(previous: &Metadata, next: &Metadata) -> Result<Vec<MetadataDeltaOp>> {
+pub fn metadata_delta(previous: &Metadata, next: &Metadata) -> Result<Vec<MetadataDeltaOp>> {
     let previous = serde_json::to_value(previous)?;
     let next = serde_json::to_value(next)?;
     let mut ops = Vec::new();
@@ -761,7 +761,7 @@ fn metadata_delta(previous: &Metadata, next: &Metadata) -> Result<Vec<MetadataDe
     Ok(ops)
 }
 
-fn apply_metadata_delta(previous: &Metadata, delta: &[MetadataDeltaOp]) -> Result<Metadata> {
+pub fn apply_metadata_delta(previous: &Metadata, delta: &[MetadataDeltaOp]) -> Result<Metadata> {
     let mut value = serde_json::to_value(previous)?;
     for op in delta {
         apply_delta_op(&mut value, op)?;
