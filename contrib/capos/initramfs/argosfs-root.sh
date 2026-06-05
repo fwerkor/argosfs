@@ -202,6 +202,29 @@ mount_if_needed() {
 	is_mounted "$target" || mount -t "$fs_type" "$source" "$target" || is_mounted "$target"
 }
 
+move_mount_or_mount() {
+	source="$1"
+	target="$2"
+	fs_type="$3"
+	fs_source="$4"
+	mkdir -p "$target"
+	if is_mounted "$source"; then
+		mount -o move "$source" "$target" 2>/dev/null ||
+			mount --move "$source" "$target" 2>/dev/null ||
+			return 1
+	else
+		mount_if_needed "$target" "$fs_type" "$fs_source" || return 1
+	fi
+}
+
+prepare_switch_root_mounts() {
+	mkdir -p "$sysroot/proc" "$sysroot/sys" "$sysroot/dev" "$sysroot/run"
+	move_mount_or_mount /sys "$sysroot/sys" sysfs sysfs || emergency "failed to hand off /sys"
+	move_mount_or_mount /dev "$sysroot/dev" devtmpfs devtmpfs || emergency "failed to hand off /dev"
+	move_mount_or_mount /run "$sysroot/run" tmpfs tmpfs || emergency "failed to hand off /run"
+	move_mount_or_mount /proc "$sysroot/proc" proc proc || emergency "failed to hand off /proc"
+}
+
 ensure_block_device_nodes() {
 	for uevent in "$sys_class_block"/*/uevent; do
 		[ -r "$uevent" ] || continue
@@ -288,8 +311,13 @@ main() {
 	[ "$mount_mode" = "recovery" ] && mount_mode="ro"
 	mount_log="$run_dir/argosfs-mount.log"
 	rm -f "$mount_log"
-	# shellcheck disable=SC2086
-	"$argosfs_bin" mount-root $args $pool_filter --target "$sysroot" --mode "$mount_mode" --foreground -o allow_other >"$mount_log" 2>&1 &
+	if command -v setsid >/dev/null 2>&1; then
+		# shellcheck disable=SC2086
+		setsid "$argosfs_bin" mount-root $args $pool_filter --target "$sysroot" --mode "$mount_mode" --foreground -o allow_other >"$mount_log" 2>&1 &
+	else
+		# shellcheck disable=SC2086
+		"$argosfs_bin" mount-root $args $pool_filter --target "$sysroot" --mode "$mount_mode" --foreground -o allow_other >"$mount_log" 2>&1 &
+	fi
 	mount_pid="$!"
 	tries=0
 	while [ "$tries" -lt 30 ]; do
@@ -322,6 +350,7 @@ main() {
 		emergency "no init found in $sysroot"
 	fi
 	log "mounted ArgosFS root at $sysroot pid=$mount_pid"
+	prepare_switch_root_mounts
 	unset INITRAMFS
 	exec switch_root "$sysroot" /sbin/init
 }
