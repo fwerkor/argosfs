@@ -5,8 +5,13 @@ log_file="${ARGOSFS_INITRD_LOG:-/run/argosfs-initrd.log}"
 run_dir="${ARGOSFS_INITRD_RUN_DIR:-/run}"
 dev_root="${ARGOSFS_INITRD_DEV_ROOT:-/dev}"
 sys_class_block="${ARGOSFS_INITRD_SYS_CLASS_BLOCK:-/sys/class/block}"
-sysroot="/sysroot"
-mode="rw"
+config_file="${ARGOSFS_INITRD_CONFIG:-/etc/argosfs/initramfs.conf}"
+if [ -r "$config_file" ]; then
+	# shellcheck disable=SC1090
+	. "$config_file"
+fi
+sysroot="${ARGOSFS_DEFAULT_ROOT:-/sysroot}"
+mode="${ARGOSFS_DEFAULT_MODE:-rw}"
 pool=""
 devices=""
 images=""
@@ -14,6 +19,7 @@ debug="0"
 replay="auto"
 fsck_mode="auto"
 dry_run="0"
+auto_scan="${ARGOSFS_AUTOSCAN:-0}"
 argosfs_bin="${ARGOSFS_BIN:-argosfs}"
 
 log() {
@@ -40,6 +46,7 @@ parse_cmdline() {
 			argosfs.debug=*) debug="${arg#argosfs.debug=}" ;;
 			argosfs.replay=*) replay="${arg#argosfs.replay=}" ;;
 			argosfs.fsck=*) fsck_mode="${arg#argosfs.fsck=}" ;;
+			argosfs.autoscan=*) auto_scan="${arg#argosfs.autoscan=}" ;;
 		esac
 	done
 }
@@ -61,6 +68,8 @@ parse_args() {
 				shift 2
 				;;
 			--debug) debug="1"; shift ;;
+			--autoscan) auto_scan="1"; shift ;;
+			--no-autoscan) auto_scan="0"; shift ;;
 			*) emergency "unknown argument $1" ;;
 		esac
 	done
@@ -178,6 +187,96 @@ resolve_device_list() {
 		resolved_list="${resolved_list:+$resolved_list,}$resolved_path"
 	done
 	printf '%s\n' "$resolved_list"
+}
+
+append_csv_unique() {
+	list="$1"
+	value="$2"
+	old_ifs="$IFS"
+	IFS=,
+	for item in $list; do
+		IFS="$old_ifs"
+		[ "$item" = "$value" ] && {
+			printf '%s\n' "$list"
+			return 0
+		}
+		IFS=,
+	done
+	IFS="$old_ifs"
+	printf '%s\n' "${list:+$list,}$value"
+}
+
+candidate_is_ignored() {
+	case "$1" in
+		loop*|ram*|zram*|fd*|sr*) return 0 ;;
+	esac
+	return 1
+}
+
+list_block_candidates_by_type() {
+	want_type="$1"
+	for uevent in "$sys_class_block"/*/uevent; do
+		[ -r "$uevent" ] || continue
+		devname=""
+		devtype=""
+		while IFS='=' read -r key value; do
+			case "$key" in
+				DEVNAME) devname="$value" ;;
+				DEVTYPE) devtype="$value" ;;
+			esac
+		done <"$uevent"
+		[ "$devtype" = "$want_type" ] || continue
+		[ -n "$devname" ] || continue
+		candidate_is_ignored "$devname" && continue
+		candidate="$dev_root/$devname"
+		[ -e "$candidate" ] || continue
+		printf '%s\n' "$candidate"
+	done
+}
+
+scan_argosfs_candidate() {
+	backend="$1"
+	path="$2"
+	out="$run_dir/argosfs-autoscan-$(basename "$path").json"
+	case "$backend" in
+		loop) "$argosfs_bin" scan --backend loop --images "$path" --json >"$out" 2>/dev/null ;;
+		raw) "$argosfs_bin" scan --backend raw --devices "$path" --json >"$out" 2>/dev/null ;;
+		*) return 1 ;;
+	esac
+	grep -q '"valid"[[:space:]]*:[[:space:]]*true' "$out"
+}
+
+discover_argosfs_backend() {
+	backend="$1"
+	discovered=""
+	for devtype in partition disk; do
+		while IFS= read -r candidate; do
+			[ -n "$candidate" ] || continue
+			if scan_argosfs_candidate "$backend" "$candidate"; then
+				discovered="$(append_csv_unique "$discovered" "$candidate")"
+			fi
+		done <<EOF_CANDIDATES
+$(list_block_candidates_by_type "$devtype")
+EOF_CANDIDATES
+		[ -n "$discovered" ] && break
+	done
+	printf '%s\n' "$discovered"
+}
+
+discover_argosfs_devices() {
+	[ -z "$images" ] || return 0
+	[ -z "$devices" ] || return 0
+	[ "$auto_scan" = "1" ] || return 0
+	images="$(discover_argosfs_backend loop)"
+	if [ -n "$images" ]; then
+		log "autoscan selected loop images $images"
+		return 0
+	fi
+	devices="$(discover_argosfs_backend raw)"
+	if [ -n "$devices" ]; then
+		log "autoscan selected raw devices $devices"
+		return 0
+	fi
 }
 
 pool_args() {
@@ -384,6 +483,7 @@ main() {
 
 	[ -z "$images" ] || images="$(resolve_device_list "$images")"
 	[ -z "$devices" ] || devices="$(resolve_device_list "$devices")"
+	discover_argosfs_devices
 	args="$(backend_args)"
 	pool_filter="$(pool_args)"
 	log "scan $args pool=${pool:-auto} mode=$mode replay=$replay fsck=$fsck_mode"
