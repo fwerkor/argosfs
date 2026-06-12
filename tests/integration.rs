@@ -183,6 +183,23 @@ fn truncate_rewrites_only_tail_stripe_window() {
 }
 
 #[test]
+fn partial_read_accounts_only_requested_window() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.chunk_size = 4;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 1, false).unwrap();
+    fs.write_file("/window", b"abcdefghijkl", 0o644).unwrap();
+    let ino = fs.resolve_path("/window", true).unwrap();
+
+    assert_eq!(fs.read_inode(ino, 4, 4, true).unwrap(), b"efgh");
+
+    let inode = fs.metadata_snapshot().inodes[&ino].clone();
+    assert_eq!(inode.access_count, 1);
+    assert_eq!(inode.read_bytes, 4);
+}
+
+#[test]
 fn zero_length_write_is_noop_and_does_not_extend() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();

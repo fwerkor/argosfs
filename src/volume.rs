@@ -882,20 +882,36 @@ impl ArgosFs {
             }
             NodeKind::File => {}
         }
-        let (data, damaged) = self.decode_inode_data_locked(&mut meta, &inode)?;
+        let logical_size = usize::try_from(inode.size)
+            .map_err(|_| ArgosError::Invalid("inode logical size is too large".to_string()))?;
+        let start = offset.min(logical_size as u64) as usize;
+        let end = start.saturating_add(size).min(logical_size);
+        let (mut data, mut damaged) =
+            self.decode_inode_range_from_inode_locked(&mut meta, &inode, start, end)?;
         let mut repaired = false;
         if repair && !damaged.is_empty() {
+            let mut repair_damaged = damaged.clone();
+            let (full, full_damaged) = self.decode_inode_data_locked(&mut meta, &inode)?;
+            for entry in full_damaged {
+                if !repair_damaged.contains(&entry) {
+                    repair_damaged.push(entry);
+                }
+            }
+            damaged = repair_damaged;
             let repair_result = self.replace_inode_data_locked(
                 &mut meta,
                 ino,
-                &data,
+                &full,
                 "self-heal",
                 json!({"damaged": damaged}),
                 true,
                 &BTreeSet::new(),
             );
             match repair_result {
-                Ok(()) => repaired = true,
+                Ok(()) => {
+                    repaired = true;
+                    data = full[start..end].to_vec();
+                }
                 Err(err) => {
                     self.journal_locked(
                         &meta,
@@ -910,9 +926,7 @@ impl ArgosFs {
             live.last_accessed_at = now_f64();
             live.workload_score = live.workload_score * 0.98 + 1.0;
         }
-        let start = offset.min(data.len() as u64) as usize;
-        let end = start.saturating_add(size).min(data.len());
-        Ok((data[start..end].to_vec(), damaged, repaired))
+        Ok((data, damaged, repaired))
     }
 
     pub fn write_inode_range(&self, ino: InodeId, offset: u64, data: &[u8]) -> Result<usize> {
@@ -3426,6 +3440,20 @@ impl ArgosFs {
             ));
         }
 
+        self.decode_inode_range_from_inode_locked(meta, &inode, start, end)
+            .map(|(data, _)| data)
+    }
+
+    fn decode_inode_range_from_inode_locked(
+        &self,
+        meta: &mut Metadata,
+        inode: &Inode,
+        start: usize,
+        end: usize,
+    ) -> Result<(Vec<u8>, Vec<String>)> {
+        if end <= start {
+            return Ok((Vec::new(), Vec::new()));
+        }
         let mut out = vec![0u8; end - start];
         let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
             Some(self.encryption_key_locked(meta)?)
@@ -3433,15 +3461,17 @@ impl ArgosFs {
             None
         };
         let mut damaged = Vec::new();
-        for block in inode.blocks.iter().filter(|block| {
-            let block_start = block.raw_offset as usize;
-            let block_end = block_start.saturating_add(block.raw_size);
-            block_end > start && block_start < end
-        }) {
-            let raw = self.decode_block_locked(meta, block, decrypt_key.as_ref(), &mut damaged)?;
+        for block in &inode.blocks {
             let block_start = usize::try_from(block.raw_offset).map_err(|_| {
                 ArgosError::Invalid(format!("block {} raw offset is too large", block.stripe_id))
             })?;
+            let block_end = block_start.checked_add(block.raw_size).ok_or_else(|| {
+                ArgosError::Invalid(format!("block {} raw range overflow", block.stripe_id))
+            })?;
+            if block_end <= start || block_start >= end {
+                continue;
+            }
+            let raw = self.decode_block_locked(meta, block, decrypt_key.as_ref(), &mut damaged)?;
             let copy_start = block_start.max(start);
             let copy_end = block_start.saturating_add(raw.len()).min(end);
             if copy_end > copy_start {
@@ -3451,7 +3481,7 @@ impl ArgosFs {
                 out[dst_start..dst_start + len].copy_from_slice(&raw[src_start..src_start + len]);
             }
         }
-        Ok(out)
+        Ok((out, damaged))
     }
 
     #[allow(clippy::too_many_arguments)]
