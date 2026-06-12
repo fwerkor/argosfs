@@ -5,8 +5,8 @@ use crate::volume::{ArgosFs, NodeAttr, RenamePolicy};
 use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
     FopenFlags, Generation, INodeNo, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags,
-    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow, WriteFlags,
+    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow, WriteFlags,
 };
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
@@ -605,7 +605,7 @@ impl Filesystem for ArgosFuse {
             Ok(value) if size == 0 => reply.size(value.len() as u32),
             Ok(value) if value.len() <= size as usize => reply.data(&value),
             Ok(_) => reply.error(Errno::ERANGE),
-            Err(err) => reply.error(errno(&err)),
+            Err(err) => reply.error(xattr_errno(&err)),
         }
     }
 
@@ -641,7 +641,7 @@ impl Filesystem for ArgosFuse {
             .and_then(|()| self.volume.removexattr_inode(ino.0, xattr_name(name)?))
         {
             Ok(()) => reply.ok(),
-            Err(err) => reply.error(errno(&err)),
+            Err(err) => reply.error(xattr_errno(&err)),
         }
     }
 
@@ -703,6 +703,39 @@ impl Filesystem for ArgosFuse {
                         (idx + 1) as u64,
                         file_type_from_attr(&entry.attr),
                         entry.os_name(),
+                    );
+                    if full {
+                        break;
+                    }
+                }
+                reply.ok();
+            }
+            Err(err) => reply.error(errno(&err)),
+        }
+    }
+
+    fn readdirplus(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        mut reply: ReplyDirectoryPlus,
+    ) {
+        match self
+            .require_access(req, ino, libc::R_OK | libc::X_OK)
+            .and_then(|()| self.volume.readdir(ino.0))
+        {
+            Ok(entries) => {
+                for (idx, entry) in entries.into_iter().enumerate().skip(offset as usize) {
+                    let attr = to_file_attr(&entry.attr);
+                    let full = reply.add(
+                        INodeNo(entry.attr.ino),
+                        (idx + 1) as u64,
+                        entry.os_name(),
+                        &TTL,
+                        &attr,
+                        Generation(0),
                     );
                     if full {
                         break;
@@ -780,6 +813,13 @@ fn to_file_attr(attr: &NodeAttr) -> FileAttr {
 
 fn errno(err: &ArgosError) -> Errno {
     Errno::from_i32(err.errno())
+}
+
+fn xattr_errno(err: &ArgosError) -> Errno {
+    match err {
+        ArgosError::NotFound(_) => Errno::NO_XATTR,
+        _ => errno(err),
+    }
 }
 
 fn file_type_from_attr(attr: &NodeAttr) -> FileType {
@@ -870,5 +910,11 @@ mod tests {
         ]);
 
         assert_eq!(config.acl, SessionACL::All);
+    }
+
+    #[test]
+    fn missing_xattr_maps_to_enodata() {
+        let err = ArgosError::NotFound("xattr security.selinux".to_string());
+        assert_eq!(xattr_errno(&err).code(), Errno::NO_XATTR.code());
     }
 }
