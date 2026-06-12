@@ -18,6 +18,9 @@ Each run stores:
   adding CLI command logs beside the generated JSON summaries,
 - transaction verification and crash-recovery artifacts through
   `argosfs verify-journal` logs and the integration power-loss tests,
+- retained Autopilot decision evidence from
+  `scripts/experiments/run_autopilot_matrix.py`, including drain safety,
+  confirmation, cooldown, rebalance, scrub repair, and before/after health,
 - CSV latency/throughput samples,
 - a validation-only encryption key file when encryption is enabled for the run,
 - a manifest with software and configuration details.

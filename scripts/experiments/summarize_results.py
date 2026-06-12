@@ -24,6 +24,7 @@ def main():
 
     summary = {
         "failure_matrix": read_jsonl(raw / "failure-matrix.jsonl"),
+        "autopilot_matrix": read_jsonl(raw / "autopilot-matrix.jsonl"),
         "baselines": read_jsonl(raw / "baselines.jsonl"),
         "qemu_rootfs": read_jsonl(raw / "qemu-rootfs.jsonl"),
     }
@@ -63,6 +64,21 @@ def main():
         scenarios = sorted({row["scenario"] for row in summary["failure_matrix"]})
         for scenario in scenarios:
             rows = [row for row in summary["failure_matrix"] if row["scenario"] == scenario]
+            writer.writerow(
+                [
+                    scenario,
+                    len(rows),
+                    sum(1 for row in rows if row.get("status") == "passed"),
+                    sum(1 for row in rows if row.get("status") == "failed"),
+                ]
+            )
+
+    with (tables / "autopilot-matrix.csv").open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["scenario", "runs", "passed", "failed"])
+        scenarios = sorted({row["scenario"] for row in summary["autopilot_matrix"]})
+        for scenario in scenarios:
+            rows = [row for row in summary["autopilot_matrix"] if row["scenario"] == scenario]
             writer.writerow(
                 [
                     scenario,

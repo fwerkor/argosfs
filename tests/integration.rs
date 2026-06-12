@@ -1442,6 +1442,43 @@ fn detects_corrupt_shard_and_scrubs() {
 }
 
 #[test]
+fn autopilot_scrub_reports_self_healed_files() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/file", b"abcdefghijklmnopqrstuvwxyz", 0o644)
+        .unwrap();
+
+    let meta = fs.metadata_snapshot();
+    let inode = meta.inodes.values().find(|inode| inode.size == 26).unwrap();
+    let shard = &inode.blocks[0].shards[0];
+    fs::write(shard_abs(&fs, &shard.disk_id, &shard.relpath), b"corrupt").unwrap();
+    drop(fs);
+
+    let fs = ArgosFs::open(tmp.path()).unwrap();
+    let result = fs
+        .autopilot_once_with_config(AutopilotConfig {
+            probe_interval_sec: u64::MAX,
+            smart_interval_sec: u64::MAX,
+            scrub_interval_sec: 0,
+            rebalance_interval_sec: u64::MAX,
+            ..AutopilotConfig::default()
+        })
+        .unwrap();
+    let scrub = result["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action"] == "scrub-incremental")
+        .unwrap();
+    assert_eq!(scrub["report"]["damaged_files"], 1);
+    assert_eq!(scrub["report"]["repaired_files"], 1);
+    assert_eq!(
+        fs.read_file("/file", true).unwrap(),
+        b"abcdefghijklmnopqrstuvwxyz"
+    );
+}
+
+#[test]
 fn direct_io_detects_aligned_trailing_shard_garbage() {
     let tmp = TempDir::new().unwrap();
     let mut cfg = config(1, 1);
