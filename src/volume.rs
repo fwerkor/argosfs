@@ -38,6 +38,7 @@ const DEFAULT_LAYOUT_ID: &str = "layout-0000";
 pub struct ArgosFs {
     root: Arc<PathBuf>,
     backend: Arc<dyn StorageBackend>,
+    backend_writable: bool,
     raw_superblocks: Arc<Vec<RawSuperblock>>,
     meta: Arc<Mutex<Metadata>>,
     cache: Arc<BlockCache>,
@@ -366,6 +367,7 @@ impl ArgosFs {
         );
         Ok(Self {
             backend: Arc::new(HostFsBackend::new(&root)),
+            backend_writable: true,
             raw_superblocks: Arc::new(Vec::new()),
             root: Arc::new(root),
             meta: Arc::new(Mutex::new(meta)),
@@ -518,7 +520,7 @@ impl ArgosFs {
         journal::prepare_metadata_integrity_for_external_store(&mut meta)?;
         let backend: Arc<dyn StorageBackend> = Arc::new(backend_file);
         raw_store::initialize_pool(backend.clone(), &superblocks, &mut meta, force)?;
-        Self::from_block_parts(paths, backend, superblocks, meta)
+        Self::from_block_parts(paths, backend, true, superblocks, meta)
     }
 
     fn open_block_backend(kind: BackendKind, paths: &[PathBuf], write: bool) -> Result<Self> {
@@ -526,12 +528,13 @@ impl ArgosFs {
         let mut meta = opened.metadata;
         normalize_metadata_layouts(&mut meta);
         recompute_disk_usage_from_metadata(&mut meta);
-        Self::from_block_parts(paths, opened.backend, opened.superblocks, meta)
+        Self::from_block_parts(paths, opened.backend, write, opened.superblocks, meta)
     }
 
     fn from_block_parts(
         paths: &[PathBuf],
         backend: Arc<dyn StorageBackend>,
+        backend_writable: bool,
         superblocks: Vec<RawSuperblock>,
         meta: Metadata,
     ) -> Result<Self> {
@@ -552,6 +555,7 @@ impl ArgosFs {
         Ok(Self {
             root: Arc::new(root),
             backend,
+            backend_writable,
             raw_superblocks: Arc::new(superblocks),
             meta: Arc::new(Mutex::new(meta)),
             cache: Arc::new(cache),
@@ -4503,6 +4507,9 @@ impl ArgosFs {
     }
 
     fn open_backend_covers_superblocks(&self, superblocks: &[RawSuperblock]) -> bool {
+        if !self.backend_writable {
+            return false;
+        }
         let Ok(devices) = self.backend.list_devices() else {
             return false;
         };

@@ -28,4 +28,12 @@ ARGOSFS_INITRD_SYS_CLASS_BLOCK="$artifacts/sys/class/block" \
 	"$repo/contrib/capos/initramfs/argosfs-root.sh" \
 	--dry-run --images /dev/disk/by-partuuid/5a5e744d-02 --sysroot "$artifacts/sysroot" --argosfs-bin "$argosfs"
 grep -q "resolved /dev/disk/by-partuuid/5a5e744d-02 by partition number 2 to $artifacts/dev/argos-root" "$artifacts/initrd.log"
+rm -f "$artifacts/initrd.log"
+ARGOSFS_INITRD_LOG="$artifacts/initrd.log" \
+ARGOSFS_INITRD_RUN_DIR="$artifacts/run" \
+ARGOSFS_INITRD_DEV_ROOT="$artifacts/dev" \
+ARGOSFS_INITRD_SYS_CLASS_BLOCK="$artifacts/sys/class/block" \
+	"$repo/contrib/capos/initramfs/argosfs-root.sh" \
+	--dry-run --autoscan --sysroot "$artifacts/sysroot" --argosfs-bin "$argosfs"
+grep -q "autoscan selected loop images $artifacts/dev/argos-root" "$artifacts/initrd.log"
 echo "initramfs dry-run passed; artifacts=$artifacts"
