@@ -840,6 +840,52 @@ fn raw_primary_metadata_corruption_recovers_from_mirror_or_other_device() {
 }
 
 #[test]
+fn raw_metadata_tree_checkpoint_spans_pages() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    for index in 0..4 {
+        fs.setxattr_inode(
+            1,
+            &format!("user.metadata_tree.{index}"),
+            &vec![index as u8; 4096],
+        )
+        .unwrap();
+    }
+    fs.sync().unwrap();
+    drop(fs);
+
+    let (superblock, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    let slot_len = superblock.metadata.length / 2;
+    let disk = std::fs::File::open(&images[0]).unwrap();
+    let mut observed_page_count = 0;
+    for slot in 0..2u64 {
+        let mut header = [0u8; 4096];
+        disk.read_at(&mut header, superblock.metadata.offset + slot * slot_len)
+            .unwrap();
+        assert_eq!(&header[..16], b"ARGOSFS-RAW-MD\0\0");
+        let checkpoint_format = u32::from_le_bytes(header[20..24].try_into().unwrap());
+        assert_eq!(checkpoint_format, 1);
+        let page_size = u64::from_le_bytes(header[144..152].try_into().unwrap());
+        let page_count = u64::from_le_bytes(header[152..160].try_into().unwrap());
+        let index_len = u64::from_le_bytes(header[160..168].try_into().unwrap());
+        assert_eq!(page_size, 4096);
+        assert_eq!(index_len, page_count * 48);
+        observed_page_count = observed_page_count.max(page_count);
+    }
+    assert!(observed_page_count > 1);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.getxattr_inode(1, "user.metadata_tree.3").unwrap(),
+        vec![3u8; 4096]
+    );
+    assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
 fn raw_allocator_inconsistency_is_reported_by_fsck() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);

@@ -257,7 +257,8 @@ static project website lives in `website/index.html`.
 ## Limitations
 
 ArgosFS is a complete research filesystem project with a real FUSE frontend, but
-it is not yet a production-certified kernel filesystem. The current metadata
-store is a single-node COW JSON database. That makes experiments transparent and
-auditable; `docs/metadata-scalability.md` tracks the page/B-tree migration plan
-and benchmark entry point.
+it is not yet a production-certified kernel filesystem. Raw checkpoints now use
+a page-indexed checksum tree, but the logical metadata model is still a
+serialized JSON object rather than a fully split inode/directory B-tree. That
+makes experiments transparent and auditable; `docs/metadata-scalability.md`
+tracks the remaining metadata scalability work and benchmark entry point.

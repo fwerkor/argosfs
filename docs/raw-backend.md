@@ -42,8 +42,12 @@ generation conflicts are rejected instead of guessed around.
 
 Loop/raw metadata is persisted inside the raw metadata region, not in
 `.argosfs/meta.json`. Each checkpoint stores a fixed header, metadata length,
-metadata generation, and SHA-256 of the JSON metadata payload. Two slots are
-written on every member device.
+metadata generation, SHA-256 of the logical JSON metadata payload, and a
+page-indexed checksum tree for the checkpoint body. The index records each raw
+metadata page offset, length, and SHA-256 digest, and the header commits the
+index root hash after the body pages have been flushed. Two slots are written on
+every member device, and readers still accept legacy single-payload checkpoints
+for existing images.
 
 The raw journal region stores length-prefixed JSON transaction records with an
 entry checksum and an internal record hash. Journal records carry full metadata
