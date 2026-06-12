@@ -4443,14 +4443,18 @@ impl ArgosFs {
                 return Ok(());
             }
             let superblocks = self.active_superblocks_locked(meta)?;
+            let details = json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details});
+            if self.open_backend_covers_superblocks(&superblocks) {
+                return raw_store::append_transaction(
+                    &*self.backend,
+                    &superblocks,
+                    meta,
+                    action,
+                    details,
+                );
+            }
             let backend = self.active_block_backend_locked(meta, true)?;
-            return raw_store::append_transaction(
-                &backend,
-                &superblocks,
-                meta,
-                action,
-                json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details}),
-            );
+            return raw_store::append_transaction(&backend, &superblocks, meta, action, details);
         }
         let result = journal::append_transaction_checked(
             &self.root,
@@ -4483,10 +4487,30 @@ impl ArgosFs {
     ) -> Result<()> {
         if meta.backend != BackendKind::Host {
             let superblocks = self.active_superblocks_locked(meta)?;
+            if self.open_backend_covers_superblocks(&superblocks) {
+                return raw_store::append_transaction(
+                    &*self.backend,
+                    &superblocks,
+                    meta,
+                    action,
+                    details,
+                );
+            }
             let backend = self.active_block_backend_locked(meta, true)?;
             return raw_store::append_transaction(&backend, &superblocks, meta, action, details);
         }
         journal::append_event(&self.root, meta, action, details)
+    }
+
+    fn open_backend_covers_superblocks(&self, superblocks: &[RawSuperblock]) -> bool {
+        let Ok(devices) = self.backend.list_devices() else {
+            return false;
+        };
+        let opened = devices
+            .into_iter()
+            .map(|device| device.device_id)
+            .collect::<BTreeSet<_>>();
+        superblocks.iter().all(|sb| opened.contains(&sb.disk_id))
     }
 
     fn active_superblocks_locked(&self, meta: &Metadata) -> Result<Vec<RawSuperblock>> {

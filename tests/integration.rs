@@ -374,6 +374,16 @@ fn loop_block_open_remaps_metadata_paths_to_current_devices() {
             .unwrap(),
         b"ok"
     );
+    reopened.mkdir("/runtime-dir", 0o755).unwrap();
+    reopened
+        .write_file("/runtime-dir/created-after-remap", b"rw", 0o644)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .read_file("/runtime-dir/created-after-remap", true)
+            .unwrap(),
+        b"rw"
+    );
     reopened.sync().unwrap();
 }
 
