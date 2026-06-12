@@ -849,6 +849,17 @@ impl ArgosFs {
         size: usize,
         repair: bool,
     ) -> Result<Vec<u8>> {
+        self.read_inode_with_damage_report(ino, offset, size, repair)
+            .map(|(data, _, _)| data)
+    }
+
+    fn read_inode_with_damage_report(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        size: usize,
+        repair: bool,
+    ) -> Result<(Vec<u8>, Vec<String>, bool)> {
         let mut meta = self.meta.lock();
         let inode = meta
             .inodes
@@ -858,8 +869,10 @@ impl ArgosFs {
         match inode.kind {
             NodeKind::Directory => return Err(ArgosError::IsDirectory(format!("inode {ino}"))),
             NodeKind::Symlink => {
-                return Ok(decode_symlink_target_bytes(
-                    inode.target.as_deref().unwrap_or_default(),
+                return Ok((
+                    decode_symlink_target_bytes(inode.target.as_deref().unwrap_or_default()),
+                    Vec::new(),
+                    false,
                 ));
             }
             NodeKind::Special => {
@@ -870,8 +883,8 @@ impl ArgosFs {
             NodeKind::File => {}
         }
         let (data, damaged) = self.decode_inode_data_locked(&mut meta, &inode)?;
+        let mut repaired = false;
         if repair && !damaged.is_empty() {
-            drop(inode);
             let repair_result = self.replace_inode_data_locked(
                 &mut meta,
                 ino,
@@ -881,12 +894,15 @@ impl ArgosFs {
                 true,
                 &BTreeSet::new(),
             );
-            if let Err(err) = repair_result {
-                self.journal_locked(
-                    &meta,
-                    "self-heal-deferred",
-                    json!({"inode": ino, "error": err.to_string()}),
-                )?;
+            match repair_result {
+                Ok(()) => repaired = true,
+                Err(err) => {
+                    self.journal_locked(
+                        &meta,
+                        "self-heal-deferred",
+                        json!({"inode": ino, "error": err.to_string()}),
+                    )?;
+                }
             }
         } else if let Some(live) = meta.inodes.get_mut(&ino) {
             live.access_count = live.access_count.saturating_add(1);
@@ -896,7 +912,7 @@ impl ArgosFs {
         }
         let start = offset.min(data.len() as u64) as usize;
         let end = start.saturating_add(size).min(data.len());
-        Ok(data[start..end].to_vec())
+        Ok((data[start..end].to_vec(), damaged, repaired))
     }
 
     pub fn write_inode_range(&self, ino: InodeId, offset: u64, data: &[u8]) -> Result<usize> {
@@ -2285,8 +2301,27 @@ impl ArgosFs {
         let mut next_cursor = cursor;
         for (ino, _) in self.file_window(cursor, max_files) {
             report.files_checked += 1;
-            match self.read_inode(ino, 0, u64::MAX as usize, true) {
-                Ok(_) => {}
+            match self.read_inode_with_damage_report(ino, 0, u64::MAX as usize, true) {
+                Ok((_, damaged, repaired)) => {
+                    if !damaged.is_empty() {
+                        report.damaged_files += 1;
+                        report.checksum_errors += damaged
+                            .iter()
+                            .filter(|entry| entry.contains(":checksum:"))
+                            .count() as u64;
+                        report.missing_shards += damaged
+                            .iter()
+                            .filter(|entry| {
+                                entry.contains(":missing:")
+                                    || entry.contains(":missing-disk")
+                                    || entry.contains(":unavailable")
+                            })
+                            .count() as u64;
+                        if repaired {
+                            report.repaired_files += 1;
+                        }
+                    }
+                }
                 Err(err) => {
                     report.unrecoverable_files += 1;
                     report.errors.push(format!("inode {ino}: {err}"));

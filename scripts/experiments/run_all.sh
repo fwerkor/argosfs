@@ -21,6 +21,7 @@ seed="${ARGOSFS_EXPERIMENT_SEED:-424242}"
 export ARGOSFS_EXPERIMENT_SEED="$seed"
 
 python3 scripts/experiments/run_failure_matrix.py --mode "$mode" --output "$out/raw/failure-matrix.jsonl"
+python3 scripts/experiments/run_autopilot_matrix.py --mode "$mode" --output "$out/raw/autopilot-matrix.jsonl"
 python3 scripts/experiments/run_workload_shift.py --mode "$mode" --output "$out/raw/workload-shift.csv"
 python3 scripts/experiments/run_metadata_scalability.py --mode "$mode" --output "$out/raw/metadata-scalability.csv"
 bash scripts/experiments/run_baselines.sh --mode "$mode" --output "$out/raw/baselines.jsonl"
