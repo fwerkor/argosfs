@@ -2,7 +2,7 @@ use crate::backend::{FileBlockBackend, StorageBackend};
 use crate::error::{ArgosError, Result};
 use crate::journal;
 use crate::raw_format::{
-    align_down, RawDeviceLabel, RawSuperblock, BACKUP_REGION_SIZE, DEVICE_LABEL_OFFSET,
+    align_down, align_up, RawDeviceLabel, RawSuperblock, BACKUP_REGION_SIZE, DEVICE_LABEL_OFFSET,
     DEVICE_LABEL_SIZE, PRIMARY_SUPERBLOCK_OFFSET, PROTECTIVE_HEADER_OFFSET, SUPERBLOCK_SIZE,
 };
 use crate::types::{BackendKind, FaultPoint, Metadata, MetadataCandidateReport, TransactionReport};
@@ -17,6 +17,12 @@ const METADATA_MAGIC: &[u8; 16] = b"ARGOSFS-RAW-MD\0\0";
 const JOURNAL_MAGIC: &[u8; 16] = b"ARGOSFS-RAW-JN\0\0";
 const RAW_STORE_VERSION: u32 = 1;
 const RAW_HEADER_SIZE: usize = 4096;
+const METADATA_FORMAT_LEGACY: u32 = 0;
+const METADATA_FORMAT_TREE: u32 = 1;
+const METADATA_PAGE_SIZE: usize = 4096;
+const METADATA_INDEX_ENTRY_SIZE: usize = 48;
+const HASH_HEX_LEN: usize = 64;
+const HASH_BYTES_LEN: usize = 32;
 
 #[derive(Clone)]
 pub struct RawOpen {
@@ -271,28 +277,45 @@ pub fn write_metadata_copies(
         let slot_len = sb.metadata.length / 2;
         let slot = (metadata.txid % 2) * slot_len;
         let offset = sb.metadata.offset + slot;
-        if bytes.len() as u64 + RAW_HEADER_SIZE as u64 > slot_len {
-            return Err(ArgosError::DiskFull {
-                disk_id: sb.disk_id.clone(),
-                required: bytes.len() as u64,
-                available: slot_len.saturating_sub(RAW_HEADER_SIZE as u64),
-            });
-        }
-        let header = metadata_header(
-            metadata.txid,
-            metadata.integrity.generation,
-            bytes.len(),
-            &hash,
-        );
-        backend.write_at(&sb.disk_id, offset, &header)?;
-        backend.write_at(&sb.disk_id, offset + RAW_HEADER_SIZE as u64, &bytes)?;
-        backend.flush_device(&sb.disk_id)?;
+        write_metadata_slot(backend, sb, offset, slot_len, metadata, &bytes, &hash)?;
         let mirror_slot = ((metadata.txid + 1) % 2) * slot_len;
         let mirror_offset = sb.metadata.offset + mirror_slot;
-        backend.write_at(&sb.disk_id, mirror_offset, &header)?;
-        backend.write_at(&sb.disk_id, mirror_offset + RAW_HEADER_SIZE as u64, &bytes)?;
-        backend.flush_device(&sb.disk_id)?;
+        write_metadata_slot(
+            backend,
+            sb,
+            mirror_offset,
+            slot_len,
+            metadata,
+            &bytes,
+            &hash,
+        )?;
     }
+    Ok(())
+}
+
+fn write_metadata_slot(
+    backend: &dyn StorageBackend,
+    sb: &RawSuperblock,
+    offset: u64,
+    slot_len: u64,
+    metadata: &Metadata,
+    bytes: &[u8],
+    hash: &str,
+) -> Result<()> {
+    let checkpoint = metadata_tree_checkpoint(
+        &sb.disk_id,
+        metadata.txid,
+        metadata.integrity.generation,
+        bytes,
+        hash,
+        slot_len,
+    )?;
+    for (relative_offset, data) in checkpoint.body_writes {
+        backend.write_at(&sb.disk_id, offset + relative_offset, &data)?;
+    }
+    backend.flush_device(&sb.disk_id)?;
+    backend.write_at(&sb.disk_id, offset, &checkpoint.header)?;
+    backend.flush_device(&sb.disk_id)?;
     Ok(())
 }
 
@@ -527,38 +550,17 @@ fn read_metadata_candidates(
         let metadata = match backend.read_at(&sb.disk_id, offset, &mut header) {
             Ok(()) if &header[..16] == METADATA_MAGIC => {
                 report.present = true;
-                let len = get_u64(&header, 32)? as usize;
-                let stored_hash = get_fixed_hex(&header, 64, 64)?;
-                if len == 0 || len as u64 > slot_len.saturating_sub(RAW_HEADER_SIZE as u64) {
-                    report.error = Some("invalid raw metadata length".to_string());
-                    None
-                } else {
-                    let mut bytes = vec![0u8; len];
-                    match backend.read_at(&sb.disk_id, offset + RAW_HEADER_SIZE as u64, &mut bytes)
-                    {
-                        Ok(()) if sha256_hex(&bytes) == stored_hash => {
-                            match serde_json::from_slice::<Metadata>(&bytes) {
-                                Ok(metadata) => {
-                                    report.valid = true;
-                                    report.txid = metadata.txid;
-                                    report.generation = metadata.integrity.generation;
-                                    report.meta_hash = metadata.integrity.meta_hash.clone();
-                                    Some(metadata)
-                                }
-                                Err(err) => {
-                                    report.error = Some(err.to_string());
-                                    None
-                                }
-                            }
-                        }
-                        Ok(()) => {
-                            report.error = Some("raw metadata checksum mismatch".to_string());
-                            None
-                        }
-                        Err(err) => {
-                            report.error = Some(err.to_string());
-                            None
-                        }
+                match read_metadata_candidate(backend, sb, offset, slot_len, &header) {
+                    Ok(metadata) => {
+                        report.valid = true;
+                        report.txid = metadata.txid;
+                        report.generation = metadata.integrity.generation;
+                        report.meta_hash = metadata.integrity.meta_hash.clone();
+                        Some(metadata)
+                    }
+                    Err(err) => {
+                        report.error = Some(err.to_string());
+                        None
                     }
                 }
             }
@@ -571,6 +573,140 @@ fn read_metadata_candidates(
         out.push((metadata, report));
     }
     Ok(out)
+}
+
+fn read_metadata_candidate(
+    backend: &dyn StorageBackend,
+    sb: &RawSuperblock,
+    offset: u64,
+    slot_len: u64,
+    header: &[u8],
+) -> Result<Metadata> {
+    match get_u32(header, 20)? {
+        METADATA_FORMAT_LEGACY => {
+            read_legacy_metadata_candidate(backend, sb, offset, slot_len, header)
+        }
+        METADATA_FORMAT_TREE => read_tree_metadata_candidate(backend, sb, offset, slot_len, header),
+        format => Err(ArgosError::IncompatibleFormat(format!(
+            "unsupported raw metadata checkpoint format {format}"
+        ))),
+    }
+}
+
+fn read_legacy_metadata_candidate(
+    backend: &dyn StorageBackend,
+    sb: &RawSuperblock,
+    offset: u64,
+    slot_len: u64,
+    header: &[u8],
+) -> Result<Metadata> {
+    let len = checked_usize(get_u64(header, 32)?, "raw metadata length")?;
+    let stored_hash = get_fixed_hex(header, 64, HASH_HEX_LEN)?;
+    if len == 0 || len as u64 > slot_len.saturating_sub(RAW_HEADER_SIZE as u64) {
+        return Err(ArgosError::CorruptedMetadata(
+            "invalid raw metadata length".to_string(),
+        ));
+    }
+    let mut bytes = vec![0u8; len];
+    backend.read_at(&sb.disk_id, offset + RAW_HEADER_SIZE as u64, &mut bytes)?;
+    if sha256_hex(&bytes) != stored_hash {
+        return Err(ArgosError::Checksum(
+            "raw metadata checksum mismatch".to_string(),
+        ));
+    }
+    Ok(serde_json::from_slice::<Metadata>(&bytes)?)
+}
+
+fn read_tree_metadata_candidate(
+    backend: &dyn StorageBackend,
+    sb: &RawSuperblock,
+    offset: u64,
+    slot_len: u64,
+    header: &[u8],
+) -> Result<Metadata> {
+    let len = checked_usize(get_u64(header, 32)?, "raw metadata length")?;
+    let stored_hash = get_fixed_hex(header, 64, HASH_HEX_LEN)?;
+    let page_size = checked_usize(get_u64(header, 144)?, "raw metadata page size")?;
+    let page_count = checked_usize(get_u64(header, 152)?, "raw metadata page count")?;
+    let index_len = checked_usize(get_u64(header, 160)?, "raw metadata index length")?;
+    let index_hash = get_fixed_hex(header, 168, HASH_HEX_LEN)?;
+    if len == 0 {
+        return Err(ArgosError::CorruptedMetadata(
+            "invalid raw metadata length".to_string(),
+        ));
+    }
+    if page_size == 0 || page_size > 1024 * 1024 {
+        return Err(ArgosError::CorruptedMetadata(
+            "invalid raw metadata page size".to_string(),
+        ));
+    }
+    let expected_pages = len.div_ceil(page_size);
+    let expected_index_len = page_count
+        .checked_mul(METADATA_INDEX_ENTRY_SIZE)
+        .ok_or_else(|| ArgosError::CorruptedMetadata("raw metadata index overflows".to_string()))?;
+    if page_count != expected_pages || index_len != expected_index_len {
+        return Err(ArgosError::CorruptedMetadata(
+            "invalid raw metadata page index".to_string(),
+        ));
+    }
+    let index_end = (RAW_HEADER_SIZE as u64)
+        .checked_add(index_len as u64)
+        .ok_or_else(|| ArgosError::CorruptedMetadata("raw metadata index overflows".to_string()))?;
+    if index_end > slot_len {
+        return Err(ArgosError::CorruptedMetadata(
+            "raw metadata index exceeds slot".to_string(),
+        ));
+    }
+    let mut index = vec![0u8; index_len];
+    backend.read_at(&sb.disk_id, offset + RAW_HEADER_SIZE as u64, &mut index)?;
+    if sha256_hex(&index) != index_hash {
+        return Err(ArgosError::Checksum(
+            "raw metadata index checksum mismatch".to_string(),
+        ));
+    }
+    let data_start = align_up(index_end, page_size as u64);
+    let mut bytes = Vec::with_capacity(len);
+    for page_index in 0..page_count {
+        let entry_start = page_index * METADATA_INDEX_ENTRY_SIZE;
+        let entry = &index[entry_start..entry_start + METADATA_INDEX_ENTRY_SIZE];
+        let stored_page_hash = hex::encode(&entry[..HASH_BYTES_LEN]);
+        let relative_offset = get_u64(entry, 32)?;
+        let page_len = get_u32(entry, 40)? as usize;
+        let expected_offset = (page_index as u64)
+            .checked_mul(page_size as u64)
+            .and_then(|delta| data_start.checked_add(delta))
+            .ok_or_else(|| {
+                ArgosError::CorruptedMetadata("raw metadata page offset overflows".to_string())
+            })?;
+        let end = relative_offset
+            .checked_add(page_len as u64)
+            .ok_or_else(|| {
+                ArgosError::CorruptedMetadata("raw metadata page overflows".to_string())
+            })?;
+        if page_len == 0
+            || page_len > page_size
+            || relative_offset != expected_offset
+            || end > slot_len
+        {
+            return Err(ArgosError::CorruptedMetadata(
+                "invalid raw metadata page extent".to_string(),
+            ));
+        }
+        let mut page = vec![0u8; page_len];
+        backend.read_at(&sb.disk_id, offset + relative_offset, &mut page)?;
+        if sha256_hex(&page) != stored_page_hash {
+            return Err(ArgosError::Checksum(format!(
+                "raw metadata page {page_index} checksum mismatch"
+            )));
+        }
+        bytes.extend_from_slice(&page);
+    }
+    if bytes.len() != len || sha256_hex(&bytes) != stored_hash {
+        return Err(ArgosError::Checksum(
+            "raw metadata checksum mismatch".to_string(),
+        ));
+    }
+    Ok(serde_json::from_slice::<Metadata>(&bytes)?)
 }
 
 fn read_latest_journal_metadata(
@@ -677,15 +813,105 @@ fn read_latest_journal_metadata(
     Ok(best)
 }
 
-fn metadata_header(txid: u64, generation: u64, len: usize, hash: &str) -> [u8; RAW_HEADER_SIZE] {
+struct MetadataTreeCheckpoint {
+    header: [u8; RAW_HEADER_SIZE],
+    body_writes: Vec<(u64, Vec<u8>)>,
+}
+
+fn metadata_tree_checkpoint(
+    disk_id: &str,
+    txid: u64,
+    generation: u64,
+    bytes: &[u8],
+    hash: &str,
+    slot_len: u64,
+) -> Result<MetadataTreeCheckpoint> {
+    let page_count = bytes.len().div_ceil(METADATA_PAGE_SIZE);
+    let index_len = page_count
+        .checked_mul(METADATA_INDEX_ENTRY_SIZE)
+        .ok_or_else(|| ArgosError::DiskFull {
+            disk_id: disk_id.to_string(),
+            required: bytes.len() as u64,
+            available: slot_len,
+        })?;
+    let index_end = (RAW_HEADER_SIZE as u64)
+        .checked_add(index_len as u64)
+        .ok_or_else(|| ArgosError::DiskFull {
+            disk_id: disk_id.to_string(),
+            required: bytes.len() as u64,
+            available: slot_len,
+        })?;
+    let data_start = align_up(index_end, METADATA_PAGE_SIZE as u64);
+    let data_bytes = (page_count as u64)
+        .checked_mul(METADATA_PAGE_SIZE as u64)
+        .ok_or_else(|| ArgosError::DiskFull {
+            disk_id: disk_id.to_string(),
+            required: bytes.len() as u64,
+            available: slot_len,
+        })?;
+    let data_end = data_start
+        .checked_add(data_bytes)
+        .ok_or_else(|| ArgosError::DiskFull {
+            disk_id: disk_id.to_string(),
+            required: bytes.len() as u64,
+            available: slot_len,
+        })?;
+    if bytes.is_empty() || data_end > slot_len {
+        return Err(ArgosError::DiskFull {
+            disk_id: disk_id.to_string(),
+            required: data_end.max(bytes.len() as u64),
+            available: slot_len,
+        });
+    }
+
+    let mut index = vec![0u8; index_len];
+    let mut body_writes = Vec::with_capacity(page_count + 1);
+    for page_index in 0..page_count {
+        let start = page_index * METADATA_PAGE_SIZE;
+        let end = (start + METADATA_PAGE_SIZE).min(bytes.len());
+        let page = bytes[start..end].to_vec();
+        let page_hash = hex::decode(sha256_hex(&page)).map_err(|err| {
+            ArgosError::Invalid(format!("raw metadata page hash encode failed: {err}"))
+        })?;
+        if page_hash.len() != HASH_BYTES_LEN {
+            return Err(ArgosError::Invalid(
+                "raw metadata page hash has invalid length".to_string(),
+            ));
+        }
+        let entry_start = page_index * METADATA_INDEX_ENTRY_SIZE;
+        let entry = &mut index[entry_start..entry_start + METADATA_INDEX_ENTRY_SIZE];
+        entry[..HASH_BYTES_LEN].copy_from_slice(&page_hash);
+        let relative_offset = (page_index as u64)
+            .checked_mul(METADATA_PAGE_SIZE as u64)
+            .and_then(|delta| data_start.checked_add(delta))
+            .ok_or_else(|| ArgosError::DiskFull {
+                disk_id: disk_id.to_string(),
+                required: bytes.len() as u64,
+                available: slot_len,
+            })?;
+        put_u64(entry, 32, relative_offset);
+        put_u32(entry, 40, page.len() as u32);
+        body_writes.push((relative_offset, page));
+    }
+    let index_hash = sha256_hex(&index);
+    body_writes.push((RAW_HEADER_SIZE as u64, index));
+
     let mut out = [0u8; RAW_HEADER_SIZE];
     out[..16].copy_from_slice(METADATA_MAGIC);
     put_u32(&mut out, 16, RAW_STORE_VERSION);
+    put_u32(&mut out, 20, METADATA_FORMAT_TREE);
     put_u64(&mut out, 24, txid);
-    put_u64(&mut out, 32, len as u64);
+    put_u64(&mut out, 32, bytes.len() as u64);
     put_fixed_str(&mut out, 64, 64, hash);
     put_u64(&mut out, 136, generation);
-    out
+    put_u64(&mut out, 144, METADATA_PAGE_SIZE as u64);
+    put_u64(&mut out, 152, page_count as u64);
+    put_u64(&mut out, 160, index_len as u64);
+    put_fixed_str(&mut out, 168, HASH_HEX_LEN, &index_hash);
+    Ok(MetadataTreeCheckpoint {
+        header: out,
+        body_writes,
+    })
 }
 
 fn raw_record_hash(record: &RawJournalRecord) -> Result<String> {
@@ -919,6 +1145,18 @@ fn get_u64(bytes: &[u8], offset: usize) -> Result<u64> {
         .get(offset..offset + 8)
         .ok_or_else(|| ArgosError::CorruptedMetadata("short raw-store u64".to_string()))?;
     Ok(u64::from_le_bytes(raw.try_into().unwrap()))
+}
+
+fn get_u32(bytes: &[u8], offset: usize) -> Result<u32> {
+    let raw = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| ArgosError::CorruptedMetadata("short raw-store u32".to_string()))?;
+    Ok(u32::from_le_bytes(raw.try_into().unwrap()))
+}
+
+fn checked_usize(value: u64, name: &str) -> Result<usize> {
+    usize::try_from(value)
+        .map_err(|_| ArgosError::CorruptedMetadata(format!("{name} does not fit usize")))
 }
 
 fn put_fixed_str(out: &mut [u8], offset: usize, len: usize, value: &str) {

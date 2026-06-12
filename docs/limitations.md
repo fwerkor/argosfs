@@ -11,7 +11,9 @@ irreplaceable data. In particular:
 
 - QEMU boot and destructive raw-device tests require a privileged environment.
 - Performance is not expected to match mature kernel filesystems.
-- Raw journal replay uses full metadata records in this version.
+- Raw checkpoint bodies are page-indexed and hash-checked, but the logical
+  metadata object is still serialized as JSON. Raw journal replay uses full
+  metadata records in this version.
 - Device replacement and rebalance are inherited from the host-era control path
   and should be exercised carefully for raw pools.
 - Degraded readonly rootfs is covered for missing loop images. Degraded rw must

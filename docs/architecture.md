@@ -54,10 +54,14 @@ checks. If the primary superblock is corrupt, scan/open attempts the backup copy
 at the end-reserved region.
 
 Raw metadata stores the logical `Metadata` JSON payload inside the raw metadata
-region with a fixed header, length, generation, and checksum. Raw journal
-entries are length-prefixed, checksum-protected records carrying metadata
-snapshots for idempotent replay. Rw open marks member superblocks dirty; an
-explicit `sync()` writes metadata copies and marks them clean.
+region as a page-indexed checkpoint tree. The checkpoint header records txid,
+generation, payload length, payload checksum, page size, page count, index
+length, and index root hash. Each index entry records a raw page extent and page
+checksum, so recovery validates the header, index, every page, and the complete
+payload before accepting a candidate. Raw journal entries are length-prefixed,
+checksum-protected records carrying metadata snapshots for idempotent replay.
+Rw open marks member superblocks dirty; an explicit `sync()` writes metadata
+copies and marks them clean.
 
 ## Heterogeneous Disks
 
