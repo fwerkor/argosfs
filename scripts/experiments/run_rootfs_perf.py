@@ -224,6 +224,7 @@ def run_argosfs_loop_variant(
         mkfs_cmd.append("--defer-journal-flush")
     if batch_metadata:
         mkfs_cmd.append("--defer-metadata-commit")
+        mkfs_cmd.append("--defer-data-flush")
     run(mkfs_cmd)
     proc = subprocess.Popen(
         [
@@ -257,7 +258,7 @@ def run_argosfs_loop_variant(
                 "reason": (
                     "ArgosFS loop backend mounted through FUSE mount-root"
                     + (
-                        " with batched metadata commit"
+                        " with batched metadata commit and deferred data flush"
                         if batch_metadata
                         else (
                             " with deferred journal flush"

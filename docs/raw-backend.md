@@ -70,6 +70,11 @@ that every syscall is individually durable. A crash before the sync boundary may
 roll back to the previous checkpoint; the dirty superblock and checksum-checked
 checkpoint/journal path still make the result auditable.
 
+`--defer-data-flush` is accepted only together with `--defer-metadata-commit`.
+It defers per-shard data fsyncs until the same sync boundary, preserving the
+ordering rule that a checkpoint should not become durable before the data it
+names. The strict default remains per-transaction data flush plus journal flush.
+
 ## Data Extents
 
 Host shards use `ShardLocation::HostPath`. Loop/raw shards use
