@@ -19,6 +19,14 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+pub fn content_hash_hex(data: &[u8]) -> String {
+    blake3::hash(data).to_hex().to_string()
+}
+
+pub fn content_hash_matches(data: &[u8], expected: &str) -> bool {
+    content_hash_hex(data) == expected || sha256_hex(data) == expected
+}
+
 pub fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     Ok(())

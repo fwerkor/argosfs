@@ -726,10 +726,20 @@ fn main() -> Result<()> {
                 mode,
                 RootMountMode::ReadWrite | RootMountMode::DegradedReadWrite
             );
-            let fs = open_backend(None, backend, images, devices, write)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
-            rootfs::preflight_volume(&fs, mode)?;
-            fusefs::mount_volume(fs, target, foreground, root_mount_options(option))?;
+            if write {
+                let preflight_fs =
+                    open_backend(None, backend, images.clone(), devices.clone(), false)?;
+                validate_requested_pool(&preflight_fs, pool.as_deref())?;
+                rootfs::preflight_volume(&preflight_fs, mode)?;
+                let fs = open_backend(None, backend, images, devices, true)?;
+                validate_requested_pool(&fs, pool.as_deref())?;
+                fusefs::mount_volume(fs, target, foreground, root_mount_options(option))?;
+            } else {
+                let fs = open_backend(None, backend, images, devices, false)?;
+                validate_requested_pool(&fs, pool.as_deref())?;
+                rootfs::preflight_volume(&fs, mode)?;
+                fusefs::mount_volume(fs, target, foreground, root_mount_options(option))?;
+            }
         }
         Command::PreflightRoot {
             backend,
