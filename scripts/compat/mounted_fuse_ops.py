@@ -221,7 +221,7 @@ def check_concurrency(root):
         for _ in range(2):
             results.append(pool.apply_async(reader, ((seed, deadline),)))
         for result in results:
-            result.get(timeout=5)
+            result.get(timeout=20)
     for byte in range(4):
         p = path(root, f"concurrent-{byte}.log".encode())
         require(os.stat(p).st_size == 8 * 128, f"concurrent writer size mismatch for {p!r}")

@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::util::{atomic_write, ensure_dir, sha256_hex};
+use crate::util::{atomic_write, content_hash_matches, ensure_dir, sha256_hex};
 use parking_lot::Mutex;
 use serde_json::json;
 use std::collections::{BTreeMap, VecDeque};
@@ -18,6 +18,7 @@ struct CacheInner {
     misses: u64,
     l2_hits: u64,
     l2_writes: u64,
+    l2_errors: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -37,6 +38,7 @@ impl BlockCache {
     pub fn new(root: impl AsRef<Path>, memory_limit: usize, l2_limit: u64) -> Self {
         let root = root.as_ref().to_path_buf();
         let _ = ensure_dir(&root);
+        let l2_limit = configured_l2_limit(l2_limit);
         Self {
             root,
             memory_limit,
@@ -49,7 +51,7 @@ impl BlockCache {
         let mut inner = self.inner.lock();
         if let Some(value) = inner.items.get(key).cloned() {
             if expected_sha
-                .map(|sha| sha == sha256_hex(&value))
+                .map(|sha| content_hash_matches(&value, sha))
                 .unwrap_or(true)
             {
                 inner.hits += 1;
@@ -67,7 +69,7 @@ impl BlockCache {
             let path = self.l2_path(key);
             if let Ok(value) = std::fs::read(&path) {
                 if expected_sha
-                    .map(|sha| sha == sha256_hex(&value))
+                    .map(|sha| content_hash_matches(&value, sha))
                     .unwrap_or(true)
                 {
                     let mut inner = self.inner.lock();
@@ -116,27 +118,9 @@ impl BlockCache {
                 }
             }
         }
-        if self.l2_limit > 0 {
-            self.load_l2_index()?;
-            let path = self.l2_path(key);
-            atomic_write(&path, data)?;
+        if self.l2_limit > 0 && self.put_l2(key, data).is_err() {
             let mut inner = self.inner.lock();
-            inner.l2_clock = inner.l2_clock.saturating_add(1);
-            let touched = inner.l2_clock;
-            let old = inner.l2_index.insert(
-                path,
-                L2Entry {
-                    size: data.len() as u64,
-                    touched,
-                },
-            );
-            if let Some(old) = old {
-                inner.l2_bytes = inner.l2_bytes.saturating_sub(old.size);
-            }
-            inner.l2_bytes = inner.l2_bytes.saturating_add(data.len() as u64);
-            inner.l2_writes += 1;
-            drop(inner);
-            self.prune_l2()?;
+            inner.l2_errors = inner.l2_errors.saturating_add(1);
         }
         Ok(())
     }
@@ -184,6 +168,7 @@ impl BlockCache {
             ("misses".to_string(), json!(inner.misses)),
             ("l2_hits".to_string(), json!(inner.l2_hits)),
             ("l2_writes".to_string(), json!(inner.l2_writes)),
+            ("l2_errors".to_string(), json!(inner.l2_errors)),
             ("l2_bytes".to_string(), json!(inner.l2_bytes)),
             ("l2_items".to_string(), json!(inner.l2_index.len())),
             (
@@ -227,6 +212,29 @@ impl BlockCache {
                 break;
             }
         }
+    }
+
+    fn put_l2(&self, key: &str, data: &[u8]) -> Result<()> {
+        self.load_l2_index()?;
+        let path = self.l2_path(key);
+        atomic_write(&path, data)?;
+        let mut inner = self.inner.lock();
+        inner.l2_clock = inner.l2_clock.saturating_add(1);
+        let touched = inner.l2_clock;
+        let old = inner.l2_index.insert(
+            path,
+            L2Entry {
+                size: data.len() as u64,
+                touched,
+            },
+        );
+        if let Some(old) = old {
+            inner.l2_bytes = inner.l2_bytes.saturating_sub(old.size);
+        }
+        inner.l2_bytes = inner.l2_bytes.saturating_add(data.len() as u64);
+        inner.l2_writes += 1;
+        drop(inner);
+        self.prune_l2()
     }
 
     fn load_l2_index(&self) -> Result<()> {
@@ -310,4 +318,13 @@ impl BlockCache {
         }
         Ok(())
     }
+}
+
+fn configured_l2_limit(default_limit: u64) -> u64 {
+    if std::env::var_os("ARGOSFS_DISABLE_L2_CACHE").is_some() {
+        return 0;
+    }
+    std::env::var_os("ARGOSFS_L2_CACHE_BYTES")
+        .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+        .unwrap_or(default_limit)
 }

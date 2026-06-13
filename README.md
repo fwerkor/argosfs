@@ -1,5 +1,33 @@
 # ArgosFS
 
+ArgosFS is a self-driving, erasure-coded filesystem with a Rust core and FUSE
+frontend. It now has three storage backends:
+
+- `HostFsBackend` for development and compatibility, storing shards as ordinary
+  files under a host directory.
+- `LoopBlockBackend` for unprivileged raw-layout testing over fixed-size image
+  files.
+- `RawBlockBackend` for real block devices and partitions using ArgosFS
+  superblocks, labels, allocator state, journal, metadata checkpoints, and data
+  extents directly on the device.
+
+HostFsBackend is not the recommended CapOS rootfs backend. CapOS rootfs support
+uses loop/raw block semantics and an initramfs flow that mounts ArgosFS at
+`/sysroot` before `switch_root`.
+
+Quick loop-backed rootfs smoke:
+
+```bash
+cargo build
+target/debug/argosfs mkfs --backend loop --images disk0.img,disk1.img,disk2.img --k 2 --m 1 --pool-name capos-root
+target/debug/argosfs import-tree --backend loop --images disk0.img,disk1.img,disk2.img /path/to/root /
+target/debug/argosfs scan --backend loop --images disk0.img,disk1.img,disk2.img --json
+target/debug/argosfs preflight-root --backend loop --images disk0.img,disk1.img,disk2.img --mode rw
+```
+
+See `docs/raw-backend.md`, `docs/capos-rootfs.md`, and
+`docs/limitations.md` for the raw layout, CapOS boot flow, and current limits.
+
 ArgosFS is a Rust implementation of a self-driving, erasure-coded Linux
 filesystem. It provides a real FUSE mount frontend suitable for root filesystem
 experiments, plus a management CLI, health autopilot, repair tooling, and
@@ -34,7 +62,9 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
 - Per-shard SHA-256 verification and raw-stripe SHA-256 validation.
 - Automatic read reconstruction, deferred self-heal when replacement capacity is
   unavailable, and `fsck`/`scrub` repair when enough online disks exist.
-- Dynamic add-disk, drain/remove-disk, and weighted rebalance.
+- Dynamic add-disk, drain/remove-disk, and weighted rebalance for host volumes;
+  loop/raw pools share the repair/rebalance data path, with raw device
+  replacement still treated as an operator-verified workflow.
 - Heterogeneous disk placement through weighted, tier-aware rendezvous hashing.
 - Automatic disk probing for SSD/HDD/NVMe class, measured read/write
   performance, recommended tier, recommended weight, real capacity, and backing
@@ -227,7 +257,8 @@ static project website lives in `website/index.html`.
 ## Limitations
 
 ArgosFS is a complete research filesystem project with a real FUSE frontend, but
-it is not yet a production-certified kernel filesystem. The current metadata
-store is a single-node COW JSON database. That makes experiments transparent and
-auditable; `docs/metadata-scalability.md` tracks the page/B-tree migration plan
-and benchmark entry point.
+it is not yet a production-certified kernel filesystem. Raw checkpoints now use
+a page-indexed checksum tree, but the logical metadata model is still a
+serialized JSON object rather than a fully split inode/directory B-tree. That
+makes experiments transparent and auditable; `docs/metadata-scalability.md`
+tracks the remaining metadata scalability work and benchmark entry point.

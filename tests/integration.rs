@@ -1,15 +1,24 @@
 use argosfs::acl;
+use argosfs::backend::FileBlockBackend;
 use argosfs::cache::BlockCache;
 use argosfs::crypto;
 use argosfs::journal;
-use argosfs::types::{Compression, DiskStatus, IoMode, Metadata, StorageTier, VolumeConfig};
-use argosfs::util::{directory_size, sha256_hex};
+use argosfs::raw_format::{
+    DEVICE_LABEL_OFFSET, JOURNAL_REGION_OFFSET, METADATA_REGION_OFFSET, PRIMARY_SUPERBLOCK_OFFSET,
+    SUPERBLOCK_SIZE,
+};
+use argosfs::types::{
+    BackendKind, Compression, DiskStatus, IoMode, Metadata, RawFreeExtent, ShardLocation,
+    StorageTier, VolumeConfig,
+};
+use argosfs::util::{content_hash_hex, directory_size, sha256_hex};
 use argosfs::{ArgosError, ArgosFs, AutopilotConfig};
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::FileExt;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
@@ -25,6 +34,12 @@ fn config(k: usize, m: usize) -> VolumeConfig {
         fsname: "argosfs-test".to_string(),
         ..VolumeConfig::default()
     }
+}
+
+fn loop_images(tmp: &TempDir, count: usize) -> Vec<std::path::PathBuf> {
+    (0..count)
+        .map(|index| tmp.path().join(format!("disk{index}.img")))
+        .collect()
 }
 
 fn shard_abs(fs: &ArgosFs, disk_id: &str, rel: &std::path::Path) -> std::path::PathBuf {
@@ -73,6 +88,33 @@ fn journal_records(root: &std::path::Path) -> Vec<serde_json::Value> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+fn raw_journal_records(image: &std::path::Path) -> Vec<serde_json::Value> {
+    let (superblock, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, image.to_path_buf()).unwrap();
+    let disk = std::fs::File::open(image).unwrap();
+    let mut header = [0u8; 4096];
+    disk.read_at(&mut header, superblock.journal.offset)
+        .unwrap();
+    let end = u64::from_le_bytes(header[24..32].try_into().unwrap());
+    let mut cursor = 4096u64;
+    let mut records = Vec::new();
+    while cursor + 36 <= end {
+        let mut entry_header = [0u8; 36];
+        disk.read_at(&mut entry_header, superblock.journal.offset + cursor)
+            .unwrap();
+        let len = u32::from_le_bytes(entry_header[..4].try_into().unwrap()) as usize;
+        if len == 0 || cursor + 36 + len as u64 > end {
+            break;
+        }
+        let mut bytes = vec![0u8; len];
+        disk.read_at(&mut bytes, superblock.journal.offset + cursor + 36)
+            .unwrap();
+        records.push(serde_json::from_slice(&bytes).unwrap());
+        cursor += 36 + len as u64;
+    }
+    records
 }
 
 #[test]
@@ -136,6 +178,39 @@ fn range_write_rewrites_only_affected_stripe_window() {
 }
 
 #[test]
+fn legacy_sha256_data_checksums_remain_readable() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 1, false).unwrap();
+    let payload = b"legacy sha256 payload stays readable";
+    fs.write_file("/legacy", payload, 0o644).unwrap();
+    drop(fs);
+
+    let primary = tmp.path().join(".argosfs/meta.primary.json");
+    let mut meta: Metadata = serde_json::from_slice(&fs::read(&primary).unwrap()).unwrap();
+    let root = meta.inodes.get(&1).unwrap();
+    let file_ino = root.entries["legacy"];
+    let legacy_hash = sha256_hex(payload);
+    let inode = meta.inodes.get_mut(&file_ino).unwrap();
+    assert_eq!(inode.blocks.len(), 1);
+    inode.blocks[0].raw_sha256 = legacy_hash.clone();
+    inode.blocks[0].shards[0].sha256 = legacy_hash.clone();
+    inode.blocks[0].shards[0].subblock_sha256 = vec![legacy_hash];
+    journal::prepare_metadata_integrity_for_external_store(&mut meta).unwrap();
+    let bytes = serde_json::to_vec_pretty(&meta).unwrap();
+    for name in ["meta.primary.json", "meta.secondary.json", "meta.json"] {
+        fs::write(tmp.path().join(".argosfs").join(name), &bytes).unwrap();
+    }
+
+    let reopened = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(reopened.read_file("/legacy", true).unwrap(), payload);
+    let report = reopened.fsck(false, false).unwrap();
+    assert_eq!(report.checksum_errors, 0);
+    assert_eq!(report.unrecoverable_files, 0);
+}
+
+#[test]
 fn truncate_rewrites_only_tail_stripe_window() {
     let _guard = env_lock();
     let tmp = TempDir::new().unwrap();
@@ -165,6 +240,23 @@ fn truncate_rewrites_only_tail_stripe_window() {
         .clone();
     assert!(after_blocks.len() < before_blocks.len());
     assert_eq!(fs.read_file("/file", true).unwrap(), b"aaaabbbbcc");
+}
+
+#[test]
+fn partial_read_accounts_only_requested_window() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.chunk_size = 4;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 1, false).unwrap();
+    fs.write_file("/window", b"abcdefghijkl", 0o644).unwrap();
+    let ino = fs.resolve_path("/window", true).unwrap();
+
+    assert_eq!(fs.read_inode(ino, 4, 4, true).unwrap(), b"efgh");
+
+    let inode = fs.metadata_snapshot().inodes[&ino].clone();
+    assert_eq!(inode.access_count, 1);
+    assert_eq!(inode.read_bytes, 4);
 }
 
 #[test]
@@ -245,6 +337,1032 @@ fn write_read_and_posix_metadata() {
 
     fs.setxattr_inode(ino, "user.paper", b"argon").unwrap();
     assert_eq!(fs.getxattr_inode(ino, "user.paper").unwrap(), b"argon");
+}
+
+#[test]
+fn single_device_host_and_loop_support_m_zero_layouts() {
+    let tmp = TempDir::new().unwrap();
+    let host = tmp.path().join("host");
+    let host_fs = ArgosFs::create(&host, config(1, 0), 1, false).unwrap();
+    host_fs
+        .write_file("/single", b"host-single", 0o644)
+        .unwrap();
+    let host_meta = host_fs.metadata_snapshot();
+    assert_eq!(host_meta.config.k, 1);
+    assert_eq!(host_meta.config.m, 0);
+    assert_eq!(host_meta.current_write_layout, "layout-0000");
+    assert_eq!(host_meta.layouts["layout-0000"].m, 0);
+    let host_ino = host_fs.resolve_path("/single", true).unwrap();
+    let host_block = &host_meta.inodes[&host_ino].blocks[0];
+    assert_eq!(host_block.layout_id, "layout-0000");
+    assert_eq!(host_block.shards.len(), 1);
+    drop(host_fs);
+    assert_eq!(
+        ArgosFs::open(&host)
+            .unwrap()
+            .read_file("/single", true)
+            .unwrap(),
+        b"host-single"
+    );
+
+    let images = loop_images(&tmp, 1);
+    let loop_fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "single", false).unwrap();
+    let loop_payload = vec![b'l'; 20 * 1024];
+    loop_fs
+        .write_file("/loop-single", &loop_payload, 0o644)
+        .unwrap();
+    assert_eq!(
+        loop_fs.read_file("/loop-single", true).unwrap(),
+        loop_payload.as_slice()
+    );
+    assert!(loop_fs.fsck(false, false).unwrap().errors.is_empty());
+    assert!(loop_fs.scrub().unwrap().errors.is_empty());
+    let loop_meta = loop_fs.metadata_snapshot();
+    let loop_ino = loop_fs.resolve_path("/loop-single", true).unwrap();
+    let loop_block = &loop_meta.inodes[&loop_ino].blocks[0];
+    assert_eq!(loop_block.layout_id, "layout-0000");
+    assert_eq!(loop_block.shards.len(), 1);
+    assert!(matches!(
+        loop_block.shards[0].location,
+        Some(ShardLocation::RawExtent(_))
+    ));
+    drop(loop_fs);
+    let reopened = ArgosFs::open_loop(&images, true).unwrap();
+    assert_eq!(
+        reopened.read_file("/loop-single", true).unwrap(),
+        loop_payload.as_slice()
+    );
+}
+
+#[test]
+fn single_device_loop_partial_read_uses_subblock_checksums() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.chunk_size = 1024 * 1024;
+    cfg.compression = Compression::None;
+    cfg.l2_cache_bytes = 0;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "single-partial", false).unwrap();
+    let payload = (0..1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    fs.write_file("/blob", &payload, 0o644).unwrap();
+    fs.sync().unwrap();
+
+    let meta = fs.metadata_snapshot();
+    let ino = fs.resolve_path("/blob", true).unwrap();
+    let block = meta.inodes[&ino].blocks[0].clone();
+    let shard = block.shards[0].clone();
+    assert_eq!(block.layout_id, meta.current_write_layout);
+    assert_eq!(shard.size, payload.len());
+    assert_eq!(shard.checksum_block_size, 256 * 1024);
+    assert_eq!(shard.subblock_sha256.len(), 4);
+    let extent = match shard.location.as_ref().unwrap() {
+        ShardLocation::RawExtent(extent) => extent.clone(),
+        other => panic!("unexpected shard location: {other:?}"),
+    };
+    drop(fs);
+
+    let corrupt_offset = shard.checksum_block_size * 3 + 17;
+    let image = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&images[0])
+        .unwrap();
+    image
+        .write_at(
+            &[payload[corrupt_offset] ^ 0xff],
+            extent.offset + corrupt_offset as u64,
+        )
+        .unwrap();
+    image.sync_all().unwrap();
+
+    let reopened = ArgosFs::open_loop(&images, true).unwrap();
+    let ino = reopened.resolve_path("/blob", true).unwrap();
+    let good = reopened.read_inode(ino, 0, 4096, false).unwrap();
+    assert_eq!(good, payload[..4096]);
+
+    let err = reopened
+        .read_inode(
+            ino,
+            (shard.checksum_block_size * 3 + 128) as u64,
+            4096,
+            false,
+        )
+        .unwrap_err();
+    assert!(matches!(err, ArgosError::UnrecoverableStripe { .. }));
+    assert!(!reopened.scrub().unwrap().errors.is_empty());
+}
+
+#[test]
+fn single_device_loop_inlines_small_files_and_promotes_large_appends() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "inline-small", false).unwrap();
+    let small = b"small CapOS config\n";
+    fs.write_file("/etc-config", small, 0o644).unwrap();
+    let ino = fs.resolve_path("/etc-config", true).unwrap();
+    let meta = fs.metadata_snapshot();
+    let inode = &meta.inodes[&ino];
+    assert!(inode.blocks.is_empty());
+    assert!(inode.inline_data.is_some());
+    assert_eq!(inode.inline_sha256, content_hash_hex(small));
+    assert_eq!(fs.read_file("/etc-config", true).unwrap(), small);
+    assert!(fs.fsck(false, false).unwrap().errors.is_empty());
+    fs.sync().unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, true).unwrap();
+    assert_eq!(reopened.read_file("/etc-config", true).unwrap(), small);
+    let ino = reopened.resolve_path("/etc-config", true).unwrap();
+    let growth = vec![b'x'; 20 * 1024];
+    reopened
+        .write_inode_range(ino, small.len() as u64, &growth)
+        .unwrap();
+    let meta = reopened.metadata_snapshot();
+    let inode = &meta.inodes[&ino];
+    assert!(inode.inline_data.is_none());
+    assert!(!inode.blocks.is_empty());
+    assert_eq!(inode.size, (small.len() + growth.len()) as u64);
+    assert!(reopened.fsck(false, false).unwrap().errors.is_empty());
+}
+
+#[test]
+fn single_device_loop_rootfs_smoke_import_export() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.mkdir("/sbin", 0o755).unwrap();
+    fs.write_file("/sbin/init", b"#!/bin/sh\nexit 0\n", 0o755)
+        .unwrap();
+    fs.mkdir("/etc", 0o755).unwrap();
+    fs.write_file("/etc/os-release", b"NAME=CapOS\n", 0o644)
+        .unwrap();
+    assert!(
+        argosfs::rootfs::preflight_volume(&fs, argosfs::rootfs::RootMountMode::ReadWrite)
+            .unwrap()
+            .ok
+    );
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, true).unwrap();
+    assert!(reopened.fsck(false, false).unwrap().errors.is_empty());
+    assert_eq!(
+        reopened.read_file("/etc/os-release", true).unwrap(),
+        b"NAME=CapOS\n"
+    );
+}
+
+#[test]
+fn raw_journal_replay_chains_from_bulk_checkpoint_for_rootfs_writes() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+
+    let previous_bulk = std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT");
+    std::env::set_var("ARGOSFS_BULK_IMPORT_COMMIT", "1");
+    fs.mkdir("/sbin", 0o755).unwrap();
+    fs.write_file("/sbin/init", b"#!/bin/sh\nexit 0\n", 0o755)
+        .unwrap();
+    fs.sync().unwrap();
+    if let Some(value) = previous_bulk {
+        std::env::set_var("ARGOSFS_BULK_IMPORT_COMMIT", value);
+    } else {
+        std::env::remove_var("ARGOSFS_BULK_IMPORT_COMMIT");
+    }
+
+    let created = fs
+        .create_file_at_with_owner(1, OsStr::new("etc-test"), 0o644, 0, 0)
+        .unwrap();
+    fs.write_inode_range(created.ino, 0, b"mounted-write")
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/etc-test", true).unwrap(),
+        b"mounted-write"
+    );
+    let report = reopened.transaction_report().unwrap();
+    assert_eq!(report.invalid_entries, 0);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(
+        argosfs::rootfs::preflight_volume(&reopened, argosfs::rootfs::RootMountMode::ReadWrite)
+            .unwrap()
+            .ok
+    );
+}
+
+#[test]
+fn loop_block_open_remaps_metadata_paths_to_current_devices() {
+    let tmp = TempDir::new().unwrap();
+    let original = tmp.path().join("original.img");
+    let moved = tmp.path().join("moved.img");
+    let original_images = vec![original.clone()];
+    let fs = ArgosFs::create_loop(
+        &original_images,
+        config(1, 0),
+        32 * 1024 * 1024,
+        "capos-root",
+        false,
+    )
+    .unwrap();
+    fs.write_file("/booted-from-current-path", b"ok", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    fs::copy(&original, &moved).unwrap();
+    fs::remove_file(&original).unwrap();
+    let moved_images = vec![moved.clone()];
+    let reopened = ArgosFs::open_loop(&moved_images, true).unwrap();
+    assert_eq!(reopened.metadata_snapshot().disks["disk-0000"].path, moved);
+    assert_eq!(
+        reopened
+            .read_file("/booted-from-current-path", true)
+            .unwrap(),
+        b"ok"
+    );
+    reopened.mkdir("/runtime-dir", 0o755).unwrap();
+    reopened
+        .write_file("/runtime-dir/created-after-remap", b"rw", 0o644)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .read_file("/runtime-dir/created-after-remap", true)
+            .unwrap(),
+        b"rw"
+    );
+    reopened.sync().unwrap();
+}
+
+#[test]
+fn reshape_single_to_redundant_resume_keeps_multilayout_readable() {
+    let tmp = TempDir::new().unwrap();
+    let mut images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    let a_payload = vec![b'a'; 20 * 1024];
+    let b_payload = vec![b'b'; 20 * 1024];
+    fs.write_file("/a", &a_payload, 0o644).unwrap();
+    fs.write_file("/b", &b_payload, 0o644).unwrap();
+    let old_layout = fs.metadata_snapshot().current_write_layout;
+
+    let new_image = tmp.path().join("disk1.img");
+    fs.add_block_device(new_image.clone(), 32 * 1024 * 1024, false)
+        .unwrap();
+    images.push(new_image);
+
+    let start = fs.reshape_layout(1, 1, Some(0)).unwrap();
+    assert!(!start.complete);
+    assert_eq!(start.remaining_files, 2);
+    assert_eq!(fs.read_file("/a", true).unwrap(), a_payload.as_slice());
+    let meta = fs.metadata_snapshot();
+    assert_eq!(meta.layouts[&old_layout].m, 0);
+    assert_eq!(meta.layouts[&meta.current_write_layout].m, 1);
+    assert!(meta.reshape.is_some());
+
+    let step = fs.reshape_layout(1, 1, Some(1)).unwrap();
+    assert!(!step.complete);
+    assert_eq!(step.remaining_files, 1);
+    assert_eq!(fs.read_file("/b", true).unwrap(), b_payload.as_slice());
+    drop(fs);
+
+    let resumed = ArgosFs::open_loop(&images, true).unwrap();
+    let done = resumed.reshape_layout(1, 1, None).unwrap();
+    assert!(done.complete);
+    assert_eq!(done.remaining_files, 0);
+    assert_eq!(resumed.read_file("/a", true).unwrap(), a_payload.as_slice());
+    assert_eq!(resumed.read_file("/b", true).unwrap(), b_payload.as_slice());
+    assert!(resumed.fsck(true, true).unwrap().errors.is_empty());
+    let final_meta = resumed.metadata_snapshot();
+    let target = final_meta.current_write_layout.clone();
+    assert!(final_meta.reshape.is_none());
+    for inode in final_meta
+        .inodes
+        .values()
+        .filter(|inode| inode.kind == argosfs::types::NodeKind::File)
+    {
+        for block in &inode.blocks {
+            assert_eq!(block.layout_id, target);
+            assert_eq!(block.shards.len(), 2);
+        }
+    }
+}
+
+#[test]
+fn reshape_crash_after_data_flush_keeps_old_layout_data_readable() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let mut images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    let payload = vec![b'r'; 20 * 1024];
+    fs.write_file("/payload", &payload, 0o644).unwrap();
+    let new_image = tmp.path().join("disk1.img");
+    fs.add_block_device(new_image.clone(), 32 * 1024 * 1024, false)
+        .unwrap();
+    images.push(new_image);
+    fs.reshape_layout(1, 1, Some(0)).unwrap();
+
+    journal::set_thread_crash_point(Some(
+        argosfs::types::FaultPoint::AfterDataFlushBeforeJournalCommit.as_str(),
+    ));
+    let err = fs.reshape_layout(1, 1, Some(1)).unwrap_err();
+    journal::set_thread_crash_point(None);
+    assert_eq!(err.errno(), libc::EIO);
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, true).unwrap();
+    assert_eq!(
+        reopened.read_file("/payload", true).unwrap(),
+        payload.as_slice()
+    );
+    assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+    let done = reopened.reshape_layout(1, 1, None).unwrap();
+    assert!(done.complete);
+}
+
+#[test]
+fn reshape_single_device_to_k4_m2_chain() {
+    let tmp = TempDir::new().unwrap();
+    let mut images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/chain", b"reshape-chain", 0o644).unwrap();
+
+    let disk1 = tmp.path().join("disk1.img");
+    fs.add_block_device(disk1.clone(), 32 * 1024 * 1024, false)
+        .unwrap();
+    images.push(disk1);
+    assert!(fs.reshape_layout(1, 1, None).unwrap().complete);
+
+    let disk2 = tmp.path().join("disk2.img");
+    fs.add_block_device(disk2.clone(), 32 * 1024 * 1024, false)
+        .unwrap();
+    images.push(disk2);
+    assert!(fs.reshape_layout(2, 1, None).unwrap().complete);
+
+    for index in 3..6 {
+        let image = tmp.path().join(format!("disk{index}.img"));
+        fs.add_block_device(image.clone(), 32 * 1024 * 1024, false)
+            .unwrap();
+        images.push(image);
+    }
+    assert!(fs.reshape_layout(4, 2, None).unwrap().complete);
+    assert_eq!(fs.read_file("/chain", true).unwrap(), b"reshape-chain");
+    assert!(fs.fsck(true, true).unwrap().errors.is_empty());
+    let meta = fs.metadata_snapshot();
+    let layout = &meta.layouts[&meta.current_write_layout];
+    assert_eq!((layout.k, layout.m), (4, 2));
+    let ino = fs.resolve_path("/chain", true).unwrap();
+    assert!(meta.inodes[&ino]
+        .blocks
+        .iter()
+        .all(|block| block.shards.len() == 6));
+}
+
+#[test]
+fn loop_block_backend_round_trips_raw_extents_without_host_shards() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/etc-os-release", b"NAME=CapOS\n", 0o644)
+        .unwrap();
+
+    let meta = fs.metadata_snapshot();
+    assert_eq!(meta.backend, BackendKind::LoopBlock);
+    let inode = meta
+        .inodes
+        .values()
+        .find(|inode| inode.size == b"NAME=CapOS\n".len() as u64)
+        .unwrap();
+    let shard = &inode.blocks[0].shards[0];
+    assert!(shard.relpath.as_os_str().is_empty());
+    assert!(matches!(shard.location, Some(ShardLocation::RawExtent(_))));
+    assert!(!tmp.path().join(".argosfs/meta.json").exists());
+    fs.sync().unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, true).unwrap();
+    assert_eq!(
+        reopened.read_file("/etc-os-release", true).unwrap(),
+        b"NAME=CapOS\n"
+    );
+    assert!(reopened.fsck(false, false).unwrap().errors.is_empty());
+}
+
+#[test]
+fn loop_block_scan_inspect_and_repair_corrupt_extent() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/payload", b"abcdefghijklmnopqrstuvwxyz", 0o644)
+        .unwrap();
+    let meta = fs.metadata_snapshot();
+    let inode = meta.inodes.values().find(|inode| inode.size == 26).unwrap();
+    let shard = &inode.blocks[0].shards[0];
+    let extent = match shard.location.as_ref().unwrap() {
+        ShardLocation::RawExtent(extent) => extent.clone(),
+        _ => panic!("loop shard should use raw extent"),
+    };
+    drop(fs);
+
+    let scan = argosfs::scan::scan_images(&images);
+    assert_eq!(scan.iter().filter(|device| device.valid).count(), 3);
+    let (superblock, label) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert_eq!(superblock.label, "capos-root");
+    assert_eq!(label.label, "capos-root");
+
+    let disk_index = extent
+        .disk_id
+        .strip_prefix("disk-")
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&images[disk_index])
+        .unwrap();
+    file.write_at(b"corrupt", extent.offset).unwrap();
+    file.sync_all().unwrap();
+
+    let fs = ArgosFs::open_loop(&images, true).unwrap();
+    let report = fs.fsck(true, false).unwrap();
+    assert_eq!(report.damaged_files, 1);
+    assert_eq!(report.repaired_files, 1);
+    assert_eq!(
+        fs.read_file("/payload", true).unwrap(),
+        b"abcdefghijklmnopqrstuvwxyz"
+    );
+}
+
+#[test]
+fn clean_state_updates_device_label_generation() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/payload", b"label-generation", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let (superblock, label) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert_eq!(superblock.generation, label.generation);
+    assert_eq!(superblock.disk_id, label.disk_id);
+}
+
+#[test]
+fn loop_block_scan_and_inspect_recover_from_backup_superblock() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/payload", b"backup-superblock", 0o644)
+        .unwrap();
+    drop(fs);
+
+    let file = fs::OpenOptions::new().write(true).open(&images[0]).unwrap();
+    file.write_at(&vec![0u8; SUPERBLOCK_SIZE], PRIMARY_SUPERBLOCK_OFFSET)
+        .unwrap();
+    file.sync_all().unwrap();
+
+    let scan = argosfs::scan::scan_images(&images);
+    assert_eq!(scan[0].superblock_source.as_deref(), Some("backup"));
+    assert!(scan[0].valid);
+    let (superblock, label) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert_eq!(superblock.disk_id, label.disk_id);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/payload", true).unwrap(),
+        b"backup-superblock"
+    );
+}
+
+#[test]
+fn loop_block_degraded_read_with_one_missing_image() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/payload", b"read-through-missing-disk", 0o644)
+        .unwrap();
+    drop(fs);
+
+    let partial = images[..2].to_vec();
+    let reopened = ArgosFs::open_loop(&partial, false).unwrap();
+    let meta = reopened.metadata_snapshot();
+    assert_eq!(meta.disks["disk-0002"].status, DiskStatus::Offline);
+    assert_eq!(
+        reopened.read_file("/payload", false).unwrap(),
+        b"read-through-missing-disk"
+    );
+}
+
+#[test]
+fn rootfs_preflight_fails_closed_for_degraded_rw_default() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/sbin-init", b"init", 0o755).unwrap();
+    drop(fs);
+
+    let partial = images[..2].to_vec();
+    let reopened = ArgosFs::open_loop(&partial, false).unwrap();
+    let err =
+        argosfs::rootfs::preflight_volume(&reopened, argosfs::rootfs::RootMountMode::ReadWrite)
+            .unwrap_err();
+    assert!(matches!(err, ArgosError::ReadonlyRequired(_)));
+    assert!(argosfs::rootfs::preflight_volume(
+        &reopened,
+        argosfs::rootfs::RootMountMode::DegradedReadOnly,
+    )
+    .is_ok());
+}
+
+#[test]
+fn rootfs_preflight_rejects_dirty_raw_pool_for_rw() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.mkdir("/sbin", 0o755).unwrap();
+    fs.write_file("/sbin/init", b"init", 0o755).unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let dirty = ArgosFs::open_loop(&images, true).unwrap();
+    drop(dirty);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    let err =
+        argosfs::rootfs::preflight_volume(&reopened, argosfs::rootfs::RootMountMode::ReadWrite)
+            .unwrap_err();
+    assert!(matches!(err, ArgosError::UnsafeMount(_)));
+    assert!(
+        argosfs::rootfs::preflight_volume(&reopened, argosfs::rootfs::RootMountMode::Recovery,)
+            .is_ok()
+    );
+}
+
+#[test]
+fn loop_block_crash_after_data_flush_before_journal_keeps_old_data() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/crash", b"old", 0o644).unwrap();
+
+    journal::set_thread_crash_point(Some(
+        argosfs::types::FaultPoint::AfterDataFlushBeforeJournalCommit.as_str(),
+    ));
+    let err = fs
+        .write_file("/crash", b"new-after-flush", 0o644)
+        .unwrap_err();
+    journal::set_thread_crash_point(None);
+    assert_eq!(err.errno(), libc::EIO);
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, true).unwrap();
+    assert_eq!(reopened.read_file("/crash", true).unwrap(), b"old");
+    assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn raw_journal_partial_tail_is_audited_and_data_remains_readable() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/journal-tail", b"valid-before-tail", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let disk = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&images[0])
+        .unwrap();
+    let mut header = [0u8; 4096];
+    disk.read_at(&mut header, JOURNAL_REGION_OFFSET).unwrap();
+    let end = u64::from_le_bytes(header[24..32].try_into().unwrap());
+    let mut bad = [0u8; 36];
+    bad[..4].copy_from_slice(&128u32.to_le_bytes());
+    disk.write_at(&bad, JOURNAL_REGION_OFFSET + end).unwrap();
+    header[24..32].copy_from_slice(&(end + bad.len() as u64).to_le_bytes());
+    disk.write_at(&header, JOURNAL_REGION_OFFSET).unwrap();
+    disk.sync_all().unwrap();
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/journal-tail", true).unwrap(),
+        b"valid-before-tail"
+    );
+    let report = reopened.transaction_report().unwrap();
+    assert!(report.invalid_entries > 0);
+}
+
+#[test]
+fn raw_journal_rollover_checkpoints_large_import_style_workloads() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    let mut meta = fs.metadata_snapshot();
+    drop(fs);
+
+    let devices = images
+        .iter()
+        .enumerate()
+        .map(|(index, path)| (format!("disk-{index:04}"), path.clone()))
+        .collect::<Vec<_>>();
+    let backend = FileBlockBackend::open_with_ids(BackendKind::LoopBlock, devices, true).unwrap();
+    let superblocks = images
+        .iter()
+        .map(|path| {
+            argosfs::raw_store::inspect_device(BackendKind::LoopBlock, path.clone())
+                .unwrap()
+                .0
+        })
+        .collect::<Vec<_>>();
+
+    const PAYLOAD_SIZE: usize = 384 * 1024;
+    for index in 0..8 {
+        let previous = meta.integrity.meta_hash.clone();
+        meta.txid += 1;
+        meta.inodes.get_mut(&1).unwrap().xattrs.insert(
+            format!("user.rollover.{index:04}"),
+            "x".repeat(PAYLOAD_SIZE),
+        );
+        journal::prepare_metadata_integrity_with_previous(&mut meta, previous).unwrap();
+        argosfs::raw_store::append_transaction(
+            &backend,
+            &superblocks,
+            &meta,
+            "test-rollover",
+            serde_json::json!({ "index": index }),
+        )
+        .unwrap();
+    }
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    let reopened_meta = reopened.metadata_snapshot();
+    assert_eq!(
+        reopened_meta.inodes[&1].xattrs["user.rollover.0007"].len(),
+        PAYLOAD_SIZE
+    );
+    assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn raw_primary_metadata_corruption_recovers_from_mirror_or_other_device() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/metadata", b"metadata-copy", 0o644).unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let disk = fs::OpenOptions::new().write(true).open(&images[0]).unwrap();
+    disk.write_at(&[0x5au8; 128], METADATA_REGION_OFFSET + 4096)
+        .unwrap();
+    disk.sync_all().unwrap();
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/metadata", true).unwrap(),
+        b"metadata-copy"
+    );
+    let report = reopened.transaction_report().unwrap();
+    assert!(report
+        .metadata_candidates
+        .iter()
+        .any(|candidate| candidate.present && !candidate.valid));
+}
+
+#[test]
+fn raw_metadata_tree_checkpoint_spans_pages() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    for index in 0..4 {
+        fs.setxattr_inode(
+            1,
+            &format!("user.metadata_tree.{index}"),
+            &vec![index as u8; 4096],
+        )
+        .unwrap();
+    }
+    fs.sync().unwrap();
+    drop(fs);
+
+    let (superblock, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    let slot_len = superblock.metadata.length / 2;
+    let disk = std::fs::File::open(&images[0]).unwrap();
+    let mut observed_page_count = 0;
+    for slot in 0..2u64 {
+        let mut header = [0u8; 4096];
+        disk.read_at(&mut header, superblock.metadata.offset + slot * slot_len)
+            .unwrap();
+        assert_eq!(&header[..16], b"ARGOSFS-RAW-MD\0\0");
+        let checkpoint_format = u32::from_le_bytes(header[20..24].try_into().unwrap());
+        assert_eq!(checkpoint_format, 1);
+        let page_size = u64::from_le_bytes(header[144..152].try_into().unwrap());
+        let page_count = u64::from_le_bytes(header[152..160].try_into().unwrap());
+        let index_len = u64::from_le_bytes(header[160..168].try_into().unwrap());
+        assert_eq!(page_size, 4096);
+        assert_eq!(index_len, page_count * 48);
+        observed_page_count = observed_page_count.max(page_count);
+    }
+    assert!(observed_page_count > 1);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.getxattr_inode(1, "user.metadata_tree.3").unwrap(),
+        vec![3u8; 4096]
+    );
+    assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn raw_deferred_journal_flush_persists_after_sync() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/deferred", b"journal flush at sync", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/deferred", true).unwrap(),
+        b"journal flush at sync"
+    );
+    assert!(reopened.transaction_report().unwrap().errors.is_empty());
+}
+
+#[test]
+fn raw_batched_metadata_commit_persists_after_sync() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.defer_metadata_commit = true;
+    cfg.defer_data_flush = true;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "capos-root", false).unwrap();
+    for index in 0..16 {
+        fs.write_file(
+            &format!("/batched-{index:04}"),
+            format!("batched-payload-{index:04}").as_bytes(),
+            0o644,
+        )
+        .unwrap();
+    }
+    fs.sync().unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/batched-0015", true).unwrap(),
+        b"batched-payload-0015"
+    );
+    assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn raw_deferred_data_flush_requires_batched_metadata_commit() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_data_flush = true;
+    let err = match ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "capos-root", false) {
+        Ok(_) => panic!("defer-data-flush without batched metadata should fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, ArgosError::Invalid(message) if message.contains("defer-data-flush")));
+}
+
+#[test]
+fn raw_hot_file_transactions_use_metadata_deltas() {
+    let _guard = env_lock();
+    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "1000");
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "capos-root", false).unwrap();
+    for index in 0..8 {
+        fs.write_file(
+            &format!("/delta-{index:04}"),
+            format!("payload-{index:04}").as_bytes(),
+            0o644,
+        )
+        .unwrap();
+    }
+    drop(fs);
+
+    let records = raw_journal_records(&images[0]);
+    let hot_records = records
+        .iter()
+        .filter(|record| record["action"] == "mknod" || record["action"] == "write")
+        .collect::<Vec<_>>();
+    assert!(!hot_records.is_empty());
+    assert!(hot_records
+        .iter()
+        .all(|record| record.get("metadata").is_none()));
+    assert!(hot_records
+        .iter()
+        .all(|record| record.get("metadata_delta").is_some()));
+    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
+}
+
+#[test]
+fn raw_allocator_inconsistency_is_reported_by_fsck() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    let payload = vec![b'a'; 20 * 1024];
+    fs.write_file("/allocator", &payload, 0o644).unwrap();
+    let mut meta = fs.metadata_snapshot();
+    let inode = meta
+        .inodes
+        .values()
+        .find(|inode| inode.size == payload.len() as u64)
+        .unwrap();
+    let extent = match inode.blocks[0].shards[0].location.as_ref().unwrap() {
+        ShardLocation::RawExtent(extent) => extent.clone(),
+        _ => panic!("expected raw extent"),
+    };
+    meta.raw_pool
+        .allocators
+        .get_mut(&extent.disk_id)
+        .unwrap()
+        .free_extents
+        .push(RawFreeExtent {
+            offset: extent.offset,
+            length: extent.length,
+        });
+    meta.txid += 1;
+    let previous = meta.integrity.meta_hash.clone();
+    journal::prepare_metadata_integrity_with_previous(&mut meta, previous).unwrap();
+
+    let devices = images
+        .iter()
+        .enumerate()
+        .map(|(index, path)| (format!("disk-{index:04}"), path.clone()))
+        .collect::<Vec<_>>();
+    let backend = FileBlockBackend::open_with_ids(BackendKind::LoopBlock, devices, true).unwrap();
+    let superblocks = images
+        .iter()
+        .map(|path| {
+            argosfs::raw_store::inspect_device(BackendKind::LoopBlock, path.clone())
+                .unwrap()
+                .0
+        })
+        .collect::<Vec<_>>();
+    argosfs::raw_store::append_transaction(
+        &backend,
+        &superblocks,
+        &meta,
+        "test-corrupt-allocator",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    let report = reopened.fsck(false, false).unwrap();
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("overlaps allocator free list")));
+}
+
+#[test]
+fn loop_block_open_rejects_duplicate_disk_id_conflict() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    drop(fs);
+
+    let mut bytes = vec![0u8; SUPERBLOCK_SIZE];
+    let disk1 = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&images[1])
+        .unwrap();
+    disk1
+        .read_at(&mut bytes, PRIMARY_SUPERBLOCK_OFFSET)
+        .unwrap();
+    let mut superblock = argosfs::raw_format::RawSuperblock::decode(&bytes).unwrap();
+    superblock.disk_id = "disk-0000".to_string();
+    disk1
+        .write_at(&superblock.encode(), PRIMARY_SUPERBLOCK_OFFSET)
+        .unwrap();
+    disk1
+        .write_at(&superblock.device_label().encode(), DEVICE_LABEL_OFFSET)
+        .unwrap();
+    disk1
+        .write_at(&superblock.encode(), superblock.backup_superblock_offset)
+        .unwrap();
+    disk1.sync_all().unwrap();
+
+    let err = match ArgosFs::open_loop(&images, false) {
+        Ok(_) => panic!("duplicate disk id should be rejected"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, ArgosError::IncompatibleFormat(_)));
+    assert!(err.to_string().contains("duplicate ArgosFS disk id"));
+}
+
+#[test]
+fn loop_block_add_device_initializes_new_member() {
+    let tmp = TempDir::new().unwrap();
+    let mut images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/payload", b"before-add", 0o644).unwrap();
+    let new_image = tmp.path().join("disk3.img");
+    let disk_id = fs
+        .add_block_device(new_image.clone(), 32 * 1024 * 1024, false)
+        .unwrap();
+    assert_eq!(disk_id, "disk-0003");
+    drop(fs);
+
+    images.push(new_image);
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert!(reopened.metadata_snapshot().disks.contains_key("disk-0003"));
+    assert_eq!(
+        reopened.read_file("/payload", false).unwrap(),
+        b"before-add"
+    );
+    let scan = argosfs::scan::scan_images(&images);
+    assert_eq!(scan.iter().filter(|device| device.valid).count(), 4);
+}
+
+#[test]
+fn loop_block_cli_replace_device_rewrites_off_old_member() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/payload", b"before-replace", 0o644).unwrap();
+    drop(fs);
+
+    let new_image = tmp.path().join("disk3.img");
+    let images_arg = images
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(",");
+    let status = Command::new(argosfs_binary())
+        .arg("replace-device")
+        .arg("--backend")
+        .arg("loop")
+        .arg("--images")
+        .arg(images_arg)
+        .arg("--old")
+        .arg("disk-0002")
+        .arg("--new")
+        .arg(&new_image)
+        .arg("--image-size")
+        .arg((32 * 1024 * 1024).to_string())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let remaining = vec![images[0].clone(), images[1].clone(), new_image];
+    let reopened = ArgosFs::open_loop(&remaining, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/payload", false).unwrap(),
+        b"before-replace"
+    );
 }
 
 #[test]
@@ -685,6 +1803,43 @@ fn detects_corrupt_shard_and_scrubs() {
 }
 
 #[test]
+fn autopilot_scrub_reports_self_healed_files() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/file", b"abcdefghijklmnopqrstuvwxyz", 0o644)
+        .unwrap();
+
+    let meta = fs.metadata_snapshot();
+    let inode = meta.inodes.values().find(|inode| inode.size == 26).unwrap();
+    let shard = &inode.blocks[0].shards[0];
+    fs::write(shard_abs(&fs, &shard.disk_id, &shard.relpath), b"corrupt").unwrap();
+    drop(fs);
+
+    let fs = ArgosFs::open(tmp.path()).unwrap();
+    let result = fs
+        .autopilot_once_with_config(AutopilotConfig {
+            probe_interval_sec: u64::MAX,
+            smart_interval_sec: u64::MAX,
+            scrub_interval_sec: 0,
+            rebalance_interval_sec: u64::MAX,
+            ..AutopilotConfig::default()
+        })
+        .unwrap();
+    let scrub = result["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["action"] == "scrub-incremental")
+        .unwrap();
+    assert_eq!(scrub["report"]["damaged_files"], 1);
+    assert_eq!(scrub["report"]["repaired_files"], 1);
+    assert_eq!(
+        fs.read_file("/file", true).unwrap(),
+        b"abcdefghijklmnopqrstuvwxyz"
+    );
+}
+
+#[test]
 fn direct_io_detects_aligned_trailing_shard_garbage() {
     let tmp = TempDir::new().unwrap();
     let mut cfg = config(1, 1);
@@ -1111,9 +2266,30 @@ fn l2_cache_enforces_limit_and_evicts_bad_entries() {
     let corrupt_root = tmp.path().join("corrupt");
     let cache = BlockCache::new(&corrupt_root, 16, 128);
     cache.put("bad", b"stale").unwrap();
-    assert!(cache.get("bad", Some(&sha256_hex(b"fresh"))).is_none());
+    assert!(cache
+        .get("bad", Some(&content_hash_hex(b"fresh")))
+        .is_none());
     assert_eq!(cache.stats()["memory_items"], serde_json::json!(0));
     assert_eq!(directory_size(&corrupt_root), 0);
+}
+
+#[test]
+fn l2_cache_write_failure_does_not_break_memory_cache() {
+    let tmp = TempDir::new().unwrap();
+    let blocked_root = tmp.path().join("not-a-directory");
+    fs::write(&blocked_root, b"file blocks cache directory creation").unwrap();
+    let cache = BlockCache::new(&blocked_root, 16, 1024);
+
+    cache.put("block", b"data").unwrap();
+
+    assert_eq!(
+        cache
+            .get("block", Some(&content_hash_hex(b"data")))
+            .unwrap(),
+        b"data"
+    );
+    assert_eq!(cache.stats()["l2_errors"].as_u64().unwrap(), 1);
+    assert_eq!(cache.stats()["l2_writes"].as_u64().unwrap(), 0);
 }
 
 #[test]
@@ -1128,7 +2304,9 @@ fn l2_cache_hit_refreshes_prune_recency_without_rewriting_file() {
 
     let cache = BlockCache::new(tmp.path(), 4, 8);
     assert_eq!(
-        cache.get("old-hot", Some(&sha256_hex(b"1111"))).unwrap(),
+        cache
+            .get("old-hot", Some(&content_hash_hex(b"1111")))
+            .unwrap(),
         b"1111"
     );
     assert_eq!(cache.stats()["l2_hits"].as_u64().unwrap(), 1);
@@ -1136,10 +2314,14 @@ fn l2_cache_hit_refreshes_prune_recency_without_rewriting_file() {
     cache.put("new", b"3333").unwrap();
 
     assert_eq!(
-        cache.get("old-hot", Some(&sha256_hex(b"1111"))).unwrap(),
+        cache
+            .get("old-hot", Some(&content_hash_hex(b"1111")))
+            .unwrap(),
         b"1111"
     );
-    assert!(cache.get("old-cold", Some(&sha256_hex(b"2222"))).is_none());
+    assert!(cache
+        .get("old-cold", Some(&content_hash_hex(b"2222")))
+        .is_none());
 }
 
 #[test]
@@ -1150,7 +2332,9 @@ fn l2_cache_hit_promotes_to_memory_without_rewriting_l2() {
     drop(cache);
     let cache = BlockCache::new(tmp.path(), 4, 1024);
     assert_eq!(
-        cache.get("block", Some(&sha256_hex(b"data"))).unwrap(),
+        cache
+            .get("block", Some(&content_hash_hex(b"data")))
+            .unwrap(),
         b"data"
     );
     assert_eq!(cache.stats()["l2_hits"].as_u64().unwrap(), 1);

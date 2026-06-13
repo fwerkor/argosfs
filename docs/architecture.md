@@ -5,6 +5,12 @@ implemented as a Rust core with a real FUSE frontend.
 
 ## Layers
 
+- Backend layer: `StorageBackend` abstracts host, loop-image, and raw-block
+  devices through `read_at`, `write_at`, `flush`, capacity, status, and
+  capability queries. `HostFsBackend` keeps compatibility with path-backed
+  shards. `LoopBlockBackend` and `RawBlockBackend` use the same raw format and
+  never create ext4/XFS/btrfs, tar, sqlite, or a directory tree inside an image
+  or block device.
 - Metadata service: JSON metadata committed with copy-on-write replacement,
   triple metadata copies, hash-chained journal records with full metadata
   snapshots, replay on open, audit log, and point-in-time metadata snapshots.
@@ -30,6 +36,32 @@ capacity-exhausted disks. Reads verify shard checksums, reconstruct
 missing/corrupt shards when enough data remains, decrypt encrypted payloads,
 verify the raw stripe checksum, update per-disk latency EWMA, and populate
 RAM/L2 caches.
+
+On host volumes, shard metadata uses `ShardLocation::HostPath` and the final
+I/O is a normal file write below `.argosfs/devices/<disk>/shards`. On loop/raw
+volumes, shard metadata uses `ShardLocation::RawExtent` with disk id, offset,
+allocator-aligned length, and generation. The same compression, encryption,
+checksum, erasure coding, scrub, repair, and read reconstruction code runs above
+both location forms.
+
+## Raw Metadata Flow
+
+Loop/raw member devices contain a protective header, primary superblock, device
+label, journal region, two-slot metadata checkpoint region, allocator region,
+data extent region, and backup superblock/label. The superblock and label are
+explicit little-endian binary structures with SHA-256 checksums and version
+checks. If the primary superblock is corrupt, scan/open attempts the backup copy
+at the end-reserved region.
+
+Raw metadata stores the logical `Metadata` JSON payload inside the raw metadata
+region as a page-indexed checkpoint tree. The checkpoint header records txid,
+generation, payload length, payload checksum, page size, page count, index
+length, and index root hash. Each index entry records a raw page extent and page
+checksum, so recovery validates the header, index, every page, and the complete
+payload before accepting a candidate. Raw journal entries are length-prefixed,
+checksum-protected records carrying metadata snapshots for idempotent replay.
+Rw open marks member superblocks dirty; an explicit `sync()` writes metadata
+copies and marks them clean.
 
 ## Heterogeneous Disks
 
@@ -110,11 +142,19 @@ points before/after journal append and after each metadata copy. The integration
 suite covers replay after `after-journal`, corrupt metadata-copy repair, and bad
 journal-tail detection.
 
+Loop/raw volumes also expose injection points for `before-data-write`,
+`after-data-write-before-flush`, `after-data-flush-before-journal-commit`,
+`after-journal-commit-before-metadata-commit`,
+`after-metadata-commit-before-superblock-update`, and `during-replay`.
+
 ## Failure Model
 
 For a `k+m` layout, any `m` shard losses in one stripe can be recovered. Disk
 failure is modeled as all shards on that disk becoming unavailable. The repair
 path reconstructs missing shards and writes them to healthy replacement disks.
+Rootfs preflight fails closed for degraded rw unless `degraded-rw` is explicitly
+selected, rejects pools with more missing devices than parity, and requires
+recovery or fsck before rw mount if raw journal audit reports invalid entries.
 
 ## Mounting
 
@@ -122,3 +162,8 @@ The FUSE frontend uses `fuser` and exposes inode-based Linux filesystem
 operations. It supports the node types needed by a root filesystem: regular
 files, directories, symlinks, hardlinks, character devices, block devices, FIFOs,
 and sockets.
+
+For CapOS rootfs, initramfs runs `scan`, optional `replay-journal`, optional
+`fsck`, `preflight-root`, then `mount-root` at `/sysroot`, verifies an init
+binary, and uses `switch_root`. The post-switch systemd assets provide health,
+watchdog, and recovery hooks around the same CLI preflight/fsck path.

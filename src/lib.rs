@@ -1,5 +1,7 @@
 pub mod acl;
 pub mod advanced_io;
+pub mod allocator;
+pub mod backend;
 pub mod cache;
 pub mod compression;
 pub mod crypto;
@@ -9,10 +11,14 @@ pub mod fusefs;
 pub mod health;
 pub mod journal;
 pub mod metrics;
+pub mod raw_format;
+pub mod raw_store;
+pub mod rootfs;
+pub mod scan;
 pub mod types;
 pub mod util;
 pub mod volume;
 
 pub use error::{ArgosError, Result};
-pub use types::{Compression, DiskStatus, StorageTier, VolumeConfig};
+pub use types::{BackendKind, Compression, DiskStatus, StorageTier, VolumeConfig};
 pub use volume::{ArgosFs, AutopilotConfig};

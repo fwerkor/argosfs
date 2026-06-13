@@ -1,5 +1,7 @@
 use crate::acl;
 use crate::advanced_io;
+use crate::allocator;
+use crate::backend::{FileBlockBackend, HostFsBackend, StorageBackend};
 use crate::cache::BlockCache;
 use crate::compression::{compress, decompress};
 use crate::crypto;
@@ -7,10 +9,12 @@ use crate::erasure::RsCodec;
 use crate::error::{ArgosError, Result};
 use crate::health::{classify_inode, probe_disk_path, refresh_smart, risk_report};
 use crate::journal;
+use crate::raw_format::{self, RawSuperblock};
+use crate::raw_store;
 use crate::types::*;
 use crate::util::{
-    append_json_line, atomic_write, clean_path, ensure_dir, now_f64, parent_name,
-    relative_or_absolute, sha256_hex, split_path, stable_u01,
+    append_json_line, atomic_write, clean_path, content_hash_hex, content_hash_matches, ensure_dir,
+    now_f64, parent_name, relative_or_absolute, split_path, stable_u01,
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -18,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -28,12 +33,17 @@ const ESCAPED_UTF8_NAME_PREFIX: &str = ".argosfs-name-utf8-v3:";
 const LEGACY_NON_UTF8_NAME_PREFIX: &str = "\0argosfs-name-hex:";
 const NON_UTF8_SYMLINK_TARGET_PREFIX: &str = "\0argosfs-symlink-target-hex:";
 const BOOT_CRITICAL_XATTR: &str = "system.argosfs.boot_critical";
+const DEFAULT_LAYOUT_ID: &str = "layout-0000";
+const SHARD_CHECKSUM_BLOCK_SIZE: usize = 256 * 1024;
+const INLINE_DATA_MAX: usize = 512;
 
 #[derive(Clone)]
 pub struct ArgosFs {
     root: Arc<PathBuf>,
+    backend: Arc<dyn StorageBackend>,
+    backend_writable: bool,
+    raw_superblocks: Arc<Vec<RawSuperblock>>,
     meta: Arc<Mutex<Metadata>>,
-    rs: Arc<RsCodec>,
     cache: Arc<BlockCache>,
 }
 
@@ -52,6 +62,17 @@ pub struct AutopilotConfig {
     pub critical_risk_score: f64,
     pub max_drains_per_run: usize,
     pub foreground_latency_target_ms: f64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ReshapeReport {
+    pub reshape_id: String,
+    pub target_layout: String,
+    pub target_k: usize,
+    pub target_m: usize,
+    pub rewritten_files: u64,
+    pub remaining_files: u64,
+    pub complete: bool,
 }
 
 impl Default for AutopilotConfig {
@@ -184,6 +205,13 @@ struct PlacementRequest<'a> {
     required_bytes: u64,
 }
 
+#[derive(Clone)]
+struct ShardIntegrity {
+    sha256: String,
+    checksum_block_size: usize,
+    subblock_sha256: Vec<String>,
+}
+
 impl ArgosFs {
     pub fn create(
         root: impl AsRef<Path>,
@@ -191,8 +219,8 @@ impl ArgosFs {
         disk_count: usize,
         force: bool,
     ) -> Result<Self> {
-        if config.k == 0 || config.m == 0 {
-            return Err(ArgosError::Invalid("k and m must be positive".to_string()));
+        if config.k == 0 {
+            return Err(ArgosError::Invalid("k must be positive".to_string()));
         }
         if disk_count < config.k + config.m {
             return Err(ArgosError::NotEnoughDisks {
@@ -203,6 +231,7 @@ impl ArgosFs {
         if config.chunk_size == 0 {
             config.chunk_size = VolumeConfig::default().chunk_size;
         }
+        validate_commit_policy(&config)?;
         let _ = RsCodec::new(config.k, config.m)?;
         let root = root.as_ref().to_path_buf();
         let system = root.join(".argosfs");
@@ -286,6 +315,8 @@ impl ArgosFs {
             ctime: created_at,
             entries: BTreeMap::new(),
             target: None,
+            inline_data: None,
+            inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
             posix_acl_access: None,
@@ -306,18 +337,24 @@ impl ArgosFs {
         let meta = Metadata {
             format: FORMAT_VERSION.to_string(),
             uuid,
+            backend: BackendKind::Host,
+            raw_pool: RawPoolMetadata::default(),
             created_at,
             updated_at: created_at,
             txid: 0,
             next_inode: ROOT_INO + 1,
             next_stripe: 1,
             config,
+            layouts: BTreeMap::new(),
+            current_write_layout: String::new(),
+            reshape: None,
             encryption: EncryptionConfig::default(),
             integrity: MetadataIntegrity::default(),
             disks,
             inodes,
         };
         let mut meta = meta;
+        normalize_metadata_layouts(&mut meta);
         journal::initialize_volume(&root, &mut meta, created_at)?;
         Self::open(root)
     }
@@ -326,6 +363,8 @@ impl ArgosFs {
         let root = root.as_ref().to_path_buf();
         let recovered = journal::load_or_recover(&root)?;
         let mut meta = recovered.metadata;
+        meta.backend = BackendKind::Host;
+        normalize_metadata_layouts(&mut meta);
         recompute_disk_usage_from_metadata(&mut meta);
         if meta.format != FORMAT_VERSION {
             return Err(ArgosError::Invalid(format!(
@@ -333,16 +372,206 @@ impl ArgosFs {
                 meta.format
             )));
         }
-        let rs = RsCodec::new(meta.config.k, meta.config.m)?;
+        let _ = RsCodec::new(meta.config.k, meta.config.m)?;
         let cache = BlockCache::new(
             root.join(".argosfs/cache/l2"),
             64 * 1024 * 1024,
             meta.config.l2_cache_bytes,
         );
         Ok(Self {
+            backend: Arc::new(HostFsBackend::new(&root)),
+            backend_writable: true,
+            raw_superblocks: Arc::new(Vec::new()),
             root: Arc::new(root),
             meta: Arc::new(Mutex::new(meta)),
-            rs: Arc::new(rs),
+            cache: Arc::new(cache),
+        })
+    }
+
+    pub fn create_loop(
+        images: &[PathBuf],
+        config: VolumeConfig,
+        image_size: u64,
+        pool_name: &str,
+        force: bool,
+    ) -> Result<Self> {
+        prepare_loop_images(images, image_size, force)?;
+        Self::create_block_backend(BackendKind::LoopBlock, images, config, pool_name, force)
+    }
+
+    pub fn create_raw(
+        devices: &[PathBuf],
+        config: VolumeConfig,
+        pool_name: &str,
+        force: bool,
+    ) -> Result<Self> {
+        Self::create_block_backend(BackendKind::RawBlock, devices, config, pool_name, force)
+    }
+
+    pub fn open_loop(images: &[PathBuf], write: bool) -> Result<Self> {
+        Self::open_block_backend(BackendKind::LoopBlock, images, write)
+    }
+
+    pub fn open_raw(devices: &[PathBuf], write: bool) -> Result<Self> {
+        Self::open_block_backend(BackendKind::RawBlock, devices, write)
+    }
+
+    fn create_block_backend(
+        kind: BackendKind,
+        paths: &[PathBuf],
+        mut config: VolumeConfig,
+        pool_name: &str,
+        force: bool,
+    ) -> Result<Self> {
+        if config.k == 0 {
+            return Err(ArgosError::Invalid("k must be positive".to_string()));
+        }
+        if paths.len() < config.k + config.m {
+            return Err(ArgosError::NotEnoughDisks {
+                need: config.k + config.m,
+                have: paths.len(),
+            });
+        }
+        if config.chunk_size == 0 {
+            config.chunk_size = VolumeConfig::default().chunk_size;
+        }
+        validate_commit_policy(&config)?;
+        let backend_file = match kind {
+            BackendKind::LoopBlock => FileBlockBackend::open_loop(paths, true)?,
+            BackendKind::RawBlock => FileBlockBackend::open_raw(paths, true)?,
+            BackendKind::Host => {
+                return Err(ArgosError::Unsupported(
+                    "create_block_backend requires loop or raw backend".to_string(),
+                ))
+            }
+        };
+        let pool_uuid = Uuid::new_v4();
+        let created_at = now_f64();
+        let mut superblocks = Vec::new();
+        let mut disks = BTreeMap::new();
+        let mut allocators = BTreeMap::new();
+        for (index, info) in backend_file.list_devices()?.into_iter().enumerate() {
+            let id = format!("disk-{index:04}");
+            let sb = raw_store::superblock_for_device(
+                pool_uuid,
+                index,
+                &id,
+                config.k,
+                config.m,
+                config.chunk_size,
+                info.capacity,
+                pool_name,
+            )?;
+            let allocator = allocator::init_allocator(
+                sb.data.offset,
+                sb.data.length,
+                raw_format::RAW_BLOCK_SIZE,
+            );
+            allocators.insert(id.clone(), allocator);
+            disks.insert(
+                id.clone(),
+                Disk {
+                    id,
+                    path: info.path,
+                    tier: StorageTier::Warm,
+                    weight: 1.0,
+                    status: DiskStatus::Online,
+                    capacity_bytes: info.capacity,
+                    capacity_source: CapacitySource::UserOverride,
+                    used_bytes: 0,
+                    health: HealthCounters {
+                        temperature_c: 30.0,
+                        ..HealthCounters::default()
+                    },
+                    class: DiskClass::Unknown,
+                    backing_device: None,
+                    backing_fs_id: None,
+                    failure_domain: format!("raw-device-{index:04}"),
+                    sysfs_block: None,
+                    rotational: None,
+                    numa_node: None,
+                    read_latency_ewma_ms: 0.0,
+                    write_latency_ewma_ms: 0.0,
+                    observed_read_mib_s: 0.0,
+                    observed_write_mib_s: 0.0,
+                    io_samples: 0,
+                    last_probe: DiskProbe::default(),
+                    created_at,
+                },
+            );
+            superblocks.push(sb);
+        }
+        let root_inode = root_inode(created_at);
+        let mut inodes = BTreeMap::new();
+        inodes.insert(ROOT_INO, root_inode);
+        let mut meta = Metadata {
+            format: FORMAT_VERSION.to_string(),
+            uuid: pool_uuid.to_string(),
+            backend: kind,
+            raw_pool: RawPoolMetadata {
+                pool_name: pool_name.to_string(),
+                format_version: RAW_FORMAT_VERSION,
+                clean: true,
+                dirty_since_txid: 0,
+                mount_generation: 1,
+                allocators,
+            },
+            created_at,
+            updated_at: created_at,
+            txid: 0,
+            next_inode: ROOT_INO + 1,
+            next_stripe: 1,
+            config,
+            layouts: BTreeMap::new(),
+            current_write_layout: String::new(),
+            reshape: None,
+            encryption: EncryptionConfig::default(),
+            integrity: MetadataIntegrity::default(),
+            disks,
+            inodes,
+        };
+        normalize_metadata_layouts(&mut meta);
+        journal::prepare_metadata_integrity_for_external_store(&mut meta)?;
+        let backend: Arc<dyn StorageBackend> = Arc::new(backend_file);
+        raw_store::initialize_pool(backend.clone(), &superblocks, &mut meta, force)?;
+        Self::from_block_parts(paths, backend, true, superblocks, meta)
+    }
+
+    fn open_block_backend(kind: BackendKind, paths: &[PathBuf], write: bool) -> Result<Self> {
+        let opened = raw_store::open_pool(kind, paths, write)?;
+        let mut meta = opened.metadata;
+        normalize_metadata_layouts(&mut meta);
+        recompute_disk_usage_from_metadata(&mut meta);
+        Self::from_block_parts(paths, opened.backend, write, opened.superblocks, meta)
+    }
+
+    fn from_block_parts(
+        paths: &[PathBuf],
+        backend: Arc<dyn StorageBackend>,
+        backend_writable: bool,
+        superblocks: Vec<RawSuperblock>,
+        meta: Metadata,
+    ) -> Result<Self> {
+        if meta.format != FORMAT_VERSION {
+            return Err(ArgosError::Invalid(format!(
+                "unsupported format {}",
+                meta.format
+            )));
+        }
+        let _ = RsCodec::new(meta.config.k, meta.config.m)?;
+        let cache_root = block_cache_root(&meta.uuid, paths);
+        let cache = BlockCache::new(cache_root, 64 * 1024 * 1024, meta.config.l2_cache_bytes);
+        let root = paths
+            .first()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        Ok(Self {
+            root: Arc::new(root),
+            backend,
+            backend_writable,
+            raw_superblocks: Arc::new(superblocks),
+            meta: Arc::new(Mutex::new(meta)),
             cache: Arc::new(cache),
         })
     }
@@ -356,11 +585,31 @@ impl ArgosFs {
     }
 
     pub fn transaction_report(&self) -> Result<TransactionReport> {
+        let meta = self.meta.lock();
+        if meta.backend != BackendKind::Host {
+            let superblocks = self.active_superblocks_locked(&meta)?;
+            let backend = self.active_block_backend_locked(&meta, false)?;
+            return raw_store::audit(&backend, &superblocks);
+        }
         journal::scan(&self.root)
     }
 
     pub fn sync(&self) -> Result<()> {
-        let meta = self.meta.lock();
+        let mut meta = self.meta.lock();
+        if meta.backend != BackendKind::Host {
+            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
+                || meta.config.defer_metadata_commit
+            {
+                let previous_meta_hash = meta.integrity.meta_hash.clone();
+                journal::prepare_metadata_integrity_with_previous(&mut meta, previous_meta_hash)?;
+            }
+            let superblocks = self.active_superblocks_locked(&meta)?;
+            let backend = self.active_block_backend_locked(&meta, true)?;
+            raw_store::write_metadata_copies(&backend, &superblocks, &meta)?;
+            raw_store::write_superblock_clean_state(&backend, &superblocks, true)?;
+            backend.flush_all()?;
+            return Ok(());
+        }
 
         let mut shard_paths = BTreeSet::new();
         for inode in meta.inodes.values() {
@@ -616,6 +865,17 @@ impl ArgosFs {
         size: usize,
         repair: bool,
     ) -> Result<Vec<u8>> {
+        self.read_inode_with_damage_report(ino, offset, size, repair)
+            .map(|(data, _, _)| data)
+    }
+
+    fn read_inode_with_damage_report(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        size: usize,
+        repair: bool,
+    ) -> Result<(Vec<u8>, Vec<String>, bool)> {
         let mut meta = self.meta.lock();
         let inode = meta
             .inodes
@@ -625,8 +885,10 @@ impl ArgosFs {
         match inode.kind {
             NodeKind::Directory => return Err(ArgosError::IsDirectory(format!("inode {ino}"))),
             NodeKind::Symlink => {
-                return Ok(decode_symlink_target_bytes(
-                    inode.target.as_deref().unwrap_or_default(),
+                return Ok((
+                    decode_symlink_target_bytes(inode.target.as_deref().unwrap_or_default()),
+                    Vec::new(),
+                    false,
                 ));
             }
             NodeKind::Special => {
@@ -636,24 +898,43 @@ impl ArgosFs {
             }
             NodeKind::File => {}
         }
-        let (data, damaged) = self.decode_inode_data_locked(&mut meta, &inode)?;
+        let logical_size = usize::try_from(inode.size)
+            .map_err(|_| ArgosError::Invalid("inode logical size is too large".to_string()))?;
+        let start = offset.min(logical_size as u64) as usize;
+        let end = start.saturating_add(size).min(logical_size);
+        let (mut data, mut damaged) =
+            self.decode_inode_range_from_inode_locked(&mut meta, &inode, start, end)?;
+        let mut repaired = false;
         if repair && !damaged.is_empty() {
-            drop(inode);
+            let mut repair_damaged = damaged.clone();
+            let (full, full_damaged) = self.decode_inode_data_locked(&mut meta, &inode)?;
+            for entry in full_damaged {
+                if !repair_damaged.contains(&entry) {
+                    repair_damaged.push(entry);
+                }
+            }
+            damaged = repair_damaged;
             let repair_result = self.replace_inode_data_locked(
                 &mut meta,
                 ino,
-                &data,
+                &full,
                 "self-heal",
                 json!({"damaged": damaged}),
                 true,
                 &BTreeSet::new(),
             );
-            if let Err(err) = repair_result {
-                self.journal_locked(
-                    &meta,
-                    "self-heal-deferred",
-                    json!({"inode": ino, "error": err.to_string()}),
-                )?;
+            match repair_result {
+                Ok(()) => {
+                    repaired = true;
+                    data = full[start..end].to_vec();
+                }
+                Err(err) => {
+                    self.journal_locked(
+                        &meta,
+                        "self-heal-deferred",
+                        json!({"inode": ino, "error": err.to_string()}),
+                    )?;
+                }
             }
         } else if let Some(live) = meta.inodes.get_mut(&ino) {
             live.access_count = live.access_count.saturating_add(1);
@@ -661,12 +942,31 @@ impl ArgosFs {
             live.last_accessed_at = now_f64();
             live.workload_score = live.workload_score * 0.98 + 1.0;
         }
-        let start = offset.min(data.len() as u64) as usize;
-        let end = start.saturating_add(size).min(data.len());
-        Ok(data[start..end].to_vec())
+        Ok((data, damaged, repaired))
     }
 
     pub fn write_inode_range(&self, ino: InodeId, offset: u64, data: &[u8]) -> Result<usize> {
+        self.write_inode_range_checked(ino, offset, data, None)
+    }
+
+    pub fn write_inode_range_as(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        data: &[u8],
+        uid: u32,
+        gid: u32,
+    ) -> Result<usize> {
+        self.write_inode_range_checked(ino, offset, data, Some((uid, gid)))
+    }
+
+    fn write_inode_range_checked(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        data: &[u8],
+        access: Option<(u32, u32)>,
+    ) -> Result<usize> {
         let start = usize::try_from(offset)
             .map_err(|_| ArgosError::Invalid("write offset is too large".to_string()))?;
         let end = start
@@ -674,9 +974,25 @@ impl ArgosFs {
             .ok_or_else(|| ArgosError::Invalid("write range is too large".to_string()))?;
 
         let mut meta = self.meta.lock();
+        if let Some((uid, gid)) = access {
+            let inode = meta
+                .inodes
+                .get(&ino)
+                .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+            if !acl::evaluate_access(inode, uid, gid, libc::W_OK) {
+                return Err(ArgosError::PermissionDenied(format!(
+                    "uid {uid} gid {gid} mask {:o} inode {ino}",
+                    libc::W_OK
+                )));
+            }
+        }
         let (old_size, stripe_raw_size) = self.range_update_geometry_locked(&meta, ino)?;
         if data.is_empty() {
             return Ok(0);
+        }
+        if start == old_size && start % stripe_raw_size == 0 {
+            self.append_inode_data_locked(&mut meta, ino, start, data)?;
+            return Ok(data.len());
         }
         let new_size = old_size.max(end);
         let affected_start = (start / stripe_raw_size) * stripe_raw_size;
@@ -718,6 +1034,111 @@ impl ArgosFs {
             json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "stripe-window-local"}),
         )?;
         Ok(data.len())
+    }
+
+    fn append_inode_data_locked(
+        &self,
+        meta: &mut Metadata,
+        ino: InodeId,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<()> {
+        let rollback = commit_previous_snapshot(meta);
+        let (storage_class, boot_critical, existing_inline, had_blocks) = {
+            let inode = meta
+                .inodes
+                .get(&ino)
+                .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+            if inode.kind != NodeKind::File {
+                return Err(ArgosError::Unsupported(
+                    "range updates require a regular file".to_string(),
+                ));
+            }
+            (
+                inode.storage_class,
+                inode.boot_critical,
+                decode_inline_data(inode)?,
+                !inode.blocks.is_empty(),
+            )
+        };
+        let full_inline_data = if let Some(mut inline) = existing_inline {
+            if offset != inline.len() {
+                return Err(ArgosError::Invalid(format!(
+                    "append offset {offset} does not match inline size {}",
+                    inline.len()
+                )));
+            }
+            inline.extend_from_slice(data);
+            Some(inline)
+        } else if !had_blocks && offset == 0 && inline_payload_for(meta, data).is_some() {
+            Some(data.to_vec())
+        } else {
+            None
+        };
+        let (written_blocks, inline_payload, new_size) =
+            if let Some(full_data) = full_inline_data.as_ref() {
+                let inline_payload = inline_payload_for(meta, full_data);
+                let blocks = if inline_payload.is_some() {
+                    Vec::new()
+                } else {
+                    self.encode_data_locked(
+                        meta,
+                        full_data,
+                        0,
+                        storage_class,
+                        boot_critical,
+                        &BTreeSet::new(),
+                    )?
+                };
+                (blocks, inline_payload, full_data.len())
+            } else {
+                let blocks = self.encode_data_locked(
+                    meta,
+                    data,
+                    offset as u64,
+                    storage_class,
+                    boot_critical,
+                    &BTreeSet::new(),
+                )?;
+                let new_size = offset
+                    .checked_add(data.len())
+                    .ok_or_else(|| ArgosError::Invalid("append size overflow".to_string()))?;
+                (blocks, None, new_size)
+            };
+        let now = now_f64();
+        let inode = meta.inodes.get_mut(&ino).unwrap();
+        if full_inline_data.is_some() {
+            inode.blocks = written_blocks.clone();
+        } else {
+            inode.blocks.extend(written_blocks.clone());
+        }
+        inode.blocks.sort_by_key(|block| block.raw_offset);
+        set_inline_payload(inode, inline_payload);
+        inode.size = new_size as u64;
+        inode.write_count = inode.write_count.saturating_add(1);
+        inode.write_bytes = inode.write_bytes.saturating_add(data.len() as u64);
+        inode.last_written_at = now;
+        inode.workload_score = inode.workload_score * 0.90 + 2.0;
+        inode.mtime = now;
+        inode.ctime = now;
+
+        if let Err(err) = self.commit_locked_with_previous(
+            meta,
+            rollback.as_ref(),
+            "write-range",
+            json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "aligned-eof-append"}),
+        ) {
+            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
+                if let Some(rollback) = rollback {
+                    *meta = rollback;
+                }
+                self.delete_blocks_locked(meta, &written_blocks);
+            } else if matches!(&err, ArgosError::Conflict(_)) {
+                self.delete_blocks_locked(meta, &written_blocks);
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub fn truncate_path(&self, path: &str, size: u64) -> Result<()> {
@@ -932,6 +1353,8 @@ impl ArgosFs {
             ctime: now,
             entries: BTreeMap::new(),
             target: Some(target_string.clone()),
+            inline_data: None,
+            inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
             posix_acl_access: inherited_acl,
@@ -1500,6 +1923,102 @@ impl ArgosFs {
         Ok(id)
     }
 
+    pub fn add_block_device(&self, path: PathBuf, image_size: u64, force: bool) -> Result<String> {
+        let kind = self.metadata_snapshot().backend;
+        if kind == BackendKind::Host {
+            return Err(ArgosError::Unsupported(
+                "add-device is only for loop/raw block pools; use add-disk for host volumes"
+                    .to_string(),
+            ));
+        }
+        if kind == BackendKind::LoopBlock {
+            prepare_loop_images(std::slice::from_ref(&path), image_size, force)?;
+        }
+        let new_backend_file = match kind {
+            BackendKind::LoopBlock => {
+                FileBlockBackend::open_loop(std::slice::from_ref(&path), true)?
+            }
+            BackendKind::RawBlock => FileBlockBackend::open_raw(std::slice::from_ref(&path), true)?,
+            BackendKind::Host => unreachable!(),
+        };
+        let info = new_backend_file
+            .list_devices()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ArgosError::MissingDevice(path.display().to_string()))?;
+        let mut meta = self.meta.lock();
+        let next = meta
+            .disks
+            .keys()
+            .filter_map(|id| id.strip_prefix("disk-")?.parse::<usize>().ok())
+            .max()
+            .map(|value| value + 1)
+            .unwrap_or(0);
+        let id = format!("disk-{next:04}");
+        let pool_uuid = Uuid::parse_str(&meta.uuid)
+            .map_err(|err| ArgosError::Invalid(format!("invalid pool UUID: {err}")))?;
+        let layout = current_write_layout(&meta)?;
+        let sb = raw_store::superblock_for_device(
+            pool_uuid,
+            next,
+            &id,
+            layout.k,
+            layout.m,
+            meta.config.chunk_size,
+            info.capacity,
+            &meta.raw_pool.pool_name,
+        )?;
+        let new_backend_with_id =
+            FileBlockBackend::open_with_ids(kind, vec![(id.clone(), path.clone())], true)?;
+        raw_store::preflight_devices_empty(&new_backend_with_id, std::slice::from_ref(&sb), force)?;
+
+        let created_at = now_f64();
+        meta.raw_pool.allocators.insert(
+            id.clone(),
+            allocator::init_allocator(sb.data.offset, sb.data.length, raw_format::RAW_BLOCK_SIZE),
+        );
+        meta.disks.insert(
+            id.clone(),
+            Disk {
+                id: id.clone(),
+                path: info.path,
+                tier: StorageTier::Warm,
+                weight: 1.0,
+                status: DiskStatus::Online,
+                capacity_bytes: info.capacity,
+                capacity_source: CapacitySource::UserOverride,
+                used_bytes: 0,
+                health: HealthCounters::default(),
+                class: DiskClass::Unknown,
+                backing_device: None,
+                backing_fs_id: None,
+                failure_domain: format!("raw-device-{next:04}"),
+                sysfs_block: None,
+                rotational: None,
+                numa_node: None,
+                read_latency_ewma_ms: 0.0,
+                write_latency_ewma_ms: 0.0,
+                observed_read_mib_s: 0.0,
+                observed_write_mib_s: 0.0,
+                io_samples: 0,
+                last_probe: DiskProbe::default(),
+                created_at,
+            },
+        );
+        raw_store::initialize_pool(
+            Arc::new(new_backend_with_id),
+            std::slice::from_ref(&sb),
+            &mut meta,
+            true,
+        )?;
+        self.commit_locked(
+            &mut meta,
+            "add-device",
+            json!({"disk_id": id, "path": path, "backend": kind.as_str()}),
+        )?;
+        Ok(id)
+    }
+
     pub fn mark_disk(&self, disk_id: &str, status: DiskStatus) -> Result<()> {
         let mut meta = self.meta.lock();
         let disk = meta
@@ -1652,7 +2171,7 @@ impl ArgosFs {
                 .iter()
                 .filter(|(id, disk)| id.as_str() != disk_id && disk.status == DiskStatus::Online)
                 .count();
-            let need = self.rs.total();
+            let need = max_layout_total(&meta);
             if have < need {
                 return Err(ArgosError::NotEnoughDisks { need, have });
             }
@@ -1728,6 +2247,180 @@ impl ArgosFs {
             .map(|(rewritten, _)| rewritten)
     }
 
+    pub fn reshape_layout(
+        &self,
+        target_k: usize,
+        target_m: usize,
+        max_files: Option<usize>,
+    ) -> Result<ReshapeReport> {
+        if target_k == 0 {
+            return Err(ArgosError::Invalid("target k must be positive".to_string()));
+        }
+        let max_files = max_files.unwrap_or(usize::MAX);
+        let (reshape_id, target_layout) = {
+            let mut meta = self.meta.lock();
+            normalize_metadata_layouts(&mut meta);
+            let have = meta
+                .disks
+                .values()
+                .filter(|disk| disk.status == DiskStatus::Online)
+                .count();
+            let need = target_k + target_m;
+            if have < need {
+                return Err(ArgosError::NotEnoughDisks { need, have });
+            }
+            let _ = RsCodec::new(target_k, target_m)?;
+            let chunk_size = meta.config.chunk_size;
+            let target_layout =
+                find_or_insert_layout_locked(&mut meta, target_k, target_m, chunk_size);
+            let restart = meta
+                .reshape
+                .as_ref()
+                .map(|state| state.target_layout != target_layout)
+                .unwrap_or(true);
+            if restart {
+                let from_layouts = meta
+                    .inodes
+                    .values()
+                    .flat_map(|inode| inode.blocks.iter())
+                    .map(|block| block_layout_id(block).to_string())
+                    .filter(|layout| layout != &target_layout)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let reshape_id = format!("reshape-{:016x}", meta.txid + 1);
+                meta.current_write_layout = target_layout.clone();
+                meta.config.k = target_k;
+                meta.config.m = target_m;
+                meta.reshape = Some(ReshapeState {
+                    id: reshape_id.clone(),
+                    target_layout: target_layout.clone(),
+                    from_layouts,
+                    cursor: None,
+                    rewritten_files: 0,
+                    complete: false,
+                });
+                self.commit_locked(
+                    &mut meta,
+                    "reshape-start",
+                    json!({"target_layout": target_layout.clone(), "k": target_k, "m": target_m}),
+                )?;
+                (reshape_id, meta.current_write_layout.clone())
+            } else {
+                let state = meta.reshape.as_ref().expect("reshape state exists").clone();
+                meta.current_write_layout = state.target_layout.clone();
+                let layout = layout_by_id(&meta, &state.target_layout)?;
+                meta.config.k = layout.k;
+                meta.config.m = layout.m;
+                (state.id.clone(), state.target_layout.clone())
+            }
+        };
+
+        let mut rewritten_now = 0u64;
+        while rewritten_now < max_files as u64 {
+            let Some(ino) = self.next_reshape_inode(&target_layout) else {
+                break;
+            };
+            let data = self.read_inode(ino, 0, u64::MAX as usize, true)?;
+            let mut meta = self.meta.lock();
+            self.replace_inode_data_locked(
+                &mut meta,
+                ino,
+                &data,
+                "reshape-rewrite",
+                json!({"inode": ino, "target_layout": target_layout.clone()}),
+                true,
+                &BTreeSet::new(),
+            )?;
+            if let Some(state) = meta.reshape.as_mut() {
+                if state.target_layout == target_layout {
+                    state.cursor = Some(ino);
+                    state.rewritten_files = state.rewritten_files.saturating_add(1);
+                }
+            }
+            self.commit_locked(
+                &mut meta,
+                "reshape-progress",
+                json!({"inode": ino, "target_layout": target_layout.clone()}),
+            )?;
+            rewritten_now = rewritten_now.saturating_add(1);
+        }
+
+        let remaining = self.reshape_remaining_files(&target_layout);
+        let mut meta = self.meta.lock();
+        let (state_rewritten, complete) = if remaining == 0 {
+            let state_rewritten = meta
+                .reshape
+                .as_ref()
+                .map(|state| state.rewritten_files)
+                .unwrap_or(rewritten_now);
+            for (layout_id, layout) in &mut meta.layouts {
+                if layout_id != &target_layout {
+                    layout.sealed = true;
+                }
+            }
+            if let Some(state) = meta.reshape.as_mut() {
+                state.complete = true;
+            }
+            self.commit_locked(
+                &mut meta,
+                "reshape-complete",
+                json!({"target_layout": target_layout.clone(), "rewritten_files": state_rewritten}),
+            )?;
+            meta.reshape = None;
+            self.commit_locked(
+                &mut meta,
+                "reshape-state-clear",
+                json!({"target_layout": target_layout.clone()}),
+            )?;
+            (state_rewritten, true)
+        } else {
+            (
+                meta.reshape
+                    .as_ref()
+                    .map(|state| state.rewritten_files)
+                    .unwrap_or(rewritten_now),
+                false,
+            )
+        };
+        let layout = layout_by_id(&meta, &target_layout)?;
+        Ok(ReshapeReport {
+            reshape_id,
+            target_layout,
+            target_k: layout.k,
+            target_m: layout.m,
+            rewritten_files: state_rewritten,
+            remaining_files: remaining as u64,
+            complete,
+        })
+    }
+
+    fn next_reshape_inode(&self, target_layout: &str) -> Option<InodeId> {
+        let meta = self.meta.lock();
+        meta.inodes.iter().find_map(|(ino, inode)| {
+            (inode.kind == NodeKind::File
+                && inode
+                    .blocks
+                    .iter()
+                    .any(|block| block_layout_id(block) != target_layout))
+            .then_some(*ino)
+        })
+    }
+
+    fn reshape_remaining_files(&self, target_layout: &str) -> usize {
+        let meta = self.meta.lock();
+        meta.inodes
+            .values()
+            .filter(|inode| {
+                inode.kind == NodeKind::File
+                    && inode
+                        .blocks
+                        .iter()
+                        .any(|block| block_layout_id(block) != target_layout)
+            })
+            .count()
+    }
+
     fn rebalance_limited(
         &self,
         max_files: usize,
@@ -1782,8 +2475,27 @@ impl ArgosFs {
         let mut next_cursor = cursor;
         for (ino, _) in self.file_window(cursor, max_files) {
             report.files_checked += 1;
-            match self.read_inode(ino, 0, u64::MAX as usize, true) {
-                Ok(_) => {}
+            match self.read_inode_with_damage_report(ino, 0, u64::MAX as usize, true) {
+                Ok((_, damaged, repaired)) => {
+                    if !damaged.is_empty() {
+                        report.damaged_files += 1;
+                        report.checksum_errors += damaged
+                            .iter()
+                            .filter(|entry| entry.contains(":checksum:"))
+                            .count() as u64;
+                        report.missing_shards += damaged
+                            .iter()
+                            .filter(|entry| {
+                                entry.contains(":missing:")
+                                    || entry.contains(":missing-disk")
+                                    || entry.contains(":unavailable")
+                            })
+                            .count() as u64;
+                        if repaired {
+                            report.repaired_files += 1;
+                        }
+                    }
+                }
                 Err(err) => {
                     report.unrecoverable_files += 1;
                     report.errors.push(format!("inode {ino}: {err}"));
@@ -1852,22 +2564,9 @@ impl ArgosFs {
                     for block in &inode.blocks {
                         for shard in &block.shards {
                             let meta = self.meta.lock();
-                            let Some(path) = self.shard_path_if_disk_exists_locked(
-                                &meta,
-                                &shard.disk_id,
-                                &shard.relpath,
-                            ) else {
-                                drop(meta);
-                                report.missing_shards += 1;
-                                damaged = true;
-                                continue;
-                            };
-                            let io_mode = meta.config.io_mode;
-                            let zero_copy = meta.config.zero_copy;
-                            drop(meta);
-                            match advanced_io::read_all(&path, shard.size, io_mode, zero_copy) {
+                            match self.read_shard_locked(&meta, shard) {
                                 Ok(data) => {
-                                    if sha256_hex(&data) != shard.sha256 {
+                                    if !content_hash_matches(&data, &shard.sha256) {
                                         report.checksum_errors += 1;
                                         damaged = true;
                                     }
@@ -1911,32 +2610,52 @@ impl ArgosFs {
                 for block in &inode.blocks {
                     for shard in &block.shards {
                         *referenced_usage.entry(shard.disk_id.clone()).or_default() +=
-                            shard.size as u64;
+                            shard_accounted_size(shard);
                     }
                 }
             }
         }
         let meta = self.metadata_snapshot();
-        for (disk_id, disk) in meta.disks {
-            let disk_root = relative_or_absolute(&self.root, &disk.path);
-            let shard_root = disk_root.join("shards");
-            if !shard_root.exists() {
-                continue;
-            }
-            for entry in walkdir::WalkDir::new(&shard_root)
-                .into_iter()
-                .filter_map(|entry| entry.ok())
-            {
-                if !entry.file_type().is_file() {
+        if meta.backend == BackendKind::Host {
+            for (disk_id, disk) in meta.disks {
+                let disk_root = relative_or_absolute(&self.root, &disk.path);
+                let shard_root = disk_root.join("shards");
+                if !shard_root.exists() {
                     continue;
                 }
-                let rel = entry.path().strip_prefix(&disk_root).unwrap().to_path_buf();
-                if !refs.contains(&(disk_id.clone(), rel.clone())) {
-                    report.orphan_shards += 1;
-                    if remove_orphans {
-                        fs::remove_file(entry.path())?;
-                        report.removed_orphans += 1;
+                for entry in walkdir::WalkDir::new(&shard_root)
+                    .into_iter()
+                    .filter_map(|entry| entry.ok())
+                {
+                    if !entry.file_type().is_file() {
+                        continue;
                     }
+                    let rel = entry.path().strip_prefix(&disk_root).unwrap().to_path_buf();
+                    if !refs.contains(&(disk_id.clone(), rel.clone())) {
+                        report.orphan_shards += 1;
+                        if remove_orphans {
+                            fs::remove_file(entry.path())?;
+                            report.removed_orphans += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            for (disk_id, allocator_state) in &meta.raw_pool.allocators {
+                let extents = meta
+                    .inodes
+                    .values()
+                    .flat_map(|inode| inode.blocks.iter())
+                    .flat_map(|block| block.shards.iter())
+                    .filter_map(|shard| match shard.location.as_ref() {
+                        Some(ShardLocation::RawExtent(extent)) if &extent.disk_id == disk_id => {
+                            Some(extent.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if let Err(err) = allocator::validate_allocations(allocator_state, extents) {
+                    report.errors.push(err.to_string());
                 }
             }
         }
@@ -2196,11 +2915,15 @@ impl ArgosFs {
             .iter()
             .filter(|disk| disk.status == DiskStatus::Online)
             .count();
+        let required_after_drain = {
+            let meta = self.meta.lock();
+            max_layout_total(&meta)
+        };
         let mut decisions = Vec::new();
         for disk in &report.disks {
             let disk_state = state.disks.get(&disk.id).cloned().unwrap_or_default();
             let drain_decision = autopilot_drain_decision(disk, &disk_state, now, &config);
-            let enough_online_disks = online.saturating_sub(1) >= self.rs.total();
+            let enough_online_disks = online.saturating_sub(1) >= required_after_drain;
             let chosen_action = if disk.predicted_failure
                 && disk.status == DiskStatus::Online
                 && enough_online_disks
@@ -2404,6 +3127,8 @@ impl ArgosFs {
             ctime: now,
             entries: BTreeMap::new(),
             target: None,
+            inline_data: None,
+            inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
             posix_acl_access: inherited_acl.clone(),
@@ -2454,6 +3179,7 @@ impl ArgosFs {
         {
             return Err(ArgosError::AlreadyExists(name.to_string()));
         }
+        let rollback = commit_previous_snapshot(meta);
         let file_type = mode & libc::S_IFMT;
         let kind = if file_type == libc::S_IFREG || file_type == 0 {
             if rdev != 0 {
@@ -2491,6 +3217,7 @@ impl ArgosFs {
         } else {
             file_type | (mode & 0o7777)
         };
+        let is_regular_file = kind == NodeKind::File && rdev == 0;
         let inode = Inode {
             id: ino,
             kind,
@@ -2505,6 +3232,8 @@ impl ArgosFs {
             ctime: now,
             entries: BTreeMap::new(),
             target: None,
+            inline_data: None,
+            inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
             posix_acl_access: inherited_acl,
@@ -2525,11 +3254,23 @@ impl ArgosFs {
             .entries
             .insert(name.to_string(), ino);
         self.touch_inode_locked(meta, parent, true, true);
-        self.commit_locked(
+        if meta.backend != BackendKind::Host && meta.config.defer_metadata_commit && is_regular_file
+        {
+            return Ok(ino);
+        }
+        if let Err(err) = self.commit_locked_with_previous(
             meta,
+            rollback.as_ref(),
             "mknod",
             json!({"parent": parent, "name": name, "inode": ino, "mode": mode, "rdev": rdev}),
-        )?;
+        ) {
+            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
+                if let Some(rollback) = rollback {
+                    *meta = rollback;
+                }
+            }
+            return Err(err);
+        }
         Ok(ino)
     }
 
@@ -2788,7 +3529,7 @@ impl ArgosFs {
         preserve_mtime: bool,
         exclude_disks: &BTreeSet<String>,
     ) -> Result<()> {
-        let rollback = meta.clone();
+        let rollback = commit_previous_snapshot(meta);
         let (storage_class, boot_critical) = {
             let inode = meta
                 .inodes
@@ -2806,12 +3547,17 @@ impl ArgosFs {
             (inode.storage_class, inode.boot_critical)
         };
         let old_blocks = meta.inodes.get(&ino).unwrap().blocks.clone();
-        let new_blocks =
-            self.encode_data_locked(meta, data, 0, storage_class, boot_critical, exclude_disks)?;
+        let inline_payload = inline_payload_for(meta, data);
+        let new_blocks = if inline_payload.is_some() {
+            Vec::new()
+        } else {
+            self.encode_data_locked(meta, data, 0, storage_class, boot_critical, exclude_disks)?
+        };
         let new_blocks_for_cleanup = new_blocks.clone();
         let now = now_f64();
         let inode = meta.inodes.get_mut(&ino).unwrap();
         inode.blocks = new_blocks;
+        set_inline_payload(inode, inline_payload);
         inode.size = data.len() as u64;
         inode.write_count = inode.write_count.saturating_add(1);
         inode.write_bytes = inode.write_bytes.saturating_add(data.len() as u64);
@@ -2822,9 +3568,12 @@ impl ArgosFs {
         }
         inode.ctime = now;
         self.account_blocks_locked(meta, &old_blocks, false);
-        if let Err(err) = self.commit_locked(meta, action, details) {
+        if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
+        {
             if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                *meta = rollback;
+                if let Some(rollback) = rollback {
+                    *meta = rollback;
+                }
                 self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
             } else if matches!(&err, ArgosError::Conflict(_)) {
                 self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
@@ -2851,16 +3600,8 @@ impl ArgosFs {
         }
         let old_size = usize::try_from(inode.size)
             .map_err(|_| ArgosError::Invalid("inode size is too large".to_string()))?;
-        let stripe_raw_size = meta
-            .config
-            .chunk_size
-            .checked_mul(meta.config.k)
-            .ok_or_else(|| ArgosError::Invalid("stripe size overflow".to_string()))?;
-        if stripe_raw_size == 0 {
-            return Err(ArgosError::Invalid(
-                "stripe size must be positive".to_string(),
-            ));
-        }
+        let layout = current_write_layout(meta)?;
+        let stripe_raw_size = layout_stripe_raw_size(&layout)?;
         Ok((old_size, stripe_raw_size))
     }
 
@@ -2884,7 +3625,38 @@ impl ArgosFs {
                 "range updates require a regular file".to_string(),
             ));
         }
+        if let Some(inline) = decode_inline_data(&inode)? {
+            let mut out = vec![0u8; end - start];
+            let copy_end = end.min(inline.len());
+            if copy_end > start {
+                out[..copy_end - start].copy_from_slice(&inline[start..copy_end]);
+            }
+            return Ok(out);
+        }
 
+        self.decode_inode_range_from_inode_locked(meta, &inode, start, end)
+            .map(|(data, _)| data)
+    }
+
+    fn decode_inode_range_from_inode_locked(
+        &self,
+        meta: &mut Metadata,
+        inode: &Inode,
+        start: usize,
+        end: usize,
+    ) -> Result<(Vec<u8>, Vec<String>)> {
+        if end <= start {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        if let Some(inline) = decode_inline_data(inode)? {
+            if end > inline.len() {
+                return Err(ArgosError::Invalid(format!(
+                    "inline inode {} size is smaller than requested range",
+                    inode.id
+                )));
+            }
+            return Ok((inline[start..end].to_vec(), Vec::new()));
+        }
         let mut out = vec![0u8; end - start];
         let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
             Some(self.encryption_key_locked(meta)?)
@@ -2892,25 +3664,39 @@ impl ArgosFs {
             None
         };
         let mut damaged = Vec::new();
-        for block in inode.blocks.iter().filter(|block| {
-            let block_start = block.raw_offset as usize;
-            let block_end = block_start.saturating_add(block.raw_size);
-            block_end > start && block_start < end
-        }) {
-            let raw = self.decode_block_locked(meta, block, decrypt_key.as_ref(), &mut damaged)?;
+        for block in &inode.blocks {
             let block_start = usize::try_from(block.raw_offset).map_err(|_| {
                 ArgosError::Invalid(format!("block {} raw offset is too large", block.stripe_id))
             })?;
+            let block_end = block_start.checked_add(block.raw_size).ok_or_else(|| {
+                ArgosError::Invalid(format!("block {} raw range overflow", block.stripe_id))
+            })?;
+            if block_end <= start || block_start >= end {
+                continue;
+            }
             let copy_start = block_start.max(start);
-            let copy_end = block_start.saturating_add(raw.len()).min(end);
+            let copy_end = block_end.min(end);
             if copy_end > copy_start {
                 let dst_start = copy_start - start;
-                let src_start = copy_start - block_start;
                 let len = copy_end - copy_start;
-                out[dst_start..dst_start + len].copy_from_slice(&raw[src_start..src_start + len]);
+                if let Some(raw) = self.decode_block_range_locked(
+                    meta,
+                    block,
+                    copy_start - block_start,
+                    copy_end - block_start,
+                    &mut damaged,
+                )? {
+                    out[dst_start..dst_start + len].copy_from_slice(&raw);
+                } else {
+                    let raw =
+                        self.decode_block_locked(meta, block, decrypt_key.as_ref(), &mut damaged)?;
+                    let src_start = copy_start - block_start;
+                    out[dst_start..dst_start + len]
+                        .copy_from_slice(&raw[src_start..src_start + len]);
+                }
             }
         }
-        Ok(out)
+        Ok((out, damaged))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2926,7 +3712,7 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
-        let rollback = meta.clone();
+        let rollback = commit_previous_snapshot(meta);
         let (storage_class, boot_critical, old_blocks) = {
             let inode = meta
                 .inodes
@@ -2960,7 +3746,14 @@ impl ArgosFs {
             }
         }
 
-        let written_blocks = if !window.is_empty() {
+        let inline_payload = if affected_start == 0 && window.len() == new_size {
+            inline_payload_for(meta, window)
+        } else {
+            None
+        };
+        let written_blocks = if inline_payload.is_some() {
+            Vec::new()
+        } else if !window.is_empty() {
             self.encode_data_locked(
                 meta,
                 window,
@@ -2978,6 +3771,7 @@ impl ArgosFs {
         let now = now_f64();
         let inode = meta.inodes.get_mut(&ino).unwrap();
         inode.blocks = merged;
+        set_inline_payload(inode, inline_payload);
         inode.size = new_size as u64;
         inode.write_count = inode.write_count.saturating_add(1);
         inode.write_bytes = inode.write_bytes.saturating_add(logical_write_bytes);
@@ -2987,9 +3781,12 @@ impl ArgosFs {
         inode.ctime = now;
 
         self.account_blocks_locked(meta, &replaced, false);
-        if let Err(err) = self.commit_locked(meta, action, details) {
+        if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
+        {
             if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                *meta = rollback;
+                if let Some(rollback) = rollback {
+                    *meta = rollback;
+                }
                 self.delete_blocks_locked(meta, &written_blocks);
             } else if matches!(&err, ArgosError::Conflict(_)) {
                 self.delete_blocks_locked(meta, &written_blocks);
@@ -3007,6 +3804,15 @@ impl ArgosFs {
     ) -> Result<(Vec<u8>, Vec<String>)> {
         let logical_size = usize::try_from(inode.size)
             .map_err(|_| ArgosError::Invalid("inode logical size is too large".to_string()))?;
+        if let Some(inline) = decode_inline_data(inode)? {
+            if inline.len() != logical_size {
+                return Err(ArgosError::Invalid(format!(
+                    "inline inode {} size mismatch",
+                    inode.id
+                )));
+            }
+            return Ok((inline, Vec::new()));
+        }
         let mut out = vec![0u8; logical_size];
         let mut damaged = Vec::new();
         let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
@@ -3049,8 +3855,17 @@ impl ArgosFs {
             }
             self.cache.remove(&cache_key);
         }
-        let mut shards: Vec<Option<Vec<u8>>> = vec![None; self.rs.total()];
+        let layout = layout_by_id(meta, block_layout_id(block))?;
+        if layout.k == 1 && layout.m == 0 && !block.encrypted && block.codec == Compression::None {
+            return self.decode_single_shard_block_locked(meta, block, damaged, &cache_key);
+        }
+        let codec = RsCodec::new(layout.k, layout.m)?;
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; layout_total(&layout)];
         for shard in &block.shards {
+            if shard.slot >= shards.len() {
+                damaged.push(format!("{}:invalid-slot:{}", shard.disk_id, shard.slot));
+                continue;
+            }
             let Some(disk) = meta.disks.get(&shard.disk_id) else {
                 damaged.push(format!("{}:missing-disk", shard.disk_id));
                 continue;
@@ -3062,14 +3877,8 @@ impl ArgosFs {
                 damaged.push(format!("{}:unavailable", shard.disk_id));
                 continue;
             }
-            let path = self.shard_path_locked(meta, &shard.disk_id, &shard.relpath);
             let start = std::time::Instant::now();
-            match advanced_io::read_all(
-                &path,
-                shard.size,
-                meta.config.io_mode,
-                meta.config.zero_copy,
-            ) {
+            match self.read_shard_locked(meta, shard) {
                 Ok(data) => {
                     self.update_read_latency_locked(
                         meta,
@@ -3077,7 +3886,7 @@ impl ArgosFs {
                         data.len() as u64,
                         start.elapsed().as_secs_f64(),
                     );
-                    if data.len() == shard.size && sha256_hex(&data) == shard.sha256 {
+                    if data.len() == shard.size && content_hash_matches(&data, &shard.sha256) {
                         shards[shard.slot] = Some(data);
                     } else {
                         damaged.push(format!("{}:checksum:{}", shard.disk_id, shard.slot));
@@ -3095,16 +3904,16 @@ impl ArgosFs {
             }
         }
         let present = shards.iter().filter(|shard| shard.is_some()).count();
-        if present < meta.config.k {
+        if present < layout.k {
             return Err(ArgosError::UnrecoverableStripe {
                 stripe_id: block.stripe_id.clone(),
-                reason: format!("only {present} shards available, need {}", meta.config.k),
+                reason: format!("only {present} shards available, need {}", layout.k),
             });
         }
-        let reconstructed = self.rs.reconstruct(shards)?;
+        let reconstructed = codec.reconstruct(shards)?;
         let compressed: Vec<u8> = reconstructed
             .iter()
-            .take(meta.config.k)
+            .take(layout.k)
             .flat_map(|shard| shard.iter().copied())
             .take(block.compressed_size)
             .collect();
@@ -3125,7 +3934,7 @@ impl ArgosFs {
             compressed
         };
         let raw = decompress(&compressed, block.codec)?;
-        if raw.len() != block.raw_size || sha256_hex(&raw) != block.raw_sha256 {
+        if raw.len() != block.raw_size || !content_hash_matches(&raw, &block.raw_sha256) {
             return Err(ArgosError::UnrecoverableStripe {
                 stripe_id: block.stripe_id.clone(),
                 reason: "raw checksum mismatch".to_string(),
@@ -3135,6 +3944,187 @@ impl ArgosFs {
             self.cache.put(&cache_key, &raw)?;
         }
         Ok(raw)
+    }
+
+    fn decode_block_range_locked(
+        &self,
+        meta: &mut Metadata,
+        block: &FileBlock,
+        start: usize,
+        end: usize,
+        damaged: &mut Vec<String>,
+    ) -> Result<Option<Vec<u8>>> {
+        if start >= end {
+            return Ok(Some(Vec::new()));
+        }
+        if block.encrypted || block.codec != Compression::None || end > block.raw_size {
+            return Ok(None);
+        }
+        let layout = layout_by_id(meta, block_layout_id(block))?;
+        if layout.k != 1 || layout.m != 0 {
+            return Ok(None);
+        }
+        let Some(shard) = block.shards.iter().find(|shard| shard.slot == 0) else {
+            damaged.push("single-shard:missing-slot-0".to_string());
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device block has no shard 0".to_string(),
+            });
+        };
+        if shard.size != block.raw_size
+            || shard.sha256 != block.raw_sha256
+            || shard.checksum_block_size == 0
+            || shard.subblock_sha256.is_empty()
+        {
+            return Ok(None);
+        }
+        let checksum_block_size = shard.checksum_block_size;
+        let expected_checksums = shard.size.div_ceil(checksum_block_size);
+        if shard.subblock_sha256.len() != expected_checksums {
+            return Ok(None);
+        }
+        let Some(disk) = meta.disks.get(&shard.disk_id) else {
+            damaged.push(format!("{}:missing-disk", shard.disk_id));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device block references a missing disk".to_string(),
+            });
+        };
+        if matches!(
+            disk.status,
+            DiskStatus::Failed | DiskStatus::Offline | DiskStatus::Removed
+        ) {
+            damaged.push(format!("{}:unavailable", shard.disk_id));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device shard is unavailable".to_string(),
+            });
+        }
+
+        let verify_start = (start / checksum_block_size) * checksum_block_size;
+        let verify_end = end.div_ceil(checksum_block_size) * checksum_block_size;
+        let verify_end = verify_end.min(shard.size);
+        let start_time = std::time::Instant::now();
+        let data = match self.read_shard_range_locked(
+            meta,
+            shard,
+            verify_start,
+            verify_end.saturating_sub(verify_start),
+        ) {
+            Ok(data) => data,
+            Err(err) => {
+                self.update_read_latency_locked(
+                    meta,
+                    &shard.disk_id,
+                    0,
+                    start_time.elapsed().as_secs_f64(),
+                );
+                damaged.push(format!("{}:missing-range:{}", shard.disk_id, shard.slot));
+                return Err(err);
+            }
+        };
+        self.update_read_latency_locked(
+            meta,
+            &shard.disk_id,
+            data.len() as u64,
+            start_time.elapsed().as_secs_f64(),
+        );
+
+        let first_checksum = verify_start / checksum_block_size;
+        let last_checksum = verify_end.div_ceil(checksum_block_size);
+        for checksum_index in first_checksum..last_checksum {
+            let absolute_start = checksum_index * checksum_block_size;
+            let absolute_end = absolute_start
+                .saturating_add(checksum_block_size)
+                .min(shard.size);
+            let relative_start = absolute_start.saturating_sub(verify_start);
+            let relative_end = absolute_end.saturating_sub(verify_start);
+            if relative_end > data.len()
+                || !content_hash_matches(
+                    &data[relative_start..relative_end],
+                    &shard.subblock_sha256[checksum_index],
+                )
+            {
+                damaged.push(format!(
+                    "{}:subblock-checksum:{}:{}",
+                    shard.disk_id, shard.slot, checksum_index
+                ));
+                return Err(ArgosError::UnrecoverableStripe {
+                    stripe_id: block.stripe_id.clone(),
+                    reason: "single-device subblock checksum mismatch".to_string(),
+                });
+            }
+        }
+
+        let local_start = start - verify_start;
+        let local_end = end - verify_start;
+        Ok(Some(data[local_start..local_end].to_vec()))
+    }
+
+    fn decode_single_shard_block_locked(
+        &self,
+        meta: &mut Metadata,
+        block: &FileBlock,
+        damaged: &mut Vec<String>,
+        cache_key: &str,
+    ) -> Result<Vec<u8>> {
+        let Some(shard) = block.shards.iter().find(|shard| shard.slot == 0) else {
+            damaged.push("single-shard:missing-slot-0".to_string());
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device block has no shard 0".to_string(),
+            });
+        };
+        let Some(disk) = meta.disks.get(&shard.disk_id) else {
+            damaged.push(format!("{}:missing-disk", shard.disk_id));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device block references a missing disk".to_string(),
+            });
+        };
+        if matches!(
+            disk.status,
+            DiskStatus::Failed | DiskStatus::Offline | DiskStatus::Removed
+        ) {
+            damaged.push(format!("{}:unavailable", shard.disk_id));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device shard is unavailable".to_string(),
+            });
+        }
+        let start = std::time::Instant::now();
+        let data = match self.read_shard_locked(meta, shard) {
+            Ok(data) => data,
+            Err(err) => {
+                self.update_read_latency_locked(
+                    meta,
+                    &shard.disk_id,
+                    0,
+                    start.elapsed().as_secs_f64(),
+                );
+                damaged.push(format!("{}:missing:{}", shard.disk_id, shard.slot));
+                return Err(err);
+            }
+        };
+        self.update_read_latency_locked(
+            meta,
+            &shard.disk_id,
+            data.len() as u64,
+            start.elapsed().as_secs_f64(),
+        );
+        if data.len() != shard.size
+            || data.len() != block.raw_size
+            || !content_hash_matches(&data, &shard.sha256)
+            || !content_hash_matches(&data, &block.raw_sha256)
+        {
+            damaged.push(format!("{}:checksum:{}", shard.disk_id, shard.slot));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device raw checksum mismatch".to_string(),
+            });
+        }
+        self.cache.put(cache_key, &data)?;
+        Ok(data)
     }
 
     fn encode_data_locked(
@@ -3147,16 +4137,8 @@ impl ArgosFs {
         exclude_disks: &BTreeSet<String>,
     ) -> Result<Vec<FileBlock>> {
         let mut blocks = Vec::new();
-        let stripe_raw_size = meta
-            .config
-            .chunk_size
-            .checked_mul(meta.config.k)
-            .ok_or_else(|| ArgosError::Invalid("stripe size overflow".to_string()))?;
-        if stripe_raw_size == 0 {
-            return Err(ArgosError::Invalid(
-                "stripe size must be positive".to_string(),
-            ));
-        }
+        let layout = current_write_layout(meta)?;
+        let stripe_raw_size = layout_stripe_raw_size(&layout)?;
         if data.is_empty() {
             return Ok(blocks);
         }
@@ -3171,6 +4153,58 @@ impl ArgosFs {
                 .next_stripe
                 .checked_add(1)
                 .ok_or_else(|| ArgosError::Invalid("stripe id overflow".to_string()))?;
+            let raw_sha256 = content_hash_hex(raw);
+            if layout.k == 1
+                && layout.m == 0
+                && encrypt_key.is_none()
+                && meta.config.compression == Compression::None
+            {
+                let shard_size = raw.len().max(1);
+                let placements = self.choose_disks_locked(
+                    meta,
+                    PlacementRequest {
+                        key: &stripe_id,
+                        count: 1,
+                        storage_class,
+                        boot_critical,
+                        exclude_disks,
+                        required_bytes: shard_size as u64,
+                    },
+                )?;
+                let integrity = ShardIntegrity {
+                    sha256: raw_sha256.clone(),
+                    checksum_block_size: SHARD_CHECKSUM_BLOCK_SIZE,
+                    subblock_sha256: shard_subblock_hashes(raw, &raw_sha256),
+                };
+                let shard = self.write_shard_locked(
+                    meta,
+                    &placements[0],
+                    &stripe_id,
+                    0,
+                    raw,
+                    Some(&integrity),
+                )?;
+                let raw_offset = index
+                    .checked_mul(stripe_raw_size)
+                    .and_then(|offset| u64::try_from(offset).ok())
+                    .and_then(|offset| base_offset.checked_add(offset))
+                    .ok_or_else(|| ArgosError::Invalid("raw block offset overflow".to_string()))?;
+                blocks.push(FileBlock {
+                    layout_id: layout.id.clone(),
+                    stripe_id,
+                    raw_offset,
+                    raw_size: raw.len(),
+                    raw_sha256,
+                    codec: Compression::None,
+                    encrypted: false,
+                    nonce_hex: String::new(),
+                    compressed_size: raw.len(),
+                    shard_size,
+                    shards: vec![shard],
+                    storage_class,
+                });
+                continue;
+            }
             let compressed = compress(raw, meta.config.compression, meta.config.compression_level)?;
             let (payload, encrypted, nonce_hex) = if let Some(key) = encrypt_key.as_ref() {
                 let (nonce, ciphertext) = crypto::encrypt_with_key(
@@ -3182,22 +4216,40 @@ impl ArgosFs {
             } else {
                 (compressed, false, String::new())
             };
-            let shard_size = payload.len().max(1).div_ceil(meta.config.k);
-            let mut padded = payload.clone();
-            let padded_len = shard_size
-                .checked_mul(meta.config.k)
-                .ok_or_else(|| ArgosError::Invalid("encoded shard size overflow".to_string()))?;
-            padded.resize(padded_len, 0);
-            let data_shards = padded
-                .chunks(shard_size)
-                .map(|chunk| chunk.to_vec())
-                .collect::<Vec<_>>();
-            let encoded = self.rs.encode(&data_shards)?;
+            let (shard_size, encoded) = if layout.k == 1 && layout.m == 0 {
+                (payload.len().max(1), vec![payload.clone()])
+            } else {
+                let codec = RsCodec::new(layout.k, layout.m)?;
+                let shard_size = payload.len().max(1).div_ceil(layout.k);
+                let mut padded = payload.clone();
+                let padded_len = shard_size.checked_mul(layout.k).ok_or_else(|| {
+                    ArgosError::Invalid("encoded shard size overflow".to_string())
+                })?;
+                padded.resize(padded_len, 0);
+                let data_shards = padded
+                    .chunks(shard_size)
+                    .map(|chunk| chunk.to_vec())
+                    .collect::<Vec<_>>();
+                (shard_size, codec.encode(&data_shards)?)
+            };
+            let single_raw_shard_integrity = if layout.k == 1
+                && layout.m == 0
+                && !encrypted
+                && meta.config.compression == Compression::None
+            {
+                Some(ShardIntegrity {
+                    sha256: raw_sha256.clone(),
+                    checksum_block_size: SHARD_CHECKSUM_BLOCK_SIZE,
+                    subblock_sha256: shard_subblock_hashes(raw, &raw_sha256),
+                })
+            } else {
+                None
+            };
             let placements = self.choose_disks_locked(
                 meta,
                 PlacementRequest {
                     key: &stripe_id,
-                    count: self.rs.total(),
+                    count: layout_total(&layout),
                     storage_class,
                     boot_critical,
                     exclude_disks,
@@ -3206,22 +4258,28 @@ impl ArgosFs {
             )?;
             let mut shards = Vec::new();
             for (slot, shard_data) in encoded.iter().enumerate() {
-                match self.write_shard_locked(meta, &placements[slot], &stripe_id, slot, shard_data)
-                {
+                let integrity = if slot == 0 {
+                    single_raw_shard_integrity.as_ref()
+                } else {
+                    None
+                };
+                match self.write_shard_locked(
+                    meta,
+                    &placements[slot],
+                    &stripe_id,
+                    slot,
+                    shard_data,
+                    integrity,
+                ) {
                     Ok(shard) => shards.push(shard),
                     Err(err) => {
                         for shard in &shards {
-                            if let Some(path) = self.shard_path_if_disk_exists_locked(
-                                meta,
-                                &shard.disk_id,
-                                &shard.relpath,
-                            ) {
-                                let _ = fs::remove_file(path);
-                            }
+                            let _ = self.delete_shard_locked(meta, shard);
                         }
                         for shard in &shards {
                             if let Some(disk) = meta.disks.get_mut(&shard.disk_id) {
-                                disk.used_bytes = disk.used_bytes.saturating_sub(shard.size as u64);
+                                disk.used_bytes =
+                                    disk.used_bytes.saturating_sub(shard_accounted_size(shard));
                             }
                         }
                         return Err(err);
@@ -3234,10 +4292,11 @@ impl ArgosFs {
                 .and_then(|offset| base_offset.checked_add(offset))
                 .ok_or_else(|| ArgosError::Invalid("raw block offset overflow".to_string()))?;
             blocks.push(FileBlock {
+                layout_id: layout.id.clone(),
                 stripe_id,
                 raw_offset,
                 raw_size: raw.len(),
-                raw_sha256: sha256_hex(raw),
+                raw_sha256,
                 codec: meta.config.compression,
                 encrypted,
                 nonce_hex,
@@ -3257,7 +4316,55 @@ impl ArgosFs {
         stripe_id: &str,
         slot: usize,
         data: &[u8],
+        integrity: Option<&ShardIntegrity>,
     ) -> Result<Shard> {
+        let sha256 = integrity
+            .map(|integrity| integrity.sha256.clone())
+            .unwrap_or_else(|| content_hash_hex(data));
+        let checksum_block_size = integrity
+            .map(|integrity| integrity.checksum_block_size)
+            .unwrap_or_default();
+        let subblock_sha256 = integrity
+            .map(|integrity| integrity.subblock_sha256.clone())
+            .unwrap_or_default();
+        if meta.backend != BackendKind::Host {
+            self.ensure_disk_capacity_locked(meta, disk_id, data.len() as u64)?;
+            let allocator = meta
+                .raw_pool
+                .allocators
+                .get_mut(disk_id)
+                .ok_or_else(|| ArgosError::MissingDevice(disk_id.to_string()))?;
+            let extent = allocator::allocate(allocator, disk_id, data.len() as u64, meta.txid + 1)?;
+            let start = std::time::Instant::now();
+            journal::inject_crash(FaultPoint::BeforeDataWrite.as_str())?;
+            self.backend_write_at_locked(meta, disk_id, extent.offset, data)?;
+            journal::inject_crash(FaultPoint::AfterDataWriteBeforeFlush.as_str())?;
+            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_none()
+                && !meta.config.defer_data_flush
+            {
+                self.backend_flush_locked(meta, disk_id)?;
+                journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
+            }
+            if let Some(disk) = meta.disks.get_mut(disk_id) {
+                disk.used_bytes = disk.used_bytes.saturating_add(extent.length);
+            }
+            self.update_write_latency_locked(
+                meta,
+                disk_id,
+                data.len() as u64,
+                start.elapsed().as_secs_f64(),
+            );
+            return Ok(Shard {
+                slot,
+                disk_id: disk_id.to_string(),
+                location: Some(ShardLocation::RawExtent(extent)),
+                relpath: PathBuf::new(),
+                sha256,
+                checksum_block_size,
+                subblock_sha256,
+                size: data.len(),
+            });
+        }
         let subdir = &stripe_id[stripe_id.len().saturating_sub(2)..];
         let relpath = PathBuf::from(format!("shards/{subdir}/{stripe_id}.{slot:03}.blk"));
         let path = self.shard_path_locked(meta, disk_id, &relpath);
@@ -3285,8 +4392,14 @@ impl ArgosFs {
         Ok(Shard {
             slot,
             disk_id: disk_id.to_string(),
+            location: Some(ShardLocation::HostPath {
+                disk_id: disk_id.to_string(),
+                relpath: relpath.clone(),
+            }),
             relpath,
-            sha256: sha256_hex(data),
+            sha256,
+            checksum_block_size,
+            subblock_sha256,
             size: data.len(),
         })
     }
@@ -3296,19 +4409,50 @@ impl ArgosFs {
         meta: &Metadata,
         request: PlacementRequest<'_>,
     ) -> Result<Vec<String>> {
+        if request.count == 1 {
+            let mut only = None;
+            let mut eligible = 0usize;
+            for (disk_id, disk) in &meta.disks {
+                if request.exclude_disks.contains(disk_id) || disk.status != DiskStatus::Online {
+                    continue;
+                }
+                if meta.backend == BackendKind::Host {
+                    let disk_path = relative_or_absolute(&self.root, &disk.path);
+                    if !disk_path.join("shards").exists() {
+                        continue;
+                    }
+                }
+                if !self.disk_has_capacity(meta, disk_id, disk, request.required_bytes) {
+                    continue;
+                }
+                eligible += 1;
+                only = Some(disk_id.clone());
+                if eligible > 1 {
+                    break;
+                }
+            }
+            if eligible == 1 {
+                return Ok(vec![only.expect("eligible disk id")]);
+            }
+        }
         let mut scored = Vec::new();
-        let local_numa = meta
-            .config
-            .numa_aware
-            .then(advanced_io::current_numa_node)
-            .flatten();
+        let local_numa = if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+            None
+        } else {
+            meta.config
+                .numa_aware
+                .then(advanced_io::current_numa_node)
+                .flatten()
+        };
         for (disk_id, disk) in &meta.disks {
             if request.exclude_disks.contains(disk_id) || disk.status != DiskStatus::Online {
                 continue;
             }
-            let disk_path = relative_or_absolute(&self.root, &disk.path);
-            if !disk_path.join("shards").exists() {
-                continue;
+            if meta.backend == BackendKind::Host {
+                let disk_path = relative_or_absolute(&self.root, &disk.path);
+                if !disk_path.join("shards").exists() {
+                    continue;
+                }
             }
             if !self.disk_has_capacity(meta, disk_id, disk, request.required_bytes) {
                 continue;
@@ -3496,6 +4640,9 @@ impl ArgosFs {
         bytes: u64,
         seconds: f64,
     ) {
+        if meta.config.defer_metadata_commit && bytes < SHARD_CHECKSUM_BLOCK_SIZE as u64 {
+            return;
+        }
         if let Some(disk) = meta.disks.get_mut(disk_id) {
             update_latency_ewma(
                 &mut disk.write_latency_ewma_ms,
@@ -3510,29 +4657,175 @@ impl ArgosFs {
         }
     }
 
-    fn delete_blocks_locked(&self, meta: &Metadata, blocks: &[FileBlock]) {
+    fn delete_blocks_locked(&self, meta: &mut Metadata, blocks: &[FileBlock]) {
         for block in blocks {
             self.cache.remove(&format!(
                 "{}:{}:{}",
                 meta.uuid, block.stripe_id, block.raw_sha256
             ));
             for shard in &block.shards {
+                let _ = self.delete_shard_locked(meta, shard);
+            }
+        }
+    }
+
+    fn read_shard_locked(&self, meta: &Metadata, shard: &Shard) -> Result<Vec<u8>> {
+        match shard.location.as_ref() {
+            Some(ShardLocation::RawExtent(extent)) => {
+                let mut data = vec![0u8; shard.size];
+                self.backend_read_at_locked(meta, &extent.disk_id, extent.offset, &mut data)?;
+                Ok(data)
+            }
+            Some(ShardLocation::HostPath { disk_id, relpath }) => advanced_io::read_all(
+                &self.shard_path_locked(meta, disk_id, relpath),
+                shard.size,
+                meta.config.io_mode,
+                meta.config.zero_copy,
+            ),
+            None => advanced_io::read_all(
+                &self.shard_path_locked(meta, &shard.disk_id, &shard.relpath),
+                shard.size,
+                meta.config.io_mode,
+                meta.config.zero_copy,
+            ),
+        }
+    }
+
+    fn read_shard_range_locked(
+        &self,
+        meta: &Metadata,
+        shard: &Shard,
+        offset: usize,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| ArgosError::Invalid("shard read range overflow".to_string()))?;
+        if end > shard.size {
+            return Err(ArgosError::Invalid(format!(
+                "shard range {offset}..{end} exceeds shard size {}",
+                shard.size
+            )));
+        }
+        let mut data = vec![0u8; len];
+        match shard.location.as_ref() {
+            Some(ShardLocation::RawExtent(extent)) => {
+                let absolute = extent
+                    .offset
+                    .checked_add(offset as u64)
+                    .ok_or_else(|| ArgosError::Invalid("raw extent read overflow".to_string()))?;
+                self.backend_read_at_locked(meta, &extent.disk_id, absolute, &mut data)?;
+            }
+            Some(ShardLocation::HostPath { disk_id, relpath }) => {
+                read_path_range_exact(
+                    &self.shard_path_locked(meta, disk_id, relpath),
+                    offset as u64,
+                    &mut data,
+                )?;
+            }
+            None => {
+                read_path_range_exact(
+                    &self.shard_path_locked(meta, &shard.disk_id, &shard.relpath),
+                    offset as u64,
+                    &mut data,
+                )?;
+            }
+        }
+        Ok(data)
+    }
+
+    fn delete_shard_locked(&self, meta: &mut Metadata, shard: &Shard) -> Result<()> {
+        match shard.location.as_ref() {
+            Some(ShardLocation::RawExtent(extent)) => {
+                if let Some(allocator) = meta.raw_pool.allocators.get_mut(&extent.disk_id) {
+                    allocator::free(allocator, extent)?;
+                }
+                Ok(())
+            }
+            Some(ShardLocation::HostPath { disk_id, relpath }) => {
+                if let Some(path) = self.shard_path_if_disk_exists_locked(meta, disk_id, relpath) {
+                    let _ = fs::remove_file(path);
+                }
+                Ok(())
+            }
+            None => {
                 if let Some(path) =
                     self.shard_path_if_disk_exists_locked(meta, &shard.disk_id, &shard.relpath)
                 {
                     let _ = fs::remove_file(path);
                 }
+                Ok(())
             }
         }
+    }
+
+    fn backend_read_at_locked(
+        &self,
+        meta: &Metadata,
+        disk_id: &str,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<()> {
+        match self.backend.read_at(&disk_id.to_string(), offset, buf) {
+            Err(ArgosError::MissingDevice(_)) if meta.backend != BackendKind::Host => {
+                let backend = self.single_device_backend_locked(meta, disk_id, false)?;
+                backend.read_at(&disk_id.to_string(), offset, buf)
+            }
+            other => other,
+        }
+    }
+
+    fn backend_write_at_locked(
+        &self,
+        meta: &Metadata,
+        disk_id: &str,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        match self.backend.write_at(&disk_id.to_string(), offset, data) {
+            Err(ArgosError::MissingDevice(_)) if meta.backend != BackendKind::Host => {
+                let backend = self.single_device_backend_locked(meta, disk_id, true)?;
+                backend.write_at(&disk_id.to_string(), offset, data)
+            }
+            other => other,
+        }
+    }
+
+    fn backend_flush_locked(&self, meta: &Metadata, disk_id: &str) -> Result<()> {
+        match self.backend.flush_device(&disk_id.to_string()) {
+            Err(ArgosError::MissingDevice(_)) if meta.backend != BackendKind::Host => {
+                let backend = self.single_device_backend_locked(meta, disk_id, true)?;
+                backend.flush_device(&disk_id.to_string())
+            }
+            other => other,
+        }
+    }
+
+    fn single_device_backend_locked(
+        &self,
+        meta: &Metadata,
+        disk_id: &str,
+        write: bool,
+    ) -> Result<FileBlockBackend> {
+        let disk = meta
+            .disks
+            .get(disk_id)
+            .ok_or_else(|| ArgosError::MissingDevice(disk_id.to_string()))?;
+        FileBlockBackend::open_with_ids(
+            meta.backend,
+            vec![(disk_id.to_string(), disk.path.clone())],
+            write,
+        )
     }
 
     fn account_blocks_locked(&self, meta: &mut Metadata, blocks: &[FileBlock], add: bool) {
         for shard in blocks.iter().flat_map(|block| block.shards.iter()) {
             if let Some(disk) = meta.disks.get_mut(&shard.disk_id) {
+                let accounted = shard_accounted_size(shard);
                 if add {
-                    disk.used_bytes = disk.used_bytes.saturating_add(shard.size as u64);
+                    disk.used_bytes = disk.used_bytes.saturating_add(accounted);
                 } else {
-                    disk.used_bytes = disk.used_bytes.saturating_sub(shard.size as u64);
+                    disk.used_bytes = disk.used_bytes.saturating_sub(accounted);
                 }
             }
         }
@@ -3785,6 +5078,24 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
+        self.commit_locked_with_previous(meta, None, action, details)
+    }
+
+    fn commit_locked_with_previous(
+        &self,
+        meta: &mut Metadata,
+        previous_metadata: Option<&Metadata>,
+        action: &str,
+        details: serde_json::Value,
+    ) -> Result<()> {
+        if meta.backend != BackendKind::Host
+            && (std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
+                || meta.config.defer_metadata_commit)
+        {
+            meta.txid += 1;
+            meta.updated_at = now_f64();
+            return Ok(());
+        }
         let previous_meta_hash = if meta.integrity.meta_hash.is_empty() {
             journal::canonical_metadata_hash(meta)?
         } else {
@@ -3793,6 +5104,47 @@ impl ArgosFs {
         let previous_txid = meta.txid;
         meta.txid += 1;
         meta.updated_at = now_f64();
+        if meta.backend != BackendKind::Host {
+            journal::prepare_metadata_integrity_with_previous(meta, previous_meta_hash.clone())?;
+            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+                return Ok(());
+            }
+            let superblocks = self.active_superblocks_locked(meta)?;
+            let details = json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details});
+            if self.open_backend_covers_superblocks(&superblocks) {
+                return match previous_metadata {
+                    Some(previous) => raw_store::append_transaction_with_previous(
+                        &*self.backend,
+                        &superblocks,
+                        meta,
+                        Some(previous),
+                        action,
+                        details,
+                    ),
+                    None => raw_store::append_transaction(
+                        &*self.backend,
+                        &superblocks,
+                        meta,
+                        action,
+                        details,
+                    ),
+                };
+            }
+            let backend = self.active_block_backend_locked(meta, true)?;
+            return match previous_metadata {
+                Some(previous) => raw_store::append_transaction_with_previous(
+                    &backend,
+                    &superblocks,
+                    meta,
+                    Some(previous),
+                    action,
+                    details,
+                ),
+                None => {
+                    raw_store::append_transaction(&backend, &superblocks, meta, action, details)
+                }
+            };
+        }
         let result = journal::append_transaction_checked(
             &self.root,
             meta,
@@ -3822,7 +5174,96 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
+        if meta.backend != BackendKind::Host {
+            let superblocks = self.active_superblocks_locked(meta)?;
+            if self.open_backend_covers_superblocks(&superblocks) {
+                return raw_store::append_transaction(
+                    &*self.backend,
+                    &superblocks,
+                    meta,
+                    action,
+                    details,
+                );
+            }
+            let backend = self.active_block_backend_locked(meta, true)?;
+            return raw_store::append_transaction(&backend, &superblocks, meta, action, details);
+        }
         journal::append_event(&self.root, meta, action, details)
+    }
+
+    fn open_backend_covers_superblocks(&self, superblocks: &[RawSuperblock]) -> bool {
+        if !self.backend_writable {
+            return false;
+        }
+        let Ok(devices) = self.backend.list_devices() else {
+            return false;
+        };
+        let opened = devices
+            .into_iter()
+            .map(|device| device.device_id)
+            .collect::<BTreeSet<_>>();
+        superblocks.iter().all(|sb| opened.contains(&sb.disk_id))
+    }
+
+    fn active_superblocks_locked(&self, meta: &Metadata) -> Result<Vec<RawSuperblock>> {
+        if meta.backend == BackendKind::Host {
+            return Ok(Vec::new());
+        }
+        let mut superblocks = self
+            .raw_superblocks
+            .iter()
+            .filter(|sb| {
+                meta.disks.get(&sb.disk_id).is_none_or(|disk| {
+                    matches!(
+                        disk.status,
+                        DiskStatus::Online | DiskStatus::Degraded | DiskStatus::Draining
+                    )
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut seen = superblocks
+            .iter()
+            .map(|sb| sb.disk_id.clone())
+            .collect::<BTreeSet<_>>();
+        for (disk_id, disk) in &meta.disks {
+            if seen.contains(disk_id)
+                || !matches!(
+                    disk.status,
+                    DiskStatus::Online | DiskStatus::Degraded | DiskStatus::Draining
+                )
+            {
+                continue;
+            }
+            let (superblock, _) = raw_store::inspect_device(meta.backend, disk.path.clone())?;
+            seen.insert(superblock.disk_id.clone());
+            superblocks.push(superblock);
+        }
+        Ok(superblocks)
+    }
+
+    fn active_block_backend_locked(
+        &self,
+        meta: &Metadata,
+        write: bool,
+    ) -> Result<FileBlockBackend> {
+        if meta.backend == BackendKind::Host {
+            return Err(ArgosError::Unsupported(
+                "host backend has no block device set".to_string(),
+            ));
+        }
+        let devices = meta
+            .disks
+            .iter()
+            .filter(|(_, disk)| {
+                matches!(
+                    disk.status,
+                    DiskStatus::Online | DiskStatus::Degraded | DiskStatus::Draining
+                )
+            })
+            .map(|(disk_id, disk)| (disk_id.clone(), disk.path.clone()))
+            .collect::<Vec<_>>();
+        FileBlockBackend::open_with_ids(meta.backend, devices, write)
     }
 
     fn attr_from_inode(inode: &Inode, chunk_size: usize) -> NodeAttr {
@@ -4158,6 +5599,88 @@ fn canonical_or_self(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn prepare_loop_images(paths: &[PathBuf], image_size: u64, force: bool) -> Result<()> {
+    if paths.is_empty() {
+        return Err(ArgosError::Invalid(
+            "at least one loop image is required".to_string(),
+        ));
+    }
+    if image_size < raw_format::MIN_DEVICE_BYTES {
+        return Err(ArgosError::Invalid(format!(
+            "loop image size must be at least {} bytes",
+            raw_format::MIN_DEVICE_BYTES
+        )));
+    }
+    for path in paths {
+        if path.exists() && !force && fs::metadata(path)?.len() > 0 {
+            return Err(ArgosError::AlreadyExists(format!(
+                "{} exists and is non-empty; pass --force to overwrite",
+                path.display()
+            )));
+        }
+        if let Some(parent) = path.parent() {
+            ensure_dir(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(force)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.set_len(image_size)?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+fn block_cache_root(volume_uuid: &str, paths: &[PathBuf]) -> PathBuf {
+    if let Some(root) = std::env::var_os("ARGOSFS_BLOCK_CACHE_DIR") {
+        return PathBuf::from(root).join(volume_uuid);
+    }
+    let mut root = paths
+        .first()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    root.push(".argosfs-block-cache");
+    root.push(volume_uuid);
+    root
+}
+
+fn root_inode(created_at: f64) -> Inode {
+    Inode {
+        id: ROOT_INO,
+        kind: NodeKind::Directory,
+        mode: libc::S_IFDIR | 0o755,
+        uid: current_uid(),
+        gid: current_gid(),
+        nlink: 2,
+        size: 0,
+        rdev: 0,
+        atime: created_at,
+        mtime: created_at,
+        ctime: created_at,
+        entries: BTreeMap::new(),
+        target: None,
+        inline_data: None,
+        inline_sha256: String::new(),
+        blocks: Vec::new(),
+        xattrs: BTreeMap::new(),
+        posix_acl_access: None,
+        posix_acl_default: None,
+        nfs4_acl: None,
+        access_count: 0,
+        write_count: 0,
+        read_bytes: 0,
+        write_bytes: 0,
+        storage_class: StorageTier::Warm,
+        boot_critical: true,
+        workload_score: 0.0,
+        last_accessed_at: created_at,
+        last_written_at: created_at,
+    }
+}
+
 fn sync_directory(path: &Path) {
     if let Ok(dir) = fs::File::open(path) {
         let _ = dir.sync_all();
@@ -4165,17 +5688,231 @@ fn sync_directory(path: &Path) {
 }
 
 fn recompute_disk_usage_from_metadata(meta: &mut Metadata) {
+    normalize_metadata_layouts(meta);
     let mut referenced_usage = BTreeMap::<String, u64>::new();
     for inode in meta.inodes.values() {
         for block in &inode.blocks {
             for shard in &block.shards {
-                *referenced_usage.entry(shard.disk_id.clone()).or_default() += shard.size as u64;
+                *referenced_usage.entry(shard.disk_id.clone()).or_default() +=
+                    shard_accounted_size(shard);
             }
         }
     }
     for (disk_id, disk) in meta.disks.iter_mut() {
         disk.used_bytes = referenced_usage.get(disk_id).copied().unwrap_or(0);
     }
+}
+
+fn validate_commit_policy(config: &VolumeConfig) -> Result<()> {
+    if config.defer_data_flush && !config.defer_metadata_commit {
+        return Err(ArgosError::Invalid(
+            "defer-data-flush requires defer-metadata-commit".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn commit_previous_snapshot(meta: &Metadata) -> Option<Metadata> {
+    if meta.backend != BackendKind::Host && meta.config.defer_metadata_commit {
+        None
+    } else {
+        Some(meta.clone())
+    }
+}
+
+fn normalize_metadata_layouts(meta: &mut Metadata) {
+    if !meta.layouts.contains_key(DEFAULT_LAYOUT_ID) {
+        meta.layouts.insert(
+            DEFAULT_LAYOUT_ID.to_string(),
+            LayoutConfig {
+                id: DEFAULT_LAYOUT_ID.to_string(),
+                k: meta.config.k,
+                m: meta.config.m,
+                chunk_size: meta.config.chunk_size,
+                created_txid: 0,
+                sealed: false,
+            },
+        );
+    }
+    if meta.current_write_layout.is_empty()
+        || !meta.layouts.contains_key(&meta.current_write_layout)
+    {
+        meta.current_write_layout = DEFAULT_LAYOUT_ID.to_string();
+    }
+    for inode in meta.inodes.values_mut() {
+        for block in &mut inode.blocks {
+            if block.layout_id.is_empty() {
+                block.layout_id = DEFAULT_LAYOUT_ID.to_string();
+            }
+        }
+    }
+}
+
+fn block_layout_id(block: &FileBlock) -> &str {
+    if block.layout_id.is_empty() {
+        DEFAULT_LAYOUT_ID
+    } else {
+        &block.layout_id
+    }
+}
+
+fn layout_by_id(meta: &Metadata, layout_id: &str) -> Result<LayoutConfig> {
+    let id = if layout_id.is_empty() {
+        DEFAULT_LAYOUT_ID
+    } else {
+        layout_id
+    };
+    meta.layouts
+        .get(id)
+        .cloned()
+        .ok_or_else(|| ArgosError::Invalid(format!("unknown layout {id}")))
+}
+
+fn current_write_layout(meta: &Metadata) -> Result<LayoutConfig> {
+    layout_by_id(meta, &meta.current_write_layout)
+}
+
+fn find_or_insert_layout_locked(
+    meta: &mut Metadata,
+    k: usize,
+    m: usize,
+    chunk_size: usize,
+) -> String {
+    if let Some((id, _)) = meta
+        .layouts
+        .iter()
+        .find(|(_, layout)| layout.k == k && layout.m == m && layout.chunk_size == chunk_size)
+    {
+        return id.clone();
+    }
+    let id = next_layout_id(meta);
+    meta.layouts.insert(
+        id.clone(),
+        LayoutConfig {
+            id: id.clone(),
+            k,
+            m,
+            chunk_size,
+            created_txid: meta.txid + 1,
+            sealed: false,
+        },
+    );
+    id
+}
+
+fn next_layout_id(meta: &Metadata) -> String {
+    let next = meta
+        .layouts
+        .keys()
+        .filter_map(|id| id.strip_prefix("layout-")?.parse::<u64>().ok())
+        .max()
+        .map(|value| value + 1)
+        .unwrap_or(0);
+    format!("layout-{next:04}")
+}
+
+fn layout_total(layout: &LayoutConfig) -> usize {
+    layout.k + layout.m
+}
+
+fn max_layout_total(meta: &Metadata) -> usize {
+    meta.layouts
+        .values()
+        .map(layout_total)
+        .max()
+        .unwrap_or(meta.config.k + meta.config.m)
+}
+
+fn layout_stripe_raw_size(layout: &LayoutConfig) -> Result<usize> {
+    let stripe_raw_size = layout
+        .chunk_size
+        .checked_mul(layout.k)
+        .ok_or_else(|| ArgosError::Invalid("stripe size overflow".to_string()))?;
+    if stripe_raw_size == 0 {
+        return Err(ArgosError::Invalid(
+            "stripe size must be positive".to_string(),
+        ));
+    }
+    Ok(stripe_raw_size)
+}
+
+fn shard_accounted_size(shard: &Shard) -> u64 {
+    match shard.location.as_ref() {
+        Some(ShardLocation::RawExtent(extent)) => extent.length,
+        _ => shard.size as u64,
+    }
+}
+
+fn shard_subblock_hashes(data: &[u8], full_hash: &str) -> Vec<String> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    if data.len() <= SHARD_CHECKSUM_BLOCK_SIZE {
+        return vec![full_hash.to_string()];
+    }
+    data.chunks(SHARD_CHECKSUM_BLOCK_SIZE)
+        .map(content_hash_hex)
+        .collect()
+}
+
+fn read_path_range_exact(path: &Path, offset: u64, mut buf: &mut [u8]) -> Result<()> {
+    let file = fs::File::open(path)?;
+    let mut cursor = offset;
+    while !buf.is_empty() {
+        let read = file.read_at(buf, cursor)?;
+        if read == 0 {
+            return Err(ArgosError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("short read on {} at offset {cursor}", path.display()),
+            )));
+        }
+        cursor = cursor.saturating_add(read as u64);
+        let (_, rest) = buf.split_at_mut(read);
+        buf = rest;
+    }
+    Ok(())
+}
+
+fn inline_payload_for(meta: &Metadata, data: &[u8]) -> Option<(Vec<u8>, String)> {
+    if data.is_empty() || data.len() > INLINE_DATA_MAX || meta.encryption.enabled {
+        return None;
+    }
+    let layout = meta.layouts.get(&meta.current_write_layout)?;
+    if meta.backend == BackendKind::Host || layout.k != 1 || layout.m != 0 {
+        return None;
+    }
+    Some((data.to_vec(), content_hash_hex(data)))
+}
+
+fn set_inline_payload(inode: &mut Inode, payload: Option<(Vec<u8>, String)>) {
+    if let Some((data, sha256)) = payload {
+        inode.inline_data = Some(data);
+        inode.inline_sha256 = sha256;
+    } else {
+        inode.inline_data = None;
+        inode.inline_sha256.clear();
+    }
+}
+
+fn decode_inline_data(inode: &Inode) -> Result<Option<Vec<u8>>> {
+    let Some(data) = inode.inline_data.as_ref() else {
+        return Ok(None);
+    };
+    if data.len() as u64 != inode.size {
+        return Err(ArgosError::Invalid(format!(
+            "inline inode {} length {} does not match inode size {}",
+            inode.id,
+            data.len(),
+            inode.size
+        )));
+    }
+    if !content_hash_matches(data, &inode.inline_sha256) {
+        return Err(ArgosError::Invalid(format!(
+            "inline inode {} checksum mismatch",
+            inode.id
+        )));
+    }
+    Ok(Some(data.clone()))
 }
 
 fn encryption_aad(volume_uuid: &str, stripe_id: &str) -> Vec<u8> {

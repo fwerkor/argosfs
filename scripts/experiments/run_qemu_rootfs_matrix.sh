@@ -38,10 +38,17 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
 fi
 
 kernel="${ARGOSFS_QEMU_KERNEL:-}"
+initrd="${ARGOSFS_QEMU_INITRD:-}"
 rootfs="${ARGOSFS_QEMU_ROOTFS:-}"
 if [ -z "$kernel" ] || [ -z "$rootfs" ] || [ ! -e "$kernel" ] || [ ! -e "$rootfs" ]; then
   for scenario in normal-boot clean-shutdown interrupted-write degraded-disk emergency-readonly; do
     record "$scenario" skipped "set ARGOSFS_QEMU_KERNEL and ARGOSFS_QEMU_ROOTFS to run boot matrix"
+  done
+  exit 0
+fi
+if [ -n "$initrd" ] && [ ! -e "$initrd" ]; then
+  for scenario in normal-boot clean-shutdown interrupted-write degraded-disk emergency-readonly; do
+    record "$scenario" skipped "ARGOSFS_QEMU_INITRD does not exist"
   done
   exit 0
 fi
@@ -50,12 +57,27 @@ scenarios="normal-boot clean-shutdown"
 [ "$mode" = "full" ] && scenarios="$scenarios interrupted-write degraded-disk emergency-readonly"
 for scenario in $scenarios; do
   log="$work/$scenario.log"
-  timeout "${ARGOSFS_QEMU_TIMEOUT:-60}" qemu-system-x86_64 \
+  append="${ARGOSFS_QEMU_APPEND:-console=ttyS0 rootwait argosfs.images=${ARGOSFS_QEMU_ROOTDEV:-/dev/vda} argosfs.mode=ro argosfs.experiment=$scenario}"
+  qemu_args=(
     -m "${ARGOSFS_QEMU_MEM:-1024}" \
     -kernel "$kernel" \
     -drive "file=$rootfs,format=raw,if=virtio" \
-    -append "console=ttyS0 argosfs.experiment=$scenario" \
+    -append "$append" \
     -nographic \
-    -no-reboot >"$log" 2>&1 && status=passed || status=failed
-  record "$scenario" "$status" "qemu exited with status $status" "$log"
+    -no-reboot
+  )
+  [ -z "$initrd" ] || qemu_args+=(-initrd "$initrd")
+  rc=0
+  timeout "${ARGOSFS_QEMU_TIMEOUT:-60}" qemu-system-x86_64 "${qemu_args[@]}" >"$log" 2>&1 || rc=$?
+  if grep -Eiq "${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency}" "$log"; then
+    status=failed
+    reason="rejected boot failure marker found"
+  elif grep -Eiq "${ARGOSFS_QEMU_EXPECT:-switch_root|Please press Enter to activate this console|procd}" "$log"; then
+    status=passed
+    reason="expected boot marker found"
+  else
+    status=failed
+    reason="qemu exited with status $rc before expected boot marker"
+  fi
+  record "$scenario" "$status" "$reason" "$log"
 done

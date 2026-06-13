@@ -24,8 +24,10 @@ def main():
 
     summary = {
         "failure_matrix": read_jsonl(raw / "failure-matrix.jsonl"),
+        "autopilot_matrix": read_jsonl(raw / "autopilot-matrix.jsonl"),
         "baselines": read_jsonl(raw / "baselines.jsonl"),
         "qemu_rootfs": read_jsonl(raw / "qemu-rootfs.jsonl"),
+        "rootfs_perf": read_jsonl(raw / "rootfs-perf.jsonl"),
     }
 
     workload = raw / "workload-shift.csv"
@@ -69,6 +71,49 @@ def main():
                     len(rows),
                     sum(1 for row in rows if row.get("status") == "passed"),
                     sum(1 for row in rows if row.get("status") == "failed"),
+                ]
+            )
+
+    with (tables / "autopilot-matrix.csv").open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["scenario", "runs", "passed", "failed"])
+        scenarios = sorted({row["scenario"] for row in summary["autopilot_matrix"]})
+        for scenario in scenarios:
+            rows = [row for row in summary["autopilot_matrix"] if row["scenario"] == scenario]
+            writer.writerow(
+                [
+                    scenario,
+                    len(rows),
+                    sum(1 for row in rows if row.get("status") == "passed"),
+                    sum(1 for row in rows if row.get("status") == "failed"),
+                ]
+            )
+
+    with (tables / "rootfs-perf.csv").open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "scenario",
+                "status",
+                "large_write_mib_s",
+                "large_read_mib_s",
+                "small_create_files_s",
+                "small_stat_files_s",
+                "reason",
+            ]
+        )
+        for row in summary["rootfs_perf"]:
+            if row.get("status") == "info":
+                continue
+            writer.writerow(
+                [
+                    row.get("scenario", ""),
+                    row.get("status", ""),
+                    row.get("large_write_mib_s", ""),
+                    row.get("large_read_mib_s", ""),
+                    row.get("small_create_files_s", ""),
+                    row.get("small_stat_files_s", ""),
+                    row.get("reason", ""),
                 ]
             )
 

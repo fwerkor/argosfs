@@ -4,16 +4,17 @@ use crate::types::{CapacitySource, DiskStatus, NodeKind};
 use crate::volume::{ArgosFs, NodeAttr, RenamePolicy};
 use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
-    FopenFlags, Generation, INodeNo, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags,
-    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
+    FopenFlags, Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags,
+    RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow,
+    WriteFlags,
 };
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const TTL: Duration = Duration::from_secs(1);
+const TTL: Duration = Duration::from_secs(5);
 
 pub struct ArgosFuse {
     volume: ArgosFs,
@@ -29,12 +30,17 @@ impl ArgosFuse {
             .check_access_inode(ino.0, req.uid(), req.gid(), mask)
     }
 
-    fn open_reply_flags(&self) -> FopenFlags {
+    fn open_reply_flags(&self, write_open: bool) -> FopenFlags {
+        let mut flags = FopenFlags::empty();
         if self.volume.io_policy().direct_io {
-            FopenFlags::FOPEN_DIRECT_IO
-        } else {
-            FopenFlags::empty()
+            flags |= FopenFlags::FOPEN_DIRECT_IO;
         }
+        if write_open {
+            flags |= FopenFlags::FOPEN_NOFLUSH;
+        } else if !self.volume.io_policy().direct_io {
+            flags |= FopenFlags::FOPEN_KEEP_CACHE;
+        }
+        flags
     }
 
     fn require_xattr_write_access(&self, req: &Request, ino: INodeNo, name: &str) -> Result<()> {
@@ -66,6 +72,12 @@ impl ArgosFuse {
     }
 }
 
+impl Drop for ArgosFuse {
+    fn drop(&mut self) {
+        let _ = self.volume.sync();
+    }
+}
+
 pub fn mount(
     volume_root: impl AsRef<Path>,
     mountpoint: impl AsRef<Path>,
@@ -73,6 +85,15 @@ pub fn mount(
     options: Vec<String>,
 ) -> Result<()> {
     let volume = ArgosFs::open(volume_root)?;
+    mount_volume(volume, mountpoint, foreground, options)
+}
+
+pub fn mount_volume(
+    volume: ArgosFs,
+    mountpoint: impl AsRef<Path>,
+    foreground: bool,
+    options: Vec<String>,
+) -> Result<()> {
     let mut mount_options = vec![
         MountOption::FSName("argosfs".to_string()),
         MountOption::Subtype("argosfs".to_string()),
@@ -85,9 +106,52 @@ pub fn mount(
             "argosfs mount runs in the foreground; --foreground is accepted for CLI compatibility"
         );
     }
-    let mut config = Config::default();
-    config.mount_options = mount_options;
+    let config = mount_config(mount_options);
     fuser::mount2(ArgosFuse::new(volume), mountpoint, &config).map_err(ArgosError::Io)
+}
+
+fn mount_config(options: Vec<MountOption>) -> Config {
+    let mut config = Config::default();
+    for option in options {
+        match option {
+            MountOption::CUSTOM(ref value) if value == "allow_other" => {
+                config.acl = SessionACL::All;
+            }
+            MountOption::CUSTOM(ref value) if value == "allow_root" => {
+                if config.acl != SessionACL::All {
+                    config.acl = SessionACL::RootAndOwner;
+                }
+            }
+            other => config.mount_options.push(normalize_mount_option(other)),
+        }
+    }
+    config
+}
+
+fn normalize_mount_option(option: MountOption) -> MountOption {
+    match option {
+        MountOption::CUSTOM(value) => match value.as_str() {
+            "auto_unmount" => MountOption::AutoUnmount,
+            "default_permissions" => MountOption::DefaultPermissions,
+            "dev" => MountOption::Dev,
+            "nodev" => MountOption::NoDev,
+            "suid" => MountOption::Suid,
+            "nosuid" => MountOption::NoSuid,
+            "ro" => MountOption::RO,
+            "rw" => MountOption::RW,
+            "exec" => MountOption::Exec,
+            "noexec" => MountOption::NoExec,
+            "atime" => MountOption::Atime,
+            "noatime" => MountOption::NoAtime,
+            "dirsync" => MountOption::DirSync,
+            "sync" => MountOption::Sync,
+            "async" => MountOption::Async,
+            _ if value.starts_with("fsname=") => MountOption::FSName(value[7..].to_string()),
+            _ if value.starts_with("subtype=") => MountOption::Subtype(value[8..].to_string()),
+            _ => MountOption::CUSTOM(value),
+        },
+        other => other,
+    }
 }
 
 impl Filesystem for ArgosFuse {
@@ -96,7 +160,12 @@ impl Filesystem for ArgosFuse {
         _req: &Request,
         config: &mut KernelConfig,
     ) -> std::result::Result<(), std::io::Error> {
-        let _ = config;
+        let _ = config.set_max_write(1024 * 1024);
+        let _ = config.set_max_readahead(1024 * 1024);
+        let _ = config.set_max_background(64);
+        let _ = config.set_congestion_threshold(48);
+        let _ = config
+            .add_capabilities(InitFlags::FUSE_PARALLEL_DIROPS | InitFlags::FUSE_READDIRPLUS_AUTO);
         Ok(())
     }
 
@@ -358,7 +427,10 @@ impl Filesystem for ArgosFuse {
             Ok(attr)
         })();
         match result {
-            Ok(_) => reply.opened(FileHandle(ino.0), self.open_reply_flags()),
+            Ok(_) => reply.opened(
+                FileHandle(ino.0),
+                self.open_reply_flags(flags.0 & (libc::O_WRONLY | libc::O_RDWR) != 0),
+            ),
             Err(err) => reply.error(errno(&err)),
         }
     }
@@ -397,8 +469,8 @@ impl Filesystem for ArgosFuse {
         reply: ReplyWrite,
     ) {
         match self
-            .require_access(req, ino, libc::W_OK)
-            .and_then(|()| self.volume.write_inode_range(ino.0, offset, data))
+            .volume
+            .write_inode_range_as(ino.0, offset, data, req.uid(), req.gid())
         {
             Ok(written) => reply.written(written as u32),
             Err(err) => reply.error(errno(&err)),
@@ -547,7 +619,7 @@ impl Filesystem for ArgosFuse {
             Ok(value) if size == 0 => reply.size(value.len() as u32),
             Ok(value) if value.len() <= size as usize => reply.data(&value),
             Ok(_) => reply.error(Errno::ERANGE),
-            Err(err) => reply.error(errno(&err)),
+            Err(err) => reply.error(xattr_errno(&err)),
         }
     }
 
@@ -583,7 +655,7 @@ impl Filesystem for ArgosFuse {
             .and_then(|()| self.volume.removexattr_inode(ino.0, xattr_name(name)?))
         {
             Ok(()) => reply.ok(),
-            Err(err) => reply.error(errno(&err)),
+            Err(err) => reply.error(xattr_errno(&err)),
         }
     }
 
@@ -620,7 +692,7 @@ impl Filesystem for ArgosFuse {
                 &to_file_attr(&attr),
                 Generation(0),
                 FileHandle(attr.ino),
-                self.open_reply_flags(),
+                self.open_reply_flags(true),
             ),
             Err(err) => reply.error(errno(&err)),
         }
@@ -645,6 +717,39 @@ impl Filesystem for ArgosFuse {
                         (idx + 1) as u64,
                         file_type_from_attr(&entry.attr),
                         entry.os_name(),
+                    );
+                    if full {
+                        break;
+                    }
+                }
+                reply.ok();
+            }
+            Err(err) => reply.error(errno(&err)),
+        }
+    }
+
+    fn readdirplus(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        mut reply: ReplyDirectoryPlus,
+    ) {
+        match self
+            .require_access(req, ino, libc::R_OK | libc::X_OK)
+            .and_then(|()| self.volume.readdir(ino.0))
+        {
+            Ok(entries) => {
+                for (idx, entry) in entries.into_iter().enumerate().skip(offset as usize) {
+                    let attr = to_file_attr(&entry.attr);
+                    let full = reply.add(
+                        INodeNo(entry.attr.ino),
+                        (idx + 1) as u64,
+                        entry.os_name(),
+                        &TTL,
+                        &attr,
+                        Generation(0),
                     );
                     if full {
                         break;
@@ -724,6 +829,13 @@ fn errno(err: &ArgosError) -> Errno {
     Errno::from_i32(err.errno())
 }
 
+fn xattr_errno(err: &ArgosError) -> Errno {
+    match err {
+        ArgosError::NotFound(_) => Errno::NO_XATTR,
+        _ => errno(err),
+    }
+}
+
 fn file_type_from_attr(attr: &NodeAttr) -> FileType {
     match attr.kind {
         NodeKind::Directory => FileType::Directory,
@@ -780,4 +892,43 @@ fn open_mask(flags: OpenFlags) -> i32 {
 fn xattr_name(name: &OsStr) -> Result<&str> {
     name.to_str()
         .ok_or_else(|| ArgosError::Invalid("non-UTF-8 xattr names are unsupported".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_other_sets_fuser_session_acl() {
+        let config = mount_config(vec![
+            MountOption::FSName("argosfs".to_string()),
+            MountOption::Subtype("argosfs".to_string()),
+            MountOption::CUSTOM("allow_other".to_string()),
+            MountOption::CUSTOM("default_permissions".to_string()),
+        ]);
+
+        assert_eq!(config.acl, SessionACL::All);
+        assert!(config
+            .mount_options
+            .contains(&MountOption::DefaultPermissions));
+        assert!(!config
+            .mount_options
+            .contains(&MountOption::CUSTOM("allow_other".to_string())));
+    }
+
+    #[test]
+    fn allow_other_wins_over_allow_root() {
+        let config = mount_config(vec![
+            MountOption::CUSTOM("allow_root".to_string()),
+            MountOption::CUSTOM("allow_other".to_string()),
+        ]);
+
+        assert_eq!(config.acl, SessionACL::All);
+    }
+
+    #[test]
+    fn missing_xattr_maps_to_enodata() {
+        let err = ArgosError::NotFound("xattr security.selinux".to_string());
+        assert_eq!(xattr_errno(&err).code(), Errno::NO_XATTR.code());
+    }
 }

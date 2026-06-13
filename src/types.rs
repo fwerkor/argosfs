@@ -1,9 +1,71 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub const FORMAT_VERSION: &str = "argosfs-rust-v1";
+pub const RAW_FORMAT_VERSION: u32 = 1;
 pub type InodeId = u64;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FaultPoint {
+    BeforeDataWrite,
+    AfterDataWriteBeforeFlush,
+    AfterDataFlushBeforeJournalCommit,
+    AfterJournalCommitBeforeMetadataCommit,
+    AfterMetadataCommitBeforeSuperblockUpdate,
+    DuringReplay,
+}
+
+impl FaultPoint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeDataWrite => "before-data-write",
+            Self::AfterDataWriteBeforeFlush => "after-data-write-before-flush",
+            Self::AfterDataFlushBeforeJournalCommit => "after-data-flush-before-journal-commit",
+            Self::AfterJournalCommitBeforeMetadataCommit => {
+                "after-journal-commit-before-metadata-commit"
+            }
+            Self::AfterMetadataCommitBeforeSuperblockUpdate => {
+                "after-metadata-commit-before-superblock-update"
+            }
+            Self::DuringReplay => "during-replay",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackendKind {
+    #[default]
+    Host,
+    LoopBlock,
+    RawBlock,
+}
+
+impl BackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::LoopBlock => "loop",
+            Self::RawBlock => "raw",
+        }
+    }
+}
+
+impl std::str::FromStr for BackendKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "host" | "hostfs" => Ok(Self::Host),
+            "loop" | "loop-block" | "loopblock" => Ok(Self::LoopBlock),
+            "raw" | "raw-block" | "rawblock" => Ok(Self::RawBlock),
+            other => Err(format!("unknown backend: {other}")),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -207,6 +269,36 @@ pub struct VolumeConfig {
     pub zero_copy: bool,
     #[serde(default)]
     pub numa_aware: bool,
+    #[serde(default)]
+    pub defer_journal_flush: bool,
+    #[serde(default)]
+    pub defer_metadata_commit: bool,
+    #[serde(default)]
+    pub defer_data_flush: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LayoutConfig {
+    pub id: String,
+    pub k: usize,
+    pub m: usize,
+    pub chunk_size: usize,
+    pub created_txid: u64,
+    #[serde(default)]
+    pub sealed: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ReshapeState {
+    pub id: String,
+    pub target_layout: String,
+    pub from_layouts: Vec<String>,
+    #[serde(default)]
+    pub cursor: Option<InodeId>,
+    #[serde(default)]
+    pub rewritten_files: u64,
+    #[serde(default)]
+    pub complete: bool,
 }
 
 impl Default for VolumeConfig {
@@ -223,6 +315,9 @@ impl Default for VolumeConfig {
             direct_io: false,
             zero_copy: true,
             numa_aware: true,
+            defer_journal_flush: false,
+            defer_metadata_commit: false,
+            defer_data_flush: false,
         }
     }
 }
@@ -311,13 +406,38 @@ pub struct Disk {
 pub struct Shard {
     pub slot: usize,
     pub disk_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<ShardLocation>,
     pub relpath: PathBuf,
     pub sha256: String,
+    #[serde(default)]
+    pub checksum_block_size: usize,
+    #[serde(default)]
+    pub subblock_sha256: Vec<String>,
     pub size: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ShardLocation {
+    HostPath { disk_id: String, relpath: PathBuf },
+    RawExtent(PhysicalExtent),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PhysicalExtent {
+    pub disk_id: String,
+    pub offset: u64,
+    pub length: u64,
+    pub generation: u64,
+    #[serde(default)]
+    pub flags: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FileBlock {
+    #[serde(default)]
+    pub layout_id: String,
     pub stripe_id: String,
     pub raw_offset: u64,
     pub raw_size: usize,
@@ -357,6 +477,14 @@ pub struct Inode {
     pub ctime: f64,
     pub entries: BTreeMap<String, InodeId>,
     pub target: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "inline_data_base64"
+    )]
+    pub inline_data: Option<Vec<u8>>,
+    #[serde(default)]
+    pub inline_sha256: String,
     pub blocks: Vec<FileBlock>,
     pub xattrs: BTreeMap<String, String>,
     #[serde(default)]
@@ -380,10 +508,42 @@ pub struct Inode {
     pub last_written_at: f64,
 }
 
+mod inline_data_base64 {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value
+            .as_ref()
+            .map(|data| BASE64.encode(data))
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(encoded) = Option::<String>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+        BASE64
+            .decode(encoded)
+            .map(Some)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Metadata {
     pub format: String,
     pub uuid: String,
+    #[serde(default)]
+    pub backend: BackendKind,
+    #[serde(default)]
+    pub raw_pool: RawPoolMetadata,
     pub created_at: f64,
     pub updated_at: f64,
     pub txid: u64,
@@ -391,11 +551,48 @@ pub struct Metadata {
     pub next_stripe: u64,
     pub config: VolumeConfig,
     #[serde(default)]
+    pub layouts: BTreeMap<String, LayoutConfig>,
+    #[serde(default)]
+    pub current_write_layout: String,
+    #[serde(default)]
+    pub reshape: Option<ReshapeState>,
+    #[serde(default)]
     pub encryption: EncryptionConfig,
     #[serde(default)]
     pub integrity: MetadataIntegrity,
     pub disks: BTreeMap<String, Disk>,
     pub inodes: BTreeMap<InodeId, Inode>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RawPoolMetadata {
+    pub pool_name: String,
+    #[serde(default)]
+    pub format_version: u32,
+    #[serde(default)]
+    pub clean: bool,
+    #[serde(default)]
+    pub dirty_since_txid: u64,
+    #[serde(default)]
+    pub mount_generation: u64,
+    #[serde(default)]
+    pub allocators: BTreeMap<String, RawAllocatorState>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RawAllocatorState {
+    pub block_size: u64,
+    pub data_start: u64,
+    pub data_end: u64,
+    pub next_offset: u64,
+    #[serde(default)]
+    pub free_extents: Vec<RawFreeExtent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RawFreeExtent {
+    pub offset: u64,
+    pub length: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

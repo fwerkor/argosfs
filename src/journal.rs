@@ -376,6 +376,17 @@ pub fn canonical_metadata_hash(meta: &Metadata) -> Result<String> {
     Ok(sha256_hex(&serde_json::to_vec_pretty(&round_trip)?))
 }
 
+pub fn prepare_metadata_integrity_for_external_store(meta: &mut Metadata) -> Result<()> {
+    prepare_metadata_integrity(meta, String::new())
+}
+
+pub fn prepare_metadata_integrity_with_previous(
+    meta: &mut Metadata,
+    previous_meta_hash: String,
+) -> Result<()> {
+    prepare_metadata_integrity(meta, previous_meta_hash)
+}
+
 pub fn inject_crash(point: &str) -> Result<()> {
     let thread_spec = THREAD_CRASH_POINT.with(|value| value.borrow().clone());
     let spec = match thread_spec {
@@ -742,7 +753,7 @@ fn has_valid_checkpoint(root: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn metadata_delta(previous: &Metadata, next: &Metadata) -> Result<Vec<MetadataDeltaOp>> {
+pub fn metadata_delta(previous: &Metadata, next: &Metadata) -> Result<Vec<MetadataDeltaOp>> {
     let previous = serde_json::to_value(previous)?;
     let next = serde_json::to_value(next)?;
     let mut ops = Vec::new();
@@ -750,7 +761,7 @@ fn metadata_delta(previous: &Metadata, next: &Metadata) -> Result<Vec<MetadataDe
     Ok(ops)
 }
 
-fn apply_metadata_delta(previous: &Metadata, delta: &[MetadataDeltaOp]) -> Result<Metadata> {
+pub fn apply_metadata_delta(previous: &Metadata, delta: &[MetadataDeltaOp]) -> Result<Metadata> {
     let mut value = serde_json::to_value(previous)?;
     for op in delta {
         apply_delta_op(&mut value, op)?;

@@ -19,6 +19,14 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+pub fn content_hash_hex(data: &[u8]) -> String {
+    blake3::hash(data).to_hex().to_string()
+}
+
+pub fn content_hash_matches(data: &[u8], expected: &str) -> bool {
+    content_hash_hex(data) == expected || sha256_hex(data) == expected
+}
+
 pub fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     Ok(())
@@ -62,10 +70,15 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
         std::process::id(),
         now_f64().to_bits()
     ));
-    {
+    let write_result = (|| -> Result<()> {
         let mut file = File::create(&tmp)?;
         file.write_all(data)?;
         file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
     fs::rename(&tmp, path)?;
     if let Some(parent) = path.parent() {
