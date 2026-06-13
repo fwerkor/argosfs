@@ -58,6 +58,8 @@ enum Command {
         #[arg(long)]
         defer_metadata_commit: bool,
         #[arg(long)]
+        defer_data_flush: bool,
+        #[arg(long)]
         force: bool,
     },
     Scan {
@@ -491,6 +493,7 @@ fn main() -> Result<()> {
             compression_level,
             defer_journal_flush,
             defer_metadata_commit,
+            defer_data_flush,
             force,
         } => {
             let config = VolumeConfig {
@@ -501,6 +504,7 @@ fn main() -> Result<()> {
                 compression_level,
                 defer_journal_flush,
                 defer_metadata_commit,
+                defer_data_flush,
                 ..VolumeConfig::default()
             };
             let fs = match backend {

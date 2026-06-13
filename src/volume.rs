@@ -221,6 +221,7 @@ impl ArgosFs {
         if config.chunk_size == 0 {
             config.chunk_size = VolumeConfig::default().chunk_size;
         }
+        validate_commit_policy(&config)?;
         let _ = RsCodec::new(config.k, config.m)?;
         let root = root.as_ref().to_path_buf();
         let system = root.join(".argosfs");
@@ -422,6 +423,7 @@ impl ArgosFs {
         if config.chunk_size == 0 {
             config.chunk_size = VolumeConfig::default().chunk_size;
         }
+        validate_commit_policy(&config)?;
         let backend_file = match kind {
             BackendKind::LoopBlock => FileBlockBackend::open_loop(paths, true)?,
             BackendKind::RawBlock => FileBlockBackend::open_raw(paths, true)?,
@@ -3019,7 +3021,7 @@ impl ArgosFs {
         {
             return Err(ArgosError::AlreadyExists(name.to_string()));
         }
-        let rollback = meta.clone();
+        let rollback = commit_previous_snapshot(meta);
         let file_type = mode & libc::S_IFMT;
         let kind = if file_type == libc::S_IFREG || file_type == 0 {
             if rdev != 0 {
@@ -3093,12 +3095,14 @@ impl ArgosFs {
         self.touch_inode_locked(meta, parent, true, true);
         if let Err(err) = self.commit_locked_with_previous(
             meta,
-            Some(&rollback),
+            rollback.as_ref(),
             "mknod",
             json!({"parent": parent, "name": name, "inode": ino, "mode": mode, "rdev": rdev}),
         ) {
             if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                *meta = rollback;
+                if let Some(rollback) = rollback {
+                    *meta = rollback;
+                }
             }
             return Err(err);
         }
@@ -3360,7 +3364,7 @@ impl ArgosFs {
         preserve_mtime: bool,
         exclude_disks: &BTreeSet<String>,
     ) -> Result<()> {
-        let rollback = meta.clone();
+        let rollback = commit_previous_snapshot(meta);
         let (storage_class, boot_critical) = {
             let inode = meta
                 .inodes
@@ -3394,9 +3398,12 @@ impl ArgosFs {
         }
         inode.ctime = now;
         self.account_blocks_locked(meta, &old_blocks, false);
-        if let Err(err) = self.commit_locked_with_previous(meta, Some(&rollback), action, details) {
+        if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
+        {
             if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                *meta = rollback;
+                if let Some(rollback) = rollback {
+                    *meta = rollback;
+                }
                 self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
             } else if matches!(&err, ArgosError::Conflict(_)) {
                 self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
@@ -3506,7 +3513,7 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
-        let rollback = meta.clone();
+        let rollback = commit_previous_snapshot(meta);
         let (storage_class, boot_critical, old_blocks) = {
             let inode = meta
                 .inodes
@@ -3567,9 +3574,12 @@ impl ArgosFs {
         inode.ctime = now;
 
         self.account_blocks_locked(meta, &replaced, false);
-        if let Err(err) = self.commit_locked_with_previous(meta, Some(&rollback), action, details) {
+        if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
+        {
             if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                *meta = rollback;
+                if let Some(rollback) = rollback {
+                    *meta = rollback;
+                }
                 self.delete_blocks_locked(meta, &written_blocks);
             } else if matches!(&err, ArgosError::Conflict(_)) {
                 self.delete_blocks_locked(meta, &written_blocks);
@@ -3630,6 +3640,9 @@ impl ArgosFs {
             self.cache.remove(&cache_key);
         }
         let layout = layout_by_id(meta, block_layout_id(block))?;
+        if layout.k == 1 && layout.m == 0 && !block.encrypted && block.codec == Compression::None {
+            return self.decode_single_shard_block_locked(meta, block, damaged, &cache_key);
+        }
         let codec = RsCodec::new(layout.k, layout.m)?;
         let mut shards: Vec<Option<Vec<u8>>> = vec![None; layout_total(&layout)];
         for shard in &block.shards {
@@ -3717,6 +3730,73 @@ impl ArgosFs {
         Ok(raw)
     }
 
+    fn decode_single_shard_block_locked(
+        &self,
+        meta: &mut Metadata,
+        block: &FileBlock,
+        damaged: &mut Vec<String>,
+        cache_key: &str,
+    ) -> Result<Vec<u8>> {
+        let Some(shard) = block.shards.iter().find(|shard| shard.slot == 0) else {
+            damaged.push("single-shard:missing-slot-0".to_string());
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device block has no shard 0".to_string(),
+            });
+        };
+        let Some(disk) = meta.disks.get(&shard.disk_id) else {
+            damaged.push(format!("{}:missing-disk", shard.disk_id));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device block references a missing disk".to_string(),
+            });
+        };
+        if matches!(
+            disk.status,
+            DiskStatus::Failed | DiskStatus::Offline | DiskStatus::Removed
+        ) {
+            damaged.push(format!("{}:unavailable", shard.disk_id));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device shard is unavailable".to_string(),
+            });
+        }
+        let start = std::time::Instant::now();
+        let data = match self.read_shard_locked(meta, shard) {
+            Ok(data) => data,
+            Err(err) => {
+                self.update_read_latency_locked(
+                    meta,
+                    &shard.disk_id,
+                    0,
+                    start.elapsed().as_secs_f64(),
+                );
+                damaged.push(format!("{}:missing:{}", shard.disk_id, shard.slot));
+                return Err(err);
+            }
+        };
+        self.update_read_latency_locked(
+            meta,
+            &shard.disk_id,
+            data.len() as u64,
+            start.elapsed().as_secs_f64(),
+        );
+        let data_hash = sha256_hex(&data);
+        if data.len() != shard.size
+            || data.len() != block.raw_size
+            || data_hash != shard.sha256
+            || data_hash != block.raw_sha256
+        {
+            damaged.push(format!("{}:checksum:{}", shard.disk_id, shard.slot));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device raw checksum mismatch".to_string(),
+            });
+        }
+        self.cache.put(cache_key, &data)?;
+        Ok(data)
+    }
+
     fn encode_data_locked(
         &self,
         meta: &mut Metadata,
@@ -3728,7 +3808,6 @@ impl ArgosFs {
     ) -> Result<Vec<FileBlock>> {
         let mut blocks = Vec::new();
         let layout = current_write_layout(meta)?;
-        let codec = RsCodec::new(layout.k, layout.m)?;
         let stripe_raw_size = layout_stripe_raw_size(&layout)?;
         if data.is_empty() {
             return Ok(blocks);
@@ -3755,17 +3834,22 @@ impl ArgosFs {
             } else {
                 (compressed, false, String::new())
             };
-            let shard_size = payload.len().max(1).div_ceil(layout.k);
-            let mut padded = payload.clone();
-            let padded_len = shard_size
-                .checked_mul(layout.k)
-                .ok_or_else(|| ArgosError::Invalid("encoded shard size overflow".to_string()))?;
-            padded.resize(padded_len, 0);
-            let data_shards = padded
-                .chunks(shard_size)
-                .map(|chunk| chunk.to_vec())
-                .collect::<Vec<_>>();
-            let encoded = codec.encode(&data_shards)?;
+            let (shard_size, encoded) = if layout.k == 1 && layout.m == 0 {
+                (payload.len().max(1), vec![payload.clone()])
+            } else {
+                let codec = RsCodec::new(layout.k, layout.m)?;
+                let shard_size = payload.len().max(1).div_ceil(layout.k);
+                let mut padded = payload.clone();
+                let padded_len = shard_size.checked_mul(layout.k).ok_or_else(|| {
+                    ArgosError::Invalid("encoded shard size overflow".to_string())
+                })?;
+                padded.resize(padded_len, 0);
+                let data_shards = padded
+                    .chunks(shard_size)
+                    .map(|chunk| chunk.to_vec())
+                    .collect::<Vec<_>>();
+                (shard_size, codec.encode(&data_shards)?)
+            };
             let placements = self.choose_disks_locked(
                 meta,
                 PlacementRequest {
@@ -3839,7 +3923,9 @@ impl ArgosFs {
             journal::inject_crash(FaultPoint::BeforeDataWrite.as_str())?;
             self.backend_write_at_locked(meta, disk_id, extent.offset, data)?;
             journal::inject_crash(FaultPoint::AfterDataWriteBeforeFlush.as_str())?;
-            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_none() {
+            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_none()
+                && !meta.config.defer_data_flush
+            {
                 self.backend_flush_locked(meta, disk_id)?;
                 journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
             }
@@ -5120,6 +5206,23 @@ fn recompute_disk_usage_from_metadata(meta: &mut Metadata) {
     }
     for (disk_id, disk) in meta.disks.iter_mut() {
         disk.used_bytes = referenced_usage.get(disk_id).copied().unwrap_or(0);
+    }
+}
+
+fn validate_commit_policy(config: &VolumeConfig) -> Result<()> {
+    if config.defer_data_flush && !config.defer_metadata_commit {
+        return Err(ArgosError::Invalid(
+            "defer-data-flush requires defer-metadata-commit".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn commit_previous_snapshot(meta: &Metadata) -> Option<Metadata> {
+    if meta.backend != BackendKind::Host && meta.config.defer_metadata_commit {
+        None
+    } else {
+        Some(meta.clone())
     }
 }
 

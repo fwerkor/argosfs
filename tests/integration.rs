@@ -957,6 +957,7 @@ fn raw_batched_metadata_commit_persists_after_sync() {
     let mut cfg = config(1, 0);
     cfg.defer_journal_flush = true;
     cfg.defer_metadata_commit = true;
+    cfg.defer_data_flush = true;
     cfg.compression = Compression::None;
     let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "capos-root", false).unwrap();
     for index in 0..16 {
@@ -976,6 +977,19 @@ fn raw_batched_metadata_commit_persists_after_sync() {
         b"batched-payload-0015"
     );
     assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn raw_deferred_data_flush_requires_batched_metadata_commit() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_data_flush = true;
+    let err = match ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "capos-root", false) {
+        Ok(_) => panic!("defer-data-flush without batched metadata should fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, ArgosError::Invalid(message) if message.contains("defer-data-flush")));
 }
 
 #[test]

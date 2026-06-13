@@ -272,6 +272,8 @@ pub struct VolumeConfig {
     pub defer_journal_flush: bool,
     #[serde(default)]
     pub defer_metadata_commit: bool,
+    #[serde(default)]
+    pub defer_data_flush: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -314,6 +316,7 @@ impl Default for VolumeConfig {
             numa_aware: true,
             defer_journal_flush: false,
             defer_metadata_commit: false,
+            defer_data_flush: false,
         }
     }
 }
