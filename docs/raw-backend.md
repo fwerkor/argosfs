@@ -55,6 +55,21 @@ snapshots so open can replay a newer committed transaction if checkpoint copies
 are stale. Rw open marks member superblocks dirty. `ArgosFs::sync()` writes
 metadata checkpoints, flushes devices, and marks superblocks clean.
 
+By default, each raw journal append is flushed before the metadata transaction
+returns. Volumes created with `--defer-journal-flush` keep syscall-level
+transactions ordered in the journal but defer device flushes until
+`sync`/`fsync`/clean unmount. That mode is intended for rootfs throughput
+experiments and ext4-like delayed commit semantics: a crash may lose the newest
+unflushed transactions, but recovery must keep the pool consistent and replay
+only checksum-valid records.
+
+Volumes created with `--defer-metadata-commit` go further: ordinary metadata
+updates are batched in memory and the next `sync`/`fsync`/clean unmount writes a
+fresh checkpoint. This is a throughput mode for rootfs experiments, not a claim
+that every syscall is individually durable. A crash before the sync boundary may
+roll back to the previous checkpoint; the dirty superblock and checksum-checked
+checkpoint/journal path still make the result auditable.
+
 ## Data Extents
 
 Host shards use `ShardLocation::HostPath`. Loop/raw shards use

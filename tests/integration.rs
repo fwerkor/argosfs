@@ -90,6 +90,33 @@ fn journal_records(root: &std::path::Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn raw_journal_records(image: &std::path::Path) -> Vec<serde_json::Value> {
+    let (superblock, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, image.to_path_buf()).unwrap();
+    let disk = std::fs::File::open(image).unwrap();
+    let mut header = [0u8; 4096];
+    disk.read_at(&mut header, superblock.journal.offset)
+        .unwrap();
+    let end = u64::from_le_bytes(header[24..32].try_into().unwrap());
+    let mut cursor = 4096u64;
+    let mut records = Vec::new();
+    while cursor + 36 <= end {
+        let mut entry_header = [0u8; 36];
+        disk.read_at(&mut entry_header, superblock.journal.offset + cursor)
+            .unwrap();
+        let len = u32::from_le_bytes(entry_header[..4].try_into().unwrap()) as usize;
+        if len == 0 || cursor + 36 + len as u64 > end {
+            break;
+        }
+        let mut bytes = vec![0u8; len];
+        disk.read_at(&mut bytes, superblock.journal.offset + cursor + 36)
+            .unwrap();
+        records.push(serde_json::from_slice(&bytes).unwrap());
+        cursor += 36 + len as u64;
+    }
+    records
+}
+
 #[test]
 fn hard_link_does_not_require_source_read_permission() {
     let tmp = TempDir::new().unwrap();
@@ -900,6 +927,89 @@ fn raw_metadata_tree_checkpoint_spans_pages() {
         vec![3u8; 4096]
     );
     assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn raw_deferred_journal_flush_persists_after_sync() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/deferred", b"journal flush at sync", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/deferred", true).unwrap(),
+        b"journal flush at sync"
+    );
+    assert!(reopened.transaction_report().unwrap().errors.is_empty());
+}
+
+#[test]
+fn raw_batched_metadata_commit_persists_after_sync() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.defer_metadata_commit = true;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "capos-root", false).unwrap();
+    for index in 0..16 {
+        fs.write_file(
+            &format!("/batched-{index:04}"),
+            format!("batched-payload-{index:04}").as_bytes(),
+            0o644,
+        )
+        .unwrap();
+    }
+    fs.sync().unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/batched-0015", true).unwrap(),
+        b"batched-payload-0015"
+    );
+    assert!(reopened.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn raw_hot_file_transactions_use_metadata_deltas() {
+    let _guard = env_lock();
+    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "1000");
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "capos-root", false).unwrap();
+    for index in 0..8 {
+        fs.write_file(
+            &format!("/delta-{index:04}"),
+            format!("payload-{index:04}").as_bytes(),
+            0o644,
+        )
+        .unwrap();
+    }
+    drop(fs);
+
+    let records = raw_journal_records(&images[0]);
+    let hot_records = records
+        .iter()
+        .filter(|record| record["action"] == "mknod" || record["action"] == "write")
+        .collect::<Vec<_>>();
+    assert!(!hot_records.is_empty());
+    assert!(hot_records
+        .iter()
+        .all(|record| record.get("metadata").is_none()));
+    assert!(hot_records
+        .iter()
+        .all(|record| record.get("metadata_delta").is_some()));
+    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
 }
 
 #[test]

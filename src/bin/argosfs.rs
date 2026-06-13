@@ -54,6 +54,10 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         compression_level: i32,
         #[arg(long)]
+        defer_journal_flush: bool,
+        #[arg(long)]
+        defer_metadata_commit: bool,
+        #[arg(long)]
         force: bool,
     },
     Scan {
@@ -485,6 +489,8 @@ fn main() -> Result<()> {
             chunk_size,
             compression,
             compression_level,
+            defer_journal_flush,
+            defer_metadata_commit,
             force,
         } => {
             let config = VolumeConfig {
@@ -493,6 +499,8 @@ fn main() -> Result<()> {
                 chunk_size,
                 compression,
                 compression_level,
+                defer_journal_flush,
+                defer_metadata_commit,
                 ..VolumeConfig::default()
             };
             let fs = match backend {

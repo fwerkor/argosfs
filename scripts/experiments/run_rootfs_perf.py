@@ -151,41 +151,80 @@ def run_host_directory(out: Path, mode: str, work: Path, file_mib: int, small_fi
 
 
 def run_argosfs_loop(out: Path, mode: str, work: Path, file_mib: int, small_files: int) -> None:
+    run_argosfs_loop_variant(
+        out, mode, work, file_mib, small_files, defer_flush=False, batch_metadata=False
+    )
+
+
+def run_argosfs_loop_deferred(
+    out: Path, mode: str, work: Path, file_mib: int, small_files: int
+) -> None:
+    run_argosfs_loop_variant(
+        out, mode, work, file_mib, small_files, defer_flush=True, batch_metadata=False
+    )
+
+
+def run_argosfs_loop_batched(
+    out: Path, mode: str, work: Path, file_mib: int, small_files: int
+) -> None:
+    run_argosfs_loop_variant(
+        out, mode, work, file_mib, small_files, defer_flush=True, batch_metadata=True
+    )
+
+
+def run_argosfs_loop_variant(
+    out: Path,
+    mode: str,
+    work: Path,
+    file_mib: int,
+    small_files: int,
+    *,
+    defer_flush: bool,
+    batch_metadata: bool,
+) -> None:
+    if batch_metadata:
+        scenario = "argosfs-loop-fuse-batched"
+    else:
+        scenario = "argosfs-loop-fuse-deferred" if defer_flush else "argosfs-loop-fuse-strict"
     if not Path("/dev/fuse").exists():
-        skip(out, mode, "argosfs-loop-fuse", "/dev/fuse unavailable")
+        skip(out, mode, scenario, "/dev/fuse unavailable")
         return
     for required in ("mountpoint", "fusermount3"):
         if not command(required):
-            skip(out, mode, "argosfs-loop-fuse", f"{required} unavailable")
+            skip(out, mode, scenario, f"{required} unavailable")
             return
     bin_path = binary()
-    image = work / "argosfs-loop.img"
-    mountpoint = work / "argosfs-mnt"
+    suffix = "batched" if batch_metadata else ("deferred" if defer_flush else "strict")
+    image = work / f"argosfs-loop-{suffix}.img"
+    mountpoint = work / f"argosfs-mnt-{suffix}"
     remove_path(image)
     remove_path(mountpoint)
     mountpoint.mkdir(parents=True)
     image_size = 512 * 1024 * 1024 if mode == "full" else 128 * 1024 * 1024
-    run(
-        [
-            str(bin_path),
-            "mkfs",
-            "--backend",
-            "loop",
-            "--images",
-            str(image),
-            "--image-size",
-            str(image_size),
-            "--pool-name",
-            "capos-root",
-            "--k",
-            "1",
-            "--m",
-            "0",
-            "--compression",
-            "none",
-            "--force",
-        ]
-    )
+    mkfs_cmd = [
+        str(bin_path),
+        "mkfs",
+        "--backend",
+        "loop",
+        "--images",
+        str(image),
+        "--image-size",
+        str(image_size),
+        "--pool-name",
+        "capos-root",
+        "--k",
+        "1",
+        "--m",
+        "0",
+        "--compression",
+        "none",
+        "--force",
+    ]
+    if defer_flush:
+        mkfs_cmd.append("--defer-journal-flush")
+    if batch_metadata:
+        mkfs_cmd.append("--defer-metadata-commit")
+    run(mkfs_cmd)
     proc = subprocess.Popen(
         [
             str(bin_path),
@@ -212,10 +251,21 @@ def run_argosfs_loop(out: Path, mode: str, work: Path, file_mib: int, small_file
         metrics.update(
             {
                 "mode": mode,
-                "scenario": "argosfs-loop-fuse",
+                "scenario": scenario,
                 "status": "passed",
                 "elapsed_sec": time.perf_counter() - started,
-                "reason": "ArgosFS loop backend mounted through FUSE mount-root",
+                "reason": (
+                    "ArgosFS loop backend mounted through FUSE mount-root"
+                    + (
+                        " with batched metadata commit"
+                        if batch_metadata
+                        else (
+                            " with deferred journal flush"
+                            if defer_flush
+                            else " with strict journal flush"
+                        )
+                    )
+                ),
             }
         )
         emit(out, metrics)
@@ -225,7 +275,7 @@ def run_argosfs_loop(out: Path, mode: str, work: Path, file_mib: int, small_file
             out,
             {
                 "mode": mode,
-                "scenario": "argosfs-loop-fuse",
+                "scenario": scenario,
                 "status": "failed",
                 "reason": str(err),
                 "stdout": stdout,
@@ -311,6 +361,8 @@ def main() -> int:
     scenarios: list[Callable[[Path, str, Path, int, int], None]] = [
         run_host_directory,
         run_argosfs_loop,
+        run_argosfs_loop_deferred,
+        run_argosfs_loop_batched,
         run_ext4_loop,
     ]
     for scenario in scenarios:

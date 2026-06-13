@@ -23,8 +23,9 @@ python3 scripts/experiments/summarize_results.py paper-data/runs/ae-quick/raw pa
 Expected runtime is a few minutes on a laptop. Quick mode records deterministic
 JSONL/CSV outputs and marks hardware- or root-required scenarios as skipped or
 documented placeholders. Rootfs performance records include a regular
-directory baseline, ArgosFS loop-backed FUSE `mount-root` when `/dev/fuse` is
-usable, and an ext4 loop baseline when the runner permits loop mounts.
+directory baseline, ArgosFS loop-backed FUSE `mount-root` in strict,
+deferred-journal, and batched-metadata modes when `/dev/fuse` is usable, and an
+ext4 loop baseline when the runner permits loop mounts.
 
 ## Full Reproduction
 

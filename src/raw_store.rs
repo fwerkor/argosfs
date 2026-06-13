@@ -474,7 +474,9 @@ fn append_journal(
         backend.write_at(&sb.disk_id, sb.journal.offset + write_offset, &entry)?;
         put_u64(&mut header, 24, end);
         backend.write_at(&sb.disk_id, sb.journal.offset, &header)?;
-        backend.flush_device(&sb.disk_id)?;
+        if !metadata.config.defer_journal_flush {
+            backend.flush_device(&sb.disk_id)?;
+        }
     }
     Ok(())
 }

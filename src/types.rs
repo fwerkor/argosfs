@@ -268,6 +268,10 @@ pub struct VolumeConfig {
     pub zero_copy: bool,
     #[serde(default)]
     pub numa_aware: bool,
+    #[serde(default)]
+    pub defer_journal_flush: bool,
+    #[serde(default)]
+    pub defer_metadata_commit: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -308,6 +312,8 @@ impl Default for VolumeConfig {
             direct_io: false,
             zero_copy: true,
             numa_aware: true,
+            defer_journal_flush: false,
+            defer_metadata_commit: false,
         }
     }
 }
