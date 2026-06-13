@@ -25,7 +25,7 @@ argosfs_bin="${ARGOSFS_BIN:-argosfs}"
 log() {
 	msg="argosfs-initrd: $*"
 	printf '%s\n' "$msg" >>"$log_file" 2>/dev/null || true
-	printf '%s\n' "$msg" >/dev/console 2>/dev/null || printf '%s\n' "$msg" || true
+	[ -w /dev/console ] && printf '%s\n' "$msg" >/dev/console 2>/dev/null || true
 }
 
 emergency() {
