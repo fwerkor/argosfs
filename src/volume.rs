@@ -583,7 +583,9 @@ impl ArgosFs {
     pub fn sync(&self) -> Result<()> {
         let mut meta = self.meta.lock();
         if meta.backend != BackendKind::Host {
-            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
+                || meta.config.defer_metadata_commit
+            {
                 let previous_meta_hash = meta.integrity.meta_hash.clone();
                 journal::prepare_metadata_integrity_with_previous(&mut meta, previous_meta_hash)?;
             }
@@ -3017,6 +3019,7 @@ impl ArgosFs {
         {
             return Err(ArgosError::AlreadyExists(name.to_string()));
         }
+        let rollback = meta.clone();
         let file_type = mode & libc::S_IFMT;
         let kind = if file_type == libc::S_IFREG || file_type == 0 {
             if rdev != 0 {
@@ -3088,11 +3091,17 @@ impl ArgosFs {
             .entries
             .insert(name.to_string(), ino);
         self.touch_inode_locked(meta, parent, true, true);
-        self.commit_locked(
+        if let Err(err) = self.commit_locked_with_previous(
             meta,
+            Some(&rollback),
             "mknod",
             json!({"parent": parent, "name": name, "inode": ino, "mode": mode, "rdev": rdev}),
-        )?;
+        ) {
+            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
+                *meta = rollback;
+            }
+            return Err(err);
+        }
         Ok(ino)
     }
 
@@ -3385,7 +3394,7 @@ impl ArgosFs {
         }
         inode.ctime = now;
         self.account_blocks_locked(meta, &old_blocks, false);
-        if let Err(err) = self.commit_locked(meta, action, details) {
+        if let Err(err) = self.commit_locked_with_previous(meta, Some(&rollback), action, details) {
             if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
                 *meta = rollback;
                 self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
@@ -3558,7 +3567,7 @@ impl ArgosFs {
         inode.ctime = now;
 
         self.account_blocks_locked(meta, &replaced, false);
-        if let Err(err) = self.commit_locked(meta, action, details) {
+        if let Err(err) = self.commit_locked_with_previous(meta, Some(&rollback), action, details) {
             if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
                 *meta = rollback;
                 self.delete_blocks_locked(meta, &written_blocks);
@@ -4491,8 +4500,19 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
+        self.commit_locked_with_previous(meta, None, action, details)
+    }
+
+    fn commit_locked_with_previous(
+        &self,
+        meta: &mut Metadata,
+        previous_metadata: Option<&Metadata>,
+        action: &str,
+        details: serde_json::Value,
+    ) -> Result<()> {
         if meta.backend != BackendKind::Host
-            && std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
+            && (std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
+                || meta.config.defer_metadata_commit)
         {
             meta.txid += 1;
             meta.updated_at = now_f64();
@@ -4514,16 +4534,38 @@ impl ArgosFs {
             let superblocks = self.active_superblocks_locked(meta)?;
             let details = json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details});
             if self.open_backend_covers_superblocks(&superblocks) {
-                return raw_store::append_transaction(
-                    &*self.backend,
-                    &superblocks,
-                    meta,
-                    action,
-                    details,
-                );
+                return match previous_metadata {
+                    Some(previous) => raw_store::append_transaction_with_previous(
+                        &*self.backend,
+                        &superblocks,
+                        meta,
+                        Some(previous),
+                        action,
+                        details,
+                    ),
+                    None => raw_store::append_transaction(
+                        &*self.backend,
+                        &superblocks,
+                        meta,
+                        action,
+                        details,
+                    ),
+                };
             }
             let backend = self.active_block_backend_locked(meta, true)?;
-            return raw_store::append_transaction(&backend, &superblocks, meta, action, details);
+            return match previous_metadata {
+                Some(previous) => raw_store::append_transaction_with_previous(
+                    &backend,
+                    &superblocks,
+                    meta,
+                    Some(previous),
+                    action,
+                    details,
+                ),
+                None => {
+                    raw_store::append_transaction(&backend, &superblocks, meta, action, details)
+                }
+            };
         }
         let result = journal::append_transaction_checked(
             &self.root,
