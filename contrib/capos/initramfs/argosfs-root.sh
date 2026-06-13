@@ -23,7 +23,9 @@ auto_scan="${ARGOSFS_AUTOSCAN:-0}"
 argosfs_bin="${ARGOSFS_BIN:-argosfs}"
 
 log() {
-	printf '%s\n' "argosfs-initrd: $*" | tee -a "$log_file" >/dev/null 2>&1 || true
+	msg="argosfs-initrd: $*"
+	printf '%s\n' "$msg" >>"$log_file" 2>/dev/null || true
+	printf '%s\n' "$msg" >/dev/console 2>/dev/null || printf '%s\n' "$msg" || true
 }
 
 emergency() {
@@ -550,6 +552,17 @@ main() {
 		emergency "no init found in $sysroot"
 	fi
 	log "mounted ArgosFS root at $sysroot pid=$mount_pid"
+	if ! mkdir -p "$sysroot/run"; then
+		if [ -s "$mount_log" ]; then
+			while IFS= read -r line; do
+				log "mount-root: $line"
+			done <"$mount_log"
+		fi
+		kill "$mount_pid" 2>/dev/null || true
+		wait "$mount_pid" 2>/dev/null || true
+		umount "$sysroot" 2>/dev/null || umount -l "$sysroot" 2>/dev/null || true
+		emergency "mounted ArgosFS root is not writable/readable enough for switch_root"
+	fi
 	prepare_switch_root_mounts
 	unset INITRAMFS
 	exec switch_root "$sysroot" /sbin/init

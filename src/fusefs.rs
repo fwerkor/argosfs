@@ -4,16 +4,17 @@ use crate::types::{CapacitySource, DiskStatus, NodeKind};
 use crate::volume::{ArgosFs, NodeAttr, RenamePolicy};
 use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
-    FopenFlags, Generation, INodeNo, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags,
-    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow, WriteFlags,
+    FopenFlags, Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags,
+    RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow,
+    WriteFlags,
 };
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const TTL: Duration = Duration::from_secs(1);
+const TTL: Duration = Duration::from_secs(5);
 
 pub struct ArgosFuse {
     volume: ArgosFs,
@@ -29,12 +30,17 @@ impl ArgosFuse {
             .check_access_inode(ino.0, req.uid(), req.gid(), mask)
     }
 
-    fn open_reply_flags(&self) -> FopenFlags {
+    fn open_reply_flags(&self, write_open: bool) -> FopenFlags {
+        let mut flags = FopenFlags::empty();
         if self.volume.io_policy().direct_io {
-            FopenFlags::FOPEN_DIRECT_IO
-        } else {
-            FopenFlags::empty()
+            flags |= FopenFlags::FOPEN_DIRECT_IO;
         }
+        if write_open {
+            flags |= FopenFlags::FOPEN_NOFLUSH;
+        } else if !self.volume.io_policy().direct_io {
+            flags |= FopenFlags::FOPEN_KEEP_CACHE;
+        }
+        flags
     }
 
     fn require_xattr_write_access(&self, req: &Request, ino: INodeNo, name: &str) -> Result<()> {
@@ -154,7 +160,12 @@ impl Filesystem for ArgosFuse {
         _req: &Request,
         config: &mut KernelConfig,
     ) -> std::result::Result<(), std::io::Error> {
-        let _ = config;
+        let _ = config.set_max_write(1024 * 1024);
+        let _ = config.set_max_readahead(1024 * 1024);
+        let _ = config.set_max_background(64);
+        let _ = config.set_congestion_threshold(48);
+        let _ = config
+            .add_capabilities(InitFlags::FUSE_PARALLEL_DIROPS | InitFlags::FUSE_READDIRPLUS_AUTO);
         Ok(())
     }
 
@@ -416,7 +427,10 @@ impl Filesystem for ArgosFuse {
             Ok(attr)
         })();
         match result {
-            Ok(_) => reply.opened(FileHandle(ino.0), self.open_reply_flags()),
+            Ok(_) => reply.opened(
+                FileHandle(ino.0),
+                self.open_reply_flags(flags.0 & (libc::O_WRONLY | libc::O_RDWR) != 0),
+            ),
             Err(err) => reply.error(errno(&err)),
         }
     }
@@ -455,8 +469,8 @@ impl Filesystem for ArgosFuse {
         reply: ReplyWrite,
     ) {
         match self
-            .require_access(req, ino, libc::W_OK)
-            .and_then(|()| self.volume.write_inode_range(ino.0, offset, data))
+            .volume
+            .write_inode_range_as(ino.0, offset, data, req.uid(), req.gid())
         {
             Ok(written) => reply.written(written as u32),
             Err(err) => reply.error(errno(&err)),
@@ -678,7 +692,7 @@ impl Filesystem for ArgosFuse {
                 &to_file_attr(&attr),
                 Generation(0),
                 FileHandle(attr.ino),
-                self.open_reply_flags(),
+                self.open_reply_flags(true),
             ),
             Err(err) => reply.error(errno(&err)),
         }

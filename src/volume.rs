@@ -13,8 +13,8 @@ use crate::raw_format::{self, RawSuperblock};
 use crate::raw_store;
 use crate::types::*;
 use crate::util::{
-    append_json_line, atomic_write, clean_path, ensure_dir, now_f64, parent_name,
-    relative_or_absolute, sha256_hex, split_path, stable_u01,
+    append_json_line, atomic_write, clean_path, content_hash_hex, content_hash_matches, ensure_dir,
+    now_f64, parent_name, relative_or_absolute, split_path, stable_u01,
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -33,6 +34,8 @@ const LEGACY_NON_UTF8_NAME_PREFIX: &str = "\0argosfs-name-hex:";
 const NON_UTF8_SYMLINK_TARGET_PREFIX: &str = "\0argosfs-symlink-target-hex:";
 const BOOT_CRITICAL_XATTR: &str = "system.argosfs.boot_critical";
 const DEFAULT_LAYOUT_ID: &str = "layout-0000";
+const SHARD_CHECKSUM_BLOCK_SIZE: usize = 256 * 1024;
+const INLINE_DATA_MAX: usize = 512;
 
 #[derive(Clone)]
 pub struct ArgosFs {
@@ -202,6 +205,13 @@ struct PlacementRequest<'a> {
     required_bytes: u64,
 }
 
+#[derive(Clone)]
+struct ShardIntegrity {
+    sha256: String,
+    checksum_block_size: usize,
+    subblock_sha256: Vec<String>,
+}
+
 impl ArgosFs {
     pub fn create(
         root: impl AsRef<Path>,
@@ -305,6 +315,8 @@ impl ArgosFs {
             ctime: created_at,
             entries: BTreeMap::new(),
             target: None,
+            inline_data: None,
+            inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
             posix_acl_access: None,
@@ -934,6 +946,27 @@ impl ArgosFs {
     }
 
     pub fn write_inode_range(&self, ino: InodeId, offset: u64, data: &[u8]) -> Result<usize> {
+        self.write_inode_range_checked(ino, offset, data, None)
+    }
+
+    pub fn write_inode_range_as(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        data: &[u8],
+        uid: u32,
+        gid: u32,
+    ) -> Result<usize> {
+        self.write_inode_range_checked(ino, offset, data, Some((uid, gid)))
+    }
+
+    fn write_inode_range_checked(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        data: &[u8],
+        access: Option<(u32, u32)>,
+    ) -> Result<usize> {
         let start = usize::try_from(offset)
             .map_err(|_| ArgosError::Invalid("write offset is too large".to_string()))?;
         let end = start
@@ -941,9 +974,25 @@ impl ArgosFs {
             .ok_or_else(|| ArgosError::Invalid("write range is too large".to_string()))?;
 
         let mut meta = self.meta.lock();
+        if let Some((uid, gid)) = access {
+            let inode = meta
+                .inodes
+                .get(&ino)
+                .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+            if !acl::evaluate_access(inode, uid, gid, libc::W_OK) {
+                return Err(ArgosError::PermissionDenied(format!(
+                    "uid {uid} gid {gid} mask {:o} inode {ino}",
+                    libc::W_OK
+                )));
+            }
+        }
         let (old_size, stripe_raw_size) = self.range_update_geometry_locked(&meta, ino)?;
         if data.is_empty() {
             return Ok(0);
+        }
+        if start == old_size && start % stripe_raw_size == 0 {
+            self.append_inode_data_locked(&mut meta, ino, start, data)?;
+            return Ok(data.len());
         }
         let new_size = old_size.max(end);
         let affected_start = (start / stripe_raw_size) * stripe_raw_size;
@@ -985,6 +1034,111 @@ impl ArgosFs {
             json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "stripe-window-local"}),
         )?;
         Ok(data.len())
+    }
+
+    fn append_inode_data_locked(
+        &self,
+        meta: &mut Metadata,
+        ino: InodeId,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<()> {
+        let rollback = commit_previous_snapshot(meta);
+        let (storage_class, boot_critical, existing_inline, had_blocks) = {
+            let inode = meta
+                .inodes
+                .get(&ino)
+                .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+            if inode.kind != NodeKind::File {
+                return Err(ArgosError::Unsupported(
+                    "range updates require a regular file".to_string(),
+                ));
+            }
+            (
+                inode.storage_class,
+                inode.boot_critical,
+                decode_inline_data(inode)?,
+                !inode.blocks.is_empty(),
+            )
+        };
+        let full_inline_data = if let Some(mut inline) = existing_inline {
+            if offset != inline.len() {
+                return Err(ArgosError::Invalid(format!(
+                    "append offset {offset} does not match inline size {}",
+                    inline.len()
+                )));
+            }
+            inline.extend_from_slice(data);
+            Some(inline)
+        } else if !had_blocks && offset == 0 && inline_payload_for(meta, data).is_some() {
+            Some(data.to_vec())
+        } else {
+            None
+        };
+        let (written_blocks, inline_payload, new_size) =
+            if let Some(full_data) = full_inline_data.as_ref() {
+                let inline_payload = inline_payload_for(meta, full_data);
+                let blocks = if inline_payload.is_some() {
+                    Vec::new()
+                } else {
+                    self.encode_data_locked(
+                        meta,
+                        full_data,
+                        0,
+                        storage_class,
+                        boot_critical,
+                        &BTreeSet::new(),
+                    )?
+                };
+                (blocks, inline_payload, full_data.len())
+            } else {
+                let blocks = self.encode_data_locked(
+                    meta,
+                    data,
+                    offset as u64,
+                    storage_class,
+                    boot_critical,
+                    &BTreeSet::new(),
+                )?;
+                let new_size = offset
+                    .checked_add(data.len())
+                    .ok_or_else(|| ArgosError::Invalid("append size overflow".to_string()))?;
+                (blocks, None, new_size)
+            };
+        let now = now_f64();
+        let inode = meta.inodes.get_mut(&ino).unwrap();
+        if full_inline_data.is_some() {
+            inode.blocks = written_blocks.clone();
+        } else {
+            inode.blocks.extend(written_blocks.clone());
+        }
+        inode.blocks.sort_by_key(|block| block.raw_offset);
+        set_inline_payload(inode, inline_payload);
+        inode.size = new_size as u64;
+        inode.write_count = inode.write_count.saturating_add(1);
+        inode.write_bytes = inode.write_bytes.saturating_add(data.len() as u64);
+        inode.last_written_at = now;
+        inode.workload_score = inode.workload_score * 0.90 + 2.0;
+        inode.mtime = now;
+        inode.ctime = now;
+
+        if let Err(err) = self.commit_locked_with_previous(
+            meta,
+            rollback.as_ref(),
+            "write-range",
+            json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "aligned-eof-append"}),
+        ) {
+            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
+                if let Some(rollback) = rollback {
+                    *meta = rollback;
+                }
+                self.delete_blocks_locked(meta, &written_blocks);
+            } else if matches!(&err, ArgosError::Conflict(_)) {
+                self.delete_blocks_locked(meta, &written_blocks);
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub fn truncate_path(&self, path: &str, size: u64) -> Result<()> {
@@ -1199,6 +1353,8 @@ impl ArgosFs {
             ctime: now,
             entries: BTreeMap::new(),
             target: Some(target_string.clone()),
+            inline_data: None,
+            inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
             posix_acl_access: inherited_acl,
@@ -2410,7 +2566,7 @@ impl ArgosFs {
                             let meta = self.meta.lock();
                             match self.read_shard_locked(&meta, shard) {
                                 Ok(data) => {
-                                    if sha256_hex(&data) != shard.sha256 {
+                                    if !content_hash_matches(&data, &shard.sha256) {
                                         report.checksum_errors += 1;
                                         damaged = true;
                                     }
@@ -2971,6 +3127,8 @@ impl ArgosFs {
             ctime: now,
             entries: BTreeMap::new(),
             target: None,
+            inline_data: None,
+            inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
             posix_acl_access: inherited_acl.clone(),
@@ -3059,6 +3217,7 @@ impl ArgosFs {
         } else {
             file_type | (mode & 0o7777)
         };
+        let is_regular_file = kind == NodeKind::File && rdev == 0;
         let inode = Inode {
             id: ino,
             kind,
@@ -3073,6 +3232,8 @@ impl ArgosFs {
             ctime: now,
             entries: BTreeMap::new(),
             target: None,
+            inline_data: None,
+            inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
             posix_acl_access: inherited_acl,
@@ -3093,6 +3254,10 @@ impl ArgosFs {
             .entries
             .insert(name.to_string(), ino);
         self.touch_inode_locked(meta, parent, true, true);
+        if meta.backend != BackendKind::Host && meta.config.defer_metadata_commit && is_regular_file
+        {
+            return Ok(ino);
+        }
         if let Err(err) = self.commit_locked_with_previous(
             meta,
             rollback.as_ref(),
@@ -3382,12 +3547,17 @@ impl ArgosFs {
             (inode.storage_class, inode.boot_critical)
         };
         let old_blocks = meta.inodes.get(&ino).unwrap().blocks.clone();
-        let new_blocks =
-            self.encode_data_locked(meta, data, 0, storage_class, boot_critical, exclude_disks)?;
+        let inline_payload = inline_payload_for(meta, data);
+        let new_blocks = if inline_payload.is_some() {
+            Vec::new()
+        } else {
+            self.encode_data_locked(meta, data, 0, storage_class, boot_critical, exclude_disks)?
+        };
         let new_blocks_for_cleanup = new_blocks.clone();
         let now = now_f64();
         let inode = meta.inodes.get_mut(&ino).unwrap();
         inode.blocks = new_blocks;
+        set_inline_payload(inode, inline_payload);
         inode.size = data.len() as u64;
         inode.write_count = inode.write_count.saturating_add(1);
         inode.write_bytes = inode.write_bytes.saturating_add(data.len() as u64);
@@ -3455,6 +3625,14 @@ impl ArgosFs {
                 "range updates require a regular file".to_string(),
             ));
         }
+        if let Some(inline) = decode_inline_data(&inode)? {
+            let mut out = vec![0u8; end - start];
+            let copy_end = end.min(inline.len());
+            if copy_end > start {
+                out[..copy_end - start].copy_from_slice(&inline[start..copy_end]);
+            }
+            return Ok(out);
+        }
 
         self.decode_inode_range_from_inode_locked(meta, &inode, start, end)
             .map(|(data, _)| data)
@@ -3469,6 +3647,15 @@ impl ArgosFs {
     ) -> Result<(Vec<u8>, Vec<String>)> {
         if end <= start {
             return Ok((Vec::new(), Vec::new()));
+        }
+        if let Some(inline) = decode_inline_data(inode)? {
+            if end > inline.len() {
+                return Err(ArgosError::Invalid(format!(
+                    "inline inode {} size is smaller than requested range",
+                    inode.id
+                )));
+            }
+            return Ok((inline[start..end].to_vec(), Vec::new()));
         }
         let mut out = vec![0u8; end - start];
         let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
@@ -3487,14 +3674,26 @@ impl ArgosFs {
             if block_end <= start || block_start >= end {
                 continue;
             }
-            let raw = self.decode_block_locked(meta, block, decrypt_key.as_ref(), &mut damaged)?;
             let copy_start = block_start.max(start);
-            let copy_end = block_start.saturating_add(raw.len()).min(end);
+            let copy_end = block_end.min(end);
             if copy_end > copy_start {
                 let dst_start = copy_start - start;
-                let src_start = copy_start - block_start;
                 let len = copy_end - copy_start;
-                out[dst_start..dst_start + len].copy_from_slice(&raw[src_start..src_start + len]);
+                if let Some(raw) = self.decode_block_range_locked(
+                    meta,
+                    block,
+                    copy_start - block_start,
+                    copy_end - block_start,
+                    &mut damaged,
+                )? {
+                    out[dst_start..dst_start + len].copy_from_slice(&raw);
+                } else {
+                    let raw =
+                        self.decode_block_locked(meta, block, decrypt_key.as_ref(), &mut damaged)?;
+                    let src_start = copy_start - block_start;
+                    out[dst_start..dst_start + len]
+                        .copy_from_slice(&raw[src_start..src_start + len]);
+                }
             }
         }
         Ok((out, damaged))
@@ -3547,7 +3746,14 @@ impl ArgosFs {
             }
         }
 
-        let written_blocks = if !window.is_empty() {
+        let inline_payload = if affected_start == 0 && window.len() == new_size {
+            inline_payload_for(meta, window)
+        } else {
+            None
+        };
+        let written_blocks = if inline_payload.is_some() {
+            Vec::new()
+        } else if !window.is_empty() {
             self.encode_data_locked(
                 meta,
                 window,
@@ -3565,6 +3771,7 @@ impl ArgosFs {
         let now = now_f64();
         let inode = meta.inodes.get_mut(&ino).unwrap();
         inode.blocks = merged;
+        set_inline_payload(inode, inline_payload);
         inode.size = new_size as u64;
         inode.write_count = inode.write_count.saturating_add(1);
         inode.write_bytes = inode.write_bytes.saturating_add(logical_write_bytes);
@@ -3597,6 +3804,15 @@ impl ArgosFs {
     ) -> Result<(Vec<u8>, Vec<String>)> {
         let logical_size = usize::try_from(inode.size)
             .map_err(|_| ArgosError::Invalid("inode logical size is too large".to_string()))?;
+        if let Some(inline) = decode_inline_data(inode)? {
+            if inline.len() != logical_size {
+                return Err(ArgosError::Invalid(format!(
+                    "inline inode {} size mismatch",
+                    inode.id
+                )));
+            }
+            return Ok((inline, Vec::new()));
+        }
         let mut out = vec![0u8; logical_size];
         let mut damaged = Vec::new();
         let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
@@ -3670,7 +3886,7 @@ impl ArgosFs {
                         data.len() as u64,
                         start.elapsed().as_secs_f64(),
                     );
-                    if data.len() == shard.size && sha256_hex(&data) == shard.sha256 {
+                    if data.len() == shard.size && content_hash_matches(&data, &shard.sha256) {
                         shards[shard.slot] = Some(data);
                     } else {
                         damaged.push(format!("{}:checksum:{}", shard.disk_id, shard.slot));
@@ -3718,7 +3934,7 @@ impl ArgosFs {
             compressed
         };
         let raw = decompress(&compressed, block.codec)?;
-        if raw.len() != block.raw_size || sha256_hex(&raw) != block.raw_sha256 {
+        if raw.len() != block.raw_size || !content_hash_matches(&raw, &block.raw_sha256) {
             return Err(ArgosError::UnrecoverableStripe {
                 stripe_id: block.stripe_id.clone(),
                 reason: "raw checksum mismatch".to_string(),
@@ -3728,6 +3944,121 @@ impl ArgosFs {
             self.cache.put(&cache_key, &raw)?;
         }
         Ok(raw)
+    }
+
+    fn decode_block_range_locked(
+        &self,
+        meta: &mut Metadata,
+        block: &FileBlock,
+        start: usize,
+        end: usize,
+        damaged: &mut Vec<String>,
+    ) -> Result<Option<Vec<u8>>> {
+        if start >= end {
+            return Ok(Some(Vec::new()));
+        }
+        if block.encrypted || block.codec != Compression::None || end > block.raw_size {
+            return Ok(None);
+        }
+        let layout = layout_by_id(meta, block_layout_id(block))?;
+        if layout.k != 1 || layout.m != 0 {
+            return Ok(None);
+        }
+        let Some(shard) = block.shards.iter().find(|shard| shard.slot == 0) else {
+            damaged.push("single-shard:missing-slot-0".to_string());
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device block has no shard 0".to_string(),
+            });
+        };
+        if shard.size != block.raw_size
+            || shard.sha256 != block.raw_sha256
+            || shard.checksum_block_size == 0
+            || shard.subblock_sha256.is_empty()
+        {
+            return Ok(None);
+        }
+        let checksum_block_size = shard.checksum_block_size;
+        let expected_checksums = shard.size.div_ceil(checksum_block_size);
+        if shard.subblock_sha256.len() != expected_checksums {
+            return Ok(None);
+        }
+        let Some(disk) = meta.disks.get(&shard.disk_id) else {
+            damaged.push(format!("{}:missing-disk", shard.disk_id));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device block references a missing disk".to_string(),
+            });
+        };
+        if matches!(
+            disk.status,
+            DiskStatus::Failed | DiskStatus::Offline | DiskStatus::Removed
+        ) {
+            damaged.push(format!("{}:unavailable", shard.disk_id));
+            return Err(ArgosError::UnrecoverableStripe {
+                stripe_id: block.stripe_id.clone(),
+                reason: "single-device shard is unavailable".to_string(),
+            });
+        }
+
+        let verify_start = (start / checksum_block_size) * checksum_block_size;
+        let verify_end = end.div_ceil(checksum_block_size) * checksum_block_size;
+        let verify_end = verify_end.min(shard.size);
+        let start_time = std::time::Instant::now();
+        let data = match self.read_shard_range_locked(
+            meta,
+            shard,
+            verify_start,
+            verify_end.saturating_sub(verify_start),
+        ) {
+            Ok(data) => data,
+            Err(err) => {
+                self.update_read_latency_locked(
+                    meta,
+                    &shard.disk_id,
+                    0,
+                    start_time.elapsed().as_secs_f64(),
+                );
+                damaged.push(format!("{}:missing-range:{}", shard.disk_id, shard.slot));
+                return Err(err);
+            }
+        };
+        self.update_read_latency_locked(
+            meta,
+            &shard.disk_id,
+            data.len() as u64,
+            start_time.elapsed().as_secs_f64(),
+        );
+
+        let first_checksum = verify_start / checksum_block_size;
+        let last_checksum = verify_end.div_ceil(checksum_block_size);
+        for checksum_index in first_checksum..last_checksum {
+            let absolute_start = checksum_index * checksum_block_size;
+            let absolute_end = absolute_start
+                .saturating_add(checksum_block_size)
+                .min(shard.size);
+            let relative_start = absolute_start.saturating_sub(verify_start);
+            let relative_end = absolute_end.saturating_sub(verify_start);
+            if relative_end > data.len()
+                || !content_hash_matches(
+                    &data[relative_start..relative_end],
+                    &shard.subblock_sha256[checksum_index],
+                )
+            {
+                damaged.push(format!(
+                    "{}:subblock-checksum:{}:{}",
+                    shard.disk_id, shard.slot, checksum_index
+                ));
+                return Err(ArgosError::UnrecoverableStripe {
+                    stripe_id: block.stripe_id.clone(),
+                    reason: "single-device subblock checksum mismatch".to_string(),
+                });
+            }
+        }
+
+        let local_start = start - verify_start;
+        let local_end = end - verify_start;
+        Ok(Some(data[local_start..local_end].to_vec()))
     }
 
     fn decode_single_shard_block_locked(
@@ -3781,11 +4112,10 @@ impl ArgosFs {
             data.len() as u64,
             start.elapsed().as_secs_f64(),
         );
-        let data_hash = sha256_hex(&data);
         if data.len() != shard.size
             || data.len() != block.raw_size
-            || data_hash != shard.sha256
-            || data_hash != block.raw_sha256
+            || !content_hash_matches(&data, &shard.sha256)
+            || !content_hash_matches(&data, &block.raw_sha256)
         {
             damaged.push(format!("{}:checksum:{}", shard.disk_id, shard.slot));
             return Err(ArgosError::UnrecoverableStripe {
@@ -3823,6 +4153,58 @@ impl ArgosFs {
                 .next_stripe
                 .checked_add(1)
                 .ok_or_else(|| ArgosError::Invalid("stripe id overflow".to_string()))?;
+            let raw_sha256 = content_hash_hex(raw);
+            if layout.k == 1
+                && layout.m == 0
+                && encrypt_key.is_none()
+                && meta.config.compression == Compression::None
+            {
+                let shard_size = raw.len().max(1);
+                let placements = self.choose_disks_locked(
+                    meta,
+                    PlacementRequest {
+                        key: &stripe_id,
+                        count: 1,
+                        storage_class,
+                        boot_critical,
+                        exclude_disks,
+                        required_bytes: shard_size as u64,
+                    },
+                )?;
+                let integrity = ShardIntegrity {
+                    sha256: raw_sha256.clone(),
+                    checksum_block_size: SHARD_CHECKSUM_BLOCK_SIZE,
+                    subblock_sha256: shard_subblock_hashes(raw, &raw_sha256),
+                };
+                let shard = self.write_shard_locked(
+                    meta,
+                    &placements[0],
+                    &stripe_id,
+                    0,
+                    raw,
+                    Some(&integrity),
+                )?;
+                let raw_offset = index
+                    .checked_mul(stripe_raw_size)
+                    .and_then(|offset| u64::try_from(offset).ok())
+                    .and_then(|offset| base_offset.checked_add(offset))
+                    .ok_or_else(|| ArgosError::Invalid("raw block offset overflow".to_string()))?;
+                blocks.push(FileBlock {
+                    layout_id: layout.id.clone(),
+                    stripe_id,
+                    raw_offset,
+                    raw_size: raw.len(),
+                    raw_sha256,
+                    codec: Compression::None,
+                    encrypted: false,
+                    nonce_hex: String::new(),
+                    compressed_size: raw.len(),
+                    shard_size,
+                    shards: vec![shard],
+                    storage_class,
+                });
+                continue;
+            }
             let compressed = compress(raw, meta.config.compression, meta.config.compression_level)?;
             let (payload, encrypted, nonce_hex) = if let Some(key) = encrypt_key.as_ref() {
                 let (nonce, ciphertext) = crypto::encrypt_with_key(
@@ -3850,6 +4232,19 @@ impl ArgosFs {
                     .collect::<Vec<_>>();
                 (shard_size, codec.encode(&data_shards)?)
             };
+            let single_raw_shard_integrity = if layout.k == 1
+                && layout.m == 0
+                && !encrypted
+                && meta.config.compression == Compression::None
+            {
+                Some(ShardIntegrity {
+                    sha256: raw_sha256.clone(),
+                    checksum_block_size: SHARD_CHECKSUM_BLOCK_SIZE,
+                    subblock_sha256: shard_subblock_hashes(raw, &raw_sha256),
+                })
+            } else {
+                None
+            };
             let placements = self.choose_disks_locked(
                 meta,
                 PlacementRequest {
@@ -3863,8 +4258,19 @@ impl ArgosFs {
             )?;
             let mut shards = Vec::new();
             for (slot, shard_data) in encoded.iter().enumerate() {
-                match self.write_shard_locked(meta, &placements[slot], &stripe_id, slot, shard_data)
-                {
+                let integrity = if slot == 0 {
+                    single_raw_shard_integrity.as_ref()
+                } else {
+                    None
+                };
+                match self.write_shard_locked(
+                    meta,
+                    &placements[slot],
+                    &stripe_id,
+                    slot,
+                    shard_data,
+                    integrity,
+                ) {
                     Ok(shard) => shards.push(shard),
                     Err(err) => {
                         for shard in &shards {
@@ -3890,7 +4296,7 @@ impl ArgosFs {
                 stripe_id,
                 raw_offset,
                 raw_size: raw.len(),
-                raw_sha256: sha256_hex(raw),
+                raw_sha256,
                 codec: meta.config.compression,
                 encrypted,
                 nonce_hex,
@@ -3910,7 +4316,17 @@ impl ArgosFs {
         stripe_id: &str,
         slot: usize,
         data: &[u8],
+        integrity: Option<&ShardIntegrity>,
     ) -> Result<Shard> {
+        let sha256 = integrity
+            .map(|integrity| integrity.sha256.clone())
+            .unwrap_or_else(|| content_hash_hex(data));
+        let checksum_block_size = integrity
+            .map(|integrity| integrity.checksum_block_size)
+            .unwrap_or_default();
+        let subblock_sha256 = integrity
+            .map(|integrity| integrity.subblock_sha256.clone())
+            .unwrap_or_default();
         if meta.backend != BackendKind::Host {
             self.ensure_disk_capacity_locked(meta, disk_id, data.len() as u64)?;
             let allocator = meta
@@ -3943,7 +4359,9 @@ impl ArgosFs {
                 disk_id: disk_id.to_string(),
                 location: Some(ShardLocation::RawExtent(extent)),
                 relpath: PathBuf::new(),
-                sha256: sha256_hex(data),
+                sha256,
+                checksum_block_size,
+                subblock_sha256,
                 size: data.len(),
             });
         }
@@ -3979,7 +4397,9 @@ impl ArgosFs {
                 relpath: relpath.clone(),
             }),
             relpath,
-            sha256: sha256_hex(data),
+            sha256,
+            checksum_block_size,
+            subblock_sha256,
             size: data.len(),
         })
     }
@@ -3989,6 +4409,32 @@ impl ArgosFs {
         meta: &Metadata,
         request: PlacementRequest<'_>,
     ) -> Result<Vec<String>> {
+        if request.count == 1 {
+            let mut only = None;
+            let mut eligible = 0usize;
+            for (disk_id, disk) in &meta.disks {
+                if request.exclude_disks.contains(disk_id) || disk.status != DiskStatus::Online {
+                    continue;
+                }
+                if meta.backend == BackendKind::Host {
+                    let disk_path = relative_or_absolute(&self.root, &disk.path);
+                    if !disk_path.join("shards").exists() {
+                        continue;
+                    }
+                }
+                if !self.disk_has_capacity(meta, disk_id, disk, request.required_bytes) {
+                    continue;
+                }
+                eligible += 1;
+                only = Some(disk_id.clone());
+                if eligible > 1 {
+                    break;
+                }
+            }
+            if eligible == 1 {
+                return Ok(vec![only.expect("eligible disk id")]);
+            }
+        }
         let mut scored = Vec::new();
         let local_numa = if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
             None
@@ -4194,6 +4640,9 @@ impl ArgosFs {
         bytes: u64,
         seconds: f64,
     ) {
+        if meta.config.defer_metadata_commit && bytes < SHARD_CHECKSUM_BLOCK_SIZE as u64 {
+            return;
+        }
         if let Some(disk) = meta.disks.get_mut(disk_id) {
             update_latency_ewma(
                 &mut disk.write_latency_ewma_ms,
@@ -4240,6 +4689,49 @@ impl ArgosFs {
                 meta.config.zero_copy,
             ),
         }
+    }
+
+    fn read_shard_range_locked(
+        &self,
+        meta: &Metadata,
+        shard: &Shard,
+        offset: usize,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| ArgosError::Invalid("shard read range overflow".to_string()))?;
+        if end > shard.size {
+            return Err(ArgosError::Invalid(format!(
+                "shard range {offset}..{end} exceeds shard size {}",
+                shard.size
+            )));
+        }
+        let mut data = vec![0u8; len];
+        match shard.location.as_ref() {
+            Some(ShardLocation::RawExtent(extent)) => {
+                let absolute = extent
+                    .offset
+                    .checked_add(offset as u64)
+                    .ok_or_else(|| ArgosError::Invalid("raw extent read overflow".to_string()))?;
+                self.backend_read_at_locked(meta, &extent.disk_id, absolute, &mut data)?;
+            }
+            Some(ShardLocation::HostPath { disk_id, relpath }) => {
+                read_path_range_exact(
+                    &self.shard_path_locked(meta, disk_id, relpath),
+                    offset as u64,
+                    &mut data,
+                )?;
+            }
+            None => {
+                read_path_range_exact(
+                    &self.shard_path_locked(meta, &shard.disk_id, &shard.relpath),
+                    offset as u64,
+                    &mut data,
+                )?;
+            }
+        }
+        Ok(data)
     }
 
     fn delete_shard_locked(&self, meta: &mut Metadata, shard: &Shard) -> Result<()> {
@@ -5170,6 +5662,8 @@ fn root_inode(created_at: f64) -> Inode {
         ctime: created_at,
         entries: BTreeMap::new(),
         target: None,
+        inline_data: None,
+        inline_sha256: String::new(),
         blocks: Vec::new(),
         xattrs: BTreeMap::new(),
         posix_acl_access: None,
@@ -5347,6 +5841,78 @@ fn shard_accounted_size(shard: &Shard) -> u64 {
         Some(ShardLocation::RawExtent(extent)) => extent.length,
         _ => shard.size as u64,
     }
+}
+
+fn shard_subblock_hashes(data: &[u8], full_hash: &str) -> Vec<String> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    if data.len() <= SHARD_CHECKSUM_BLOCK_SIZE {
+        return vec![full_hash.to_string()];
+    }
+    data.chunks(SHARD_CHECKSUM_BLOCK_SIZE)
+        .map(content_hash_hex)
+        .collect()
+}
+
+fn read_path_range_exact(path: &Path, offset: u64, mut buf: &mut [u8]) -> Result<()> {
+    let file = fs::File::open(path)?;
+    let mut cursor = offset;
+    while !buf.is_empty() {
+        let read = file.read_at(buf, cursor)?;
+        if read == 0 {
+            return Err(ArgosError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("short read on {} at offset {cursor}", path.display()),
+            )));
+        }
+        cursor = cursor.saturating_add(read as u64);
+        let (_, rest) = buf.split_at_mut(read);
+        buf = rest;
+    }
+    Ok(())
+}
+
+fn inline_payload_for(meta: &Metadata, data: &[u8]) -> Option<(Vec<u8>, String)> {
+    if data.is_empty() || data.len() > INLINE_DATA_MAX || meta.encryption.enabled {
+        return None;
+    }
+    let layout = meta.layouts.get(&meta.current_write_layout)?;
+    if meta.backend == BackendKind::Host || layout.k != 1 || layout.m != 0 {
+        return None;
+    }
+    Some((data.to_vec(), content_hash_hex(data)))
+}
+
+fn set_inline_payload(inode: &mut Inode, payload: Option<(Vec<u8>, String)>) {
+    if let Some((data, sha256)) = payload {
+        inode.inline_data = Some(data);
+        inode.inline_sha256 = sha256;
+    } else {
+        inode.inline_data = None;
+        inode.inline_sha256.clear();
+    }
+}
+
+fn decode_inline_data(inode: &Inode) -> Result<Option<Vec<u8>>> {
+    let Some(data) = inode.inline_data.as_ref() else {
+        return Ok(None);
+    };
+    if data.len() as u64 != inode.size {
+        return Err(ArgosError::Invalid(format!(
+            "inline inode {} length {} does not match inode size {}",
+            inode.id,
+            data.len(),
+            inode.size
+        )));
+    }
+    if !content_hash_matches(data, &inode.inline_sha256) {
+        return Err(ArgosError::Invalid(format!(
+            "inline inode {} checksum mismatch",
+            inode.id
+        )));
+    }
+    Ok(Some(data.clone()))
 }
 
 fn encryption_aad(volume_uuid: &str, stripe_id: &str) -> Vec<u8> {

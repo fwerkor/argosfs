@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::util::{atomic_write, ensure_dir, sha256_hex};
+use crate::util::{atomic_write, content_hash_matches, ensure_dir, sha256_hex};
 use parking_lot::Mutex;
 use serde_json::json;
 use std::collections::{BTreeMap, VecDeque};
@@ -51,7 +51,7 @@ impl BlockCache {
         let mut inner = self.inner.lock();
         if let Some(value) = inner.items.get(key).cloned() {
             if expected_sha
-                .map(|sha| sha == sha256_hex(&value))
+                .map(|sha| content_hash_matches(&value, sha))
                 .unwrap_or(true)
             {
                 inner.hits += 1;
@@ -69,7 +69,7 @@ impl BlockCache {
             let path = self.l2_path(key);
             if let Ok(value) = std::fs::read(&path) {
                 if expected_sha
-                    .map(|sha| sha == sha256_hex(&value))
+                    .map(|sha| content_hash_matches(&value, sha))
                     .unwrap_or(true)
                 {
                     let mut inner = self.inner.lock();

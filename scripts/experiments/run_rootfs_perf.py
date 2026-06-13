@@ -337,6 +337,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("paper-data/raw/rootfs-perf.jsonl"))
     parser.add_argument("--workdir", type=Path)
     parser.add_argument("--keep-workdir", action="store_true")
+    parser.add_argument(
+        "--scenarios",
+        default="host-directory,argosfs-loop-strict,argosfs-loop-deferred,argosfs-loop-batched,ext4-loop",
+        help="comma-separated scenarios to run",
+    )
     args = parser.parse_args()
 
     file_mib = 128 if args.mode == "full" else 16
@@ -359,15 +364,19 @@ def main() -> int:
         },
     )
 
-    scenarios: list[Callable[[Path, str, Path, int, int], None]] = [
-        run_host_directory,
-        run_argosfs_loop,
-        run_argosfs_loop_deferred,
-        run_argosfs_loop_batched,
-        run_ext4_loop,
-    ]
+    scenario_map: dict[str, Callable[[Path, str, Path, int, int], None]] = {
+        "host-directory": run_host_directory,
+        "argosfs-loop-strict": run_argosfs_loop,
+        "argosfs-loop-deferred": run_argosfs_loop_deferred,
+        "argosfs-loop-batched": run_argosfs_loop_batched,
+        "ext4-loop": run_ext4_loop,
+    }
+    scenarios = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+    unknown = [name for name in scenarios if name not in scenario_map]
+    if unknown:
+        parser.error(f"unknown scenario(s): {','.join(unknown)}")
     for scenario in scenarios:
-        scenario(args.output, args.mode, work, file_mib, small_files)
+        scenario_map[scenario](args.output, args.mode, work, file_mib, small_files)
     if not args.keep_workdir:
         shutil.rmtree(work, ignore_errors=True)
     return 0

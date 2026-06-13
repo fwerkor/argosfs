@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -409,6 +410,10 @@ pub struct Shard {
     pub location: Option<ShardLocation>,
     pub relpath: PathBuf,
     pub sha256: String,
+    #[serde(default)]
+    pub checksum_block_size: usize,
+    #[serde(default)]
+    pub subblock_sha256: Vec<String>,
     pub size: usize,
 }
 
@@ -472,6 +477,14 @@ pub struct Inode {
     pub ctime: f64,
     pub entries: BTreeMap<String, InodeId>,
     pub target: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "inline_data_base64"
+    )]
+    pub inline_data: Option<Vec<u8>>,
+    #[serde(default)]
+    pub inline_sha256: String,
     pub blocks: Vec<FileBlock>,
     pub xattrs: BTreeMap<String, String>,
     #[serde(default)]
@@ -493,6 +506,34 @@ pub struct Inode {
     pub last_accessed_at: f64,
     #[serde(default)]
     pub last_written_at: f64,
+}
+
+mod inline_data_base64 {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value
+            .as_ref()
+            .map(|data| BASE64.encode(data))
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(encoded) = Option::<String>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+        BASE64
+            .decode(encoded)
+            .map(Some)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

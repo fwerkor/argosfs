@@ -765,12 +765,83 @@ fn read_latest_journal_metadata(
                     report.last_valid_generation =
                         report.last_valid_generation.max(record.generation);
                     let candidate = if let Some(metadata) = record.metadata {
+                        let metadata_hash = journal::canonical_metadata_hash(&metadata)?;
+                        if metadata_hash != record.meta_hash {
+                            report.invalid_entries += 1;
+                            report.errors.push(format!(
+                                "raw journal metadata at {}:{} has a metadata hash mismatch",
+                                sb.disk_id, cursor
+                            ));
+                            break;
+                        }
+                        if !metadata.integrity.meta_hash.is_empty()
+                            && metadata.integrity.meta_hash != metadata_hash
+                        {
+                            report.invalid_entries += 1;
+                            report.errors.push(format!(
+                                "raw journal metadata at {}:{} has an integrity hash mismatch",
+                                sb.disk_id, cursor
+                            ));
+                            break;
+                        }
+                        if metadata.txid != record.txid
+                            || metadata.integrity.generation != record.generation
+                        {
+                            report.invalid_entries += 1;
+                            report.errors.push(format!(
+                                "raw journal metadata at {}:{} has inconsistent txid/generation",
+                                sb.disk_id, cursor
+                            ));
+                            break;
+                        }
                         Some(metadata)
-                    } else if let (Some(base), Some(delta)) =
-                        (latest.as_ref(), record.metadata_delta.as_ref())
-                    {
+                    } else if let Some(delta) = record.metadata_delta.as_ref() {
+                        let Some(base) = latest.as_ref() else {
+                            report.invalid_entries += 1;
+                            report.errors.push(format!(
+                                "raw journal record at {}:{} lacks a metadata checkpoint base",
+                                sb.disk_id, cursor
+                            ));
+                            break;
+                        };
+                        if record.txid <= base.txid {
+                            cursor += 36 + len as u64;
+                            continue;
+                        }
+                        let base_hash = metadata_hash_for_replay(base)?;
+                        if let Some(previous_hash) = raw_record_previous_meta_hash(&record) {
+                            if previous_hash != base_hash {
+                                report.invalid_entries += 1;
+                                report.errors.push(format!(
+                                    "raw journal delta at {}:{} does not chain from selected metadata: previous_meta_hash={} selected_meta_hash={}",
+                                    sb.disk_id, cursor, previous_hash, base_hash
+                                ));
+                                break;
+                            }
+                        }
                         match journal::apply_metadata_delta(base, delta) {
-                            Ok(metadata) => Some(metadata),
+                            Ok(metadata) => {
+                                let metadata_hash = journal::canonical_metadata_hash(&metadata)?;
+                                if metadata_hash != record.meta_hash {
+                                    report.invalid_entries += 1;
+                                    report.errors.push(format!(
+                                        "raw journal delta at {}:{} has a metadata hash mismatch",
+                                        sb.disk_id, cursor
+                                    ));
+                                    break;
+                                }
+                                if metadata.txid != record.txid
+                                    || metadata.integrity.generation != record.generation
+                                {
+                                    report.invalid_entries += 1;
+                                    report.errors.push(format!(
+                                        "raw journal delta at {}:{} has inconsistent txid/generation",
+                                        sb.disk_id, cursor
+                                    ));
+                                    break;
+                                }
+                                Some(metadata)
+                            }
                             Err(err) => {
                                 report.invalid_entries += 1;
                                 report.errors.push(format!(
@@ -791,6 +862,14 @@ fn read_latest_journal_metadata(
                     let Some(candidate) = candidate else {
                         break;
                     };
+                    if latest
+                        .as_ref()
+                        .map(|metadata| candidate.txid <= metadata.txid)
+                        .unwrap_or(false)
+                    {
+                        cursor += 36 + len as u64;
+                        continue;
+                    }
                     if best
                         .as_ref()
                         .map(|metadata: &Metadata| candidate.txid > metadata.txid)
@@ -813,6 +892,22 @@ fn read_latest_journal_metadata(
         }
     }
     Ok(best)
+}
+
+fn raw_record_previous_meta_hash(record: &RawJournalRecord) -> Option<&str> {
+    record
+        .details
+        .get("previous_meta_hash")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+fn metadata_hash_for_replay(metadata: &Metadata) -> Result<String> {
+    if metadata.integrity.meta_hash.is_empty() {
+        journal::canonical_metadata_hash(metadata)
+    } else {
+        Ok(metadata.integrity.meta_hash.clone())
+    }
 }
 
 struct MetadataTreeCheckpoint {
