@@ -930,11 +930,14 @@ impl ArgosFs {
                     data = full[start..end].to_vec();
                 }
                 Err(err) => {
-                    self.journal_locked(
-                        &meta,
-                        "self-heal-deferred",
-                        json!({"inode": ino, "error": err.to_string()}),
-                    )?;
+                    data = full[start..end].to_vec();
+                    if self.ensure_block_backend_writable_locked(&meta).is_ok() {
+                        self.journal_locked(
+                            &meta,
+                            "self-heal-deferred",
+                            json!({"inode": ino, "error": err.to_string()}),
+                        )?;
+                    }
                 }
             }
         } else if let Some(live) = meta.inodes.get_mut(&ino) {
