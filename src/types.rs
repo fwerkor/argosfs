@@ -15,6 +15,7 @@ pub enum FaultPoint {
     AfterDataFlushBeforeJournalCommit,
     AfterJournalCommitBeforeMetadataCommit,
     AfterMetadataCommitBeforeSuperblockUpdate,
+    AfterPartialJournalFanout,
     DuringReplay,
 }
 
@@ -30,6 +31,7 @@ impl FaultPoint {
             Self::AfterMetadataCommitBeforeSuperblockUpdate => {
                 "after-metadata-commit-before-superblock-update"
             }
+            Self::AfterPartialJournalFanout => "after-partial-journal-fanout",
             Self::DuringReplay => "during-replay",
         }
     }
