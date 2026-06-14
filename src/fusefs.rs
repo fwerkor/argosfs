@@ -650,10 +650,12 @@ impl Filesystem for ArgosFuse {
     }
 
     fn removexattr(&self, req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        match self
-            .require_access(req, ino, libc::W_OK)
-            .and_then(|()| self.volume.removexattr_inode(ino.0, xattr_name(name)?))
-        {
+        let result = (|| {
+            let name = xattr_name(name)?;
+            self.require_xattr_write_access(req, ino, name)?;
+            self.volume.removexattr_inode(ino.0, name)
+        })();
+        match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(xattr_errno(&err)),
         }
