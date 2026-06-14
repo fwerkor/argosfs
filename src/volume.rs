@@ -1325,6 +1325,7 @@ impl ArgosFs {
     ) -> Result<NodeAttr> {
         let name = entry_name_from_os(name)?;
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let now = now_f64();
         if self
             .dir_inode_locked(&meta, parent)?
@@ -1416,6 +1417,7 @@ impl ArgosFs {
     pub fn link_at(&self, ino: InodeId, new_parent: InodeId, new_name: &OsStr) -> Result<NodeAttr> {
         let name = entry_name_from_os(new_name)?;
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let inode_kind = meta
             .inodes
             .get(&ino)
@@ -1457,6 +1459,7 @@ impl ArgosFs {
 
     pub fn chmod_inode(&self, ino: InodeId, mode: u32) -> Result<NodeAttr> {
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
             .get_mut(&ino)
@@ -1487,6 +1490,7 @@ impl ArgosFs {
         gid: Option<u32>,
     ) -> Result<NodeAttr> {
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
             .get_mut(&ino)
@@ -1511,6 +1515,7 @@ impl ArgosFs {
 
     pub fn utimens_inode(&self, ino: InodeId, atime: f64, mtime: f64) -> Result<NodeAttr> {
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
             .get_mut(&ino)
@@ -1541,6 +1546,7 @@ impl ArgosFs {
 
     fn setxattr_inode_unchecked(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<()> {
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
             .get_mut(&ino)
@@ -1673,6 +1679,7 @@ impl ArgosFs {
     pub fn removexattr_inode(&self, ino: InodeId, name: &str) -> Result<()> {
         validate_xattr_write(name)?;
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
             .get_mut(&ino)
@@ -1711,6 +1718,7 @@ impl ArgosFs {
     ) -> Result<()> {
         let ino = self.resolve_path(path, false)?;
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
             .get_mut(&ino)
@@ -1750,6 +1758,7 @@ impl ArgosFs {
     pub fn set_nfs4_acl_path(&self, path: &str, acl_value: Nfs4Acl) -> Result<()> {
         let ino = self.resolve_path(path, false)?;
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
             .get_mut(&ino)
@@ -1796,6 +1805,7 @@ impl ArgosFs {
         numa_aware: bool,
     ) -> Result<()> {
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         meta.config.io_mode = mode;
         meta.config.direct_io = direct_io;
         meta.config.zero_copy = zero_copy;
@@ -1823,6 +1833,7 @@ impl ArgosFs {
             ));
         }
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         if meta.encryption.enabled {
             let _ =
                 crypto::derive_key_for_config(&meta.encryption, passphrase, meta.uuid.as_bytes())?;
@@ -1842,6 +1853,7 @@ impl ArgosFs {
         rebalance: bool,
     ) -> Result<String> {
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let next = meta
             .disks
             .keys()
@@ -1948,6 +1960,7 @@ impl ArgosFs {
             .next()
             .ok_or_else(|| ArgosError::MissingDevice(path.display().to_string()))?;
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let next = meta
             .disks
             .keys()
@@ -2072,6 +2085,10 @@ impl ArgosFs {
                 disk_id.unwrap_or("no disks").to_string(),
             ));
         }
+        {
+            let meta = self.meta.lock();
+            self.ensure_block_backend_writable_locked(&meta)?;
+        }
         let mut probes = Vec::new();
         let mut meta = self.meta.lock();
         for id in targets {
@@ -2135,6 +2152,10 @@ impl ArgosFs {
                 disk_id.unwrap_or("no disks").to_string(),
             ));
         }
+        {
+            let meta = self.meta.lock();
+            self.ensure_block_backend_writable_locked(&meta)?;
+        }
         let mut updates = Vec::new();
         let mut errors = Vec::new();
         for (id, disk) in targets {
@@ -2166,6 +2187,7 @@ impl ArgosFs {
     pub fn drain_disk(&self, disk_id: &str) -> Result<u64> {
         {
             let mut meta = self.meta.lock();
+            self.ensure_block_backend_writable_locked(&meta)?;
             if !meta.disks.contains_key(disk_id) {
                 return Err(ArgosError::NotFound(disk_id.to_string()));
             }
@@ -2232,6 +2254,7 @@ impl ArgosFs {
     pub fn remove_disk(&self, disk_id: &str) -> Result<u64> {
         let rewritten = self.drain_disk(disk_id)?;
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let disk = meta
             .disks
             .get_mut(disk_id)
@@ -2262,6 +2285,7 @@ impl ArgosFs {
         let max_files = max_files.unwrap_or(usize::MAX);
         let (reshape_id, target_layout) = {
             let mut meta = self.meta.lock();
+            self.ensure_block_backend_writable_locked(&meta)?;
             normalize_metadata_layouts(&mut meta);
             let have = meta
                 .disks
@@ -2437,6 +2461,10 @@ impl ArgosFs {
             .into_iter()
             .map(|(ino, _)| ino)
             .collect::<Vec<_>>();
+        {
+            let meta = self.meta.lock();
+            self.ensure_block_backend_writable_locked(&meta)?;
+        }
         let mut rewritten = 0;
         let mut next_cursor = cursor;
         for ino in targets {
@@ -3306,6 +3334,7 @@ impl ArgosFs {
             .ok_or_else(|| ArgosError::NotFound(format!("inode {child}")))?
             .clone();
         self.check_sticky_locked(meta, parent, child, uid)?;
+        self.ensure_block_backend_writable_locked(meta)?;
         if dir {
             if child_inode.kind != NodeKind::Directory {
                 return Err(ArgosError::NotDirectory(name.to_string()));
@@ -3391,6 +3420,7 @@ impl ArgosFs {
         if existing == Some(child) && !policy.exchange {
             return Ok(());
         }
+        self.ensure_block_backend_writable_locked(meta)?;
         if policy.exchange {
             let existing = existing.ok_or_else(|| ArgosError::NotFound(new_name.to_string()))?;
             self.check_sticky_locked(meta, new_parent, existing, policy.uid)?;
