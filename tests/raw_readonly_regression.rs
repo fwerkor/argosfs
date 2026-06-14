@@ -1,5 +1,7 @@
-use argosfs::types::{Compression, DiskStatus, IoMode, VolumeConfig};
+use argosfs::types::{Compression, DiskStatus, IoMode, ShardLocation, VolumeConfig};
 use argosfs::{ArgosError, ArgosFs};
+use std::fs;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
@@ -173,4 +175,42 @@ fn readonly_loop_failed_metadata_updates_do_not_mutate_memory_or_persist() {
     let reopened_again = ArgosFs::open_loop(&images, false).unwrap();
     assert_eq!(reopened_again.io_policy().io_mode, IoMode::Buffered);
     assert_eq!(reopened_again.attr_inode(ino).unwrap().mode & 0o777, 0o644);
+}
+
+#[test]
+fn readonly_recoverable_damage_still_returns_data() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let mut cfg = config(2, 1);
+    cfg.compression = Compression::None;
+    let fs =
+        ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "readonly-recover", false).unwrap();
+    let payload = b"abcdefghijklmnopqrstuvwxyz0123456789".to_vec();
+    fs.write_file("/payload", &payload, 0o644).unwrap();
+    let ino = fs.resolve_path("/payload", true).unwrap();
+    let meta = fs.metadata_snapshot();
+    let shard = meta.inodes[&ino].blocks[0].shards[0].clone();
+    let extent = match shard.location.as_ref().unwrap() {
+        ShardLocation::RawExtent(extent) => extent.clone(),
+        other => panic!("unexpected shard location: {other:?}"),
+    };
+    let disk_index = extent
+        .disk_id
+        .strip_prefix("disk-")
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    drop(fs);
+
+    let mut image = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&images[disk_index])
+        .unwrap();
+    image.seek(SeekFrom::Start(extent.offset)).unwrap();
+    image.write_all(&[payload[0] ^ 0xff]).unwrap();
+    image.sync_all().unwrap();
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(reopened.read_file("/payload", true).unwrap(), payload);
 }
