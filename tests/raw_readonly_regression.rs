@@ -1,4 +1,4 @@
-use argosfs::types::{Compression, DiskStatus, VolumeConfig};
+use argosfs::types::{Compression, DiskStatus, IoMode, VolumeConfig};
 use argosfs::{ArgosError, ArgosFs};
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
@@ -127,4 +127,50 @@ fn readonly_loop_sync_is_rejected() {
         reopened.sync().unwrap_err(),
         ArgosError::ReadonlyRequired(_)
     ));
+}
+
+#[test]
+fn readonly_loop_failed_metadata_updates_do_not_mutate_memory_or_persist() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs = ArgosFs::create_loop(
+        &images,
+        config(1, 0),
+        32 * 1024 * 1024,
+        "readonly-metadata",
+        false,
+    )
+    .unwrap();
+    fs.write_file("/existing", b"existing data", 0o644).unwrap();
+    let ino = fs.resolve_path("/existing", true).unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    let before = reopened.metadata_snapshot();
+    assert_eq!(before.config.io_mode, IoMode::Buffered);
+    assert_eq!(reopened.attr_inode(ino).unwrap().mode & 0o777, 0o644);
+
+    assert!(matches!(
+        reopened
+            .set_io_policy(IoMode::Direct, true, false, false)
+            .unwrap_err(),
+        ArgosError::ReadonlyRequired(_)
+    ));
+    assert!(matches!(
+        reopened.chmod_inode(ino, 0o600).unwrap_err(),
+        ArgosError::ReadonlyRequired(_)
+    ));
+    assert!(matches!(
+        reopened.sync().unwrap_err(),
+        ArgosError::ReadonlyRequired(_)
+    ));
+
+    let after = reopened.metadata_snapshot();
+    assert_eq!(after.config.io_mode, before.config.io_mode);
+    assert_eq!(after.inodes[&ino].mode & 0o777, 0o644);
+    drop(reopened);
+
+    let reopened_again = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(reopened_again.io_policy().io_mode, IoMode::Buffered);
+    assert_eq!(reopened_again.attr_inode(ino).unwrap().mode & 0o777, 0o644);
 }
