@@ -107,3 +107,24 @@ fn readonly_loop_open_rejects_metadata_and_data_mutations() {
         b"existing data"
     );
 }
+#[test]
+fn readonly_loop_sync_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs = ArgosFs::create_loop(
+        &images,
+        config(1, 0),
+        32 * 1024 * 1024,
+        "readonly-sync",
+        false,
+    )
+    .unwrap();
+    fs.write_file("/existing", b"existing data", 0o644).unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert!(matches!(
+        reopened.sync().unwrap_err(),
+        ArgosError::ReadonlyRequired(_)
+    ));
+}

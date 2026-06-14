@@ -597,6 +597,7 @@ impl ArgosFs {
     pub fn sync(&self) -> Result<()> {
         let mut meta = self.meta.lock();
         if meta.backend != BackendKind::Host {
+            self.ensure_block_backend_writable_locked(&meta)?;
             if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
                 || meta.config.defer_metadata_commit
             {
