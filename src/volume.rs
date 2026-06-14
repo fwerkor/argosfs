@@ -2021,6 +2021,7 @@ impl ArgosFs {
 
     pub fn mark_disk(&self, disk_id: &str, status: DiskStatus) -> Result<()> {
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let disk = meta
             .disks
             .get_mut(disk_id)
@@ -2035,6 +2036,7 @@ impl ArgosFs {
 
     pub fn set_disk_health(&self, disk_id: &str, values: HealthCounters) -> Result<()> {
         let mut meta = self.meta.lock();
+        self.ensure_block_backend_writable_locked(&meta)?;
         let disk = meta
             .disks
             .get_mut(disk_id)
@@ -2661,10 +2663,17 @@ impl ArgosFs {
         }
         if repair || remove_orphans {
             let mut meta = self.meta.lock();
+            let mut metadata_changed = report.removed_orphans > 0;
             for (disk_id, disk) in meta.disks.iter_mut() {
-                disk.used_bytes = referenced_usage.get(disk_id).copied().unwrap_or(0);
+                let used_bytes = referenced_usage.get(disk_id).copied().unwrap_or(0);
+                if disk.used_bytes != used_bytes {
+                    disk.used_bytes = used_bytes;
+                    metadata_changed = true;
+                }
             }
-            self.commit_locked(&mut meta, "fsck", json!({"report": report}))?;
+            if metadata_changed {
+                self.commit_locked(&mut meta, "fsck", json!({"report": report}))?;
+            }
         }
         Ok(report)
     }
@@ -3099,6 +3108,7 @@ impl ArgosFs {
         uid: u32,
         gid: u32,
     ) -> Result<InodeId> {
+        self.ensure_block_backend_writable_locked(meta)?;
         validate_entry_name(name)?;
         if self
             .dir_inode_locked(meta, parent)?
@@ -3171,6 +3181,7 @@ impl ArgosFs {
         uid: u32,
         gid: u32,
     ) -> Result<InodeId> {
+        self.ensure_block_backend_writable_locked(meta)?;
         validate_entry_name(name)?;
         if self
             .dir_inode_locked(meta, parent)?
@@ -3529,6 +3540,7 @@ impl ArgosFs {
         preserve_mtime: bool,
         exclude_disks: &BTreeSet<String>,
     ) -> Result<()> {
+        self.ensure_block_backend_writable_locked(meta)?;
         let rollback = commit_previous_snapshot(meta);
         let (storage_class, boot_critical) = {
             let inode = meta
@@ -4328,6 +4340,7 @@ impl ArgosFs {
             .map(|integrity| integrity.subblock_sha256.clone())
             .unwrap_or_default();
         if meta.backend != BackendKind::Host {
+            self.ensure_block_backend_writable_locked(meta)?;
             self.ensure_disk_capacity_locked(meta, disk_id, data.len() as u64)?;
             let allocator = meta
                 .raw_pool
@@ -4336,14 +4349,27 @@ impl ArgosFs {
                 .ok_or_else(|| ArgosError::MissingDevice(disk_id.to_string()))?;
             let extent = allocator::allocate(allocator, disk_id, data.len() as u64, meta.txid + 1)?;
             let start = std::time::Instant::now();
-            journal::inject_crash(FaultPoint::BeforeDataWrite.as_str())?;
-            self.backend_write_at_locked(meta, disk_id, extent.offset, data)?;
-            journal::inject_crash(FaultPoint::AfterDataWriteBeforeFlush.as_str())?;
-            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_none()
-                && !meta.config.defer_data_flush
-            {
-                self.backend_flush_locked(meta, disk_id)?;
-                journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
+            let write_result = (|| -> Result<()> {
+                journal::inject_crash(FaultPoint::BeforeDataWrite.as_str())?;
+                self.backend_write_at_locked(meta, disk_id, extent.offset, data)?;
+                journal::inject_crash(FaultPoint::AfterDataWriteBeforeFlush.as_str())?;
+                if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_none()
+                    && !meta.config.defer_data_flush
+                {
+                    self.backend_flush_locked(meta, disk_id)?;
+                    journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
+                }
+                Ok(())
+            })();
+            if let Err(err) = write_result {
+                if let Some(allocator) = meta.raw_pool.allocators.get_mut(disk_id) {
+                    if extent.offset.saturating_add(extent.length) == allocator.next_offset {
+                        allocator.next_offset = extent.offset;
+                    } else {
+                        let _ = allocator::free(allocator, &extent);
+                    }
+                }
+                return Err(err);
             }
             if let Some(disk) = meta.disks.get_mut(disk_id) {
                 disk.used_bytes = disk.used_bytes.saturating_add(extent.length);
@@ -5072,6 +5098,15 @@ impl ArgosFs {
         crypto::derive_key_for_config(&meta.encryption, &passphrase, meta.uuid.as_bytes())
     }
 
+    fn ensure_block_backend_writable_locked(&self, meta: &Metadata) -> Result<()> {
+        if meta.backend != BackendKind::Host && !self.backend_writable {
+            return Err(ArgosError::ReadonlyRequired(
+                "block pool was opened read-only".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn commit_locked(
         &self,
         meta: &mut Metadata,
@@ -5088,6 +5123,7 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
+        self.ensure_block_backend_writable_locked(meta)?;
         if meta.backend != BackendKind::Host
             && (std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
                 || meta.config.defer_metadata_commit)
@@ -5174,6 +5210,7 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
+        self.ensure_block_backend_writable_locked(meta)?;
         if meta.backend != BackendKind::Host {
             let superblocks = self.active_superblocks_locked(meta)?;
             if self.open_backend_covers_superblocks(&superblocks) {
@@ -5192,9 +5229,6 @@ impl ArgosFs {
     }
 
     fn open_backend_covers_superblocks(&self, superblocks: &[RawSuperblock]) -> bool {
-        if !self.backend_writable {
-            return false;
-        }
         let Ok(devices) = self.backend.list_devices() else {
             return false;
         };
