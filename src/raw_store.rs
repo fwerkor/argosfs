@@ -449,36 +449,56 @@ fn append_journal(
     };
     record.record_hash = raw_record_hash(&record)?;
     let record_bytes = serde_json::to_vec(&record)?;
+    let record_len = u32::try_from(record_bytes.len())
+        .map_err(|_| ArgosError::Invalid("raw journal record is too large".to_string()))?;
     let record_hash = sha256_hex(&record_bytes);
     let mut entry = Vec::with_capacity(4 + 32 + record_bytes.len());
-    entry.extend_from_slice(&(record_bytes.len() as u32).to_le_bytes());
+    entry.extend_from_slice(&record_len.to_le_bytes());
     let record_hash_bytes = hex::decode(record_hash)
         .map_err(|err| ArgosError::Invalid(format!("raw journal hash encode failed: {err}")))?;
     entry.extend_from_slice(&record_hash_bytes);
     entry.extend_from_slice(&record_bytes);
-    for sb in superblocks {
-        let mut header = vec![0u8; RAW_HEADER_SIZE];
-        backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
-        if &header[..16] != JOURNAL_MAGIC {
-            initialize_journal_region(backend, &sb.disk_id, sb)?;
+
+    let mut rollback_headers: Vec<(String, u64, Vec<u8>)> = Vec::new();
+    let result = (|| -> Result<()> {
+        for (index, sb) in superblocks.iter().enumerate() {
+            let mut header = vec![0u8; RAW_HEADER_SIZE];
             backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
+            if &header[..16] != JOURNAL_MAGIC {
+                initialize_journal_region(backend, &sb.disk_id, sb)?;
+                backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
+            }
+            let write_offset = get_u64(&header, 24)?;
+            let end = write_offset
+                .checked_add(entry.len() as u64)
+                .ok_or_else(|| ArgosError::Invalid("journal append overflow".to_string()))?;
+            if end > sb.journal.length {
+                checkpoint_and_reset_journal(backend, sb, metadata)?;
+                continue;
+            }
+            rollback_headers.push((sb.disk_id.clone(), sb.journal.offset, header.clone()));
+            backend.write_at(&sb.disk_id, sb.journal.offset + write_offset, &entry)?;
+            put_u64(&mut header, 24, end);
+            backend.write_at(&sb.disk_id, sb.journal.offset, &header)?;
+            if !metadata.config.defer_journal_flush {
+                backend.flush_device(&sb.disk_id)?;
+            }
+            if index + 1 < superblocks.len() {
+                journal::inject_crash(FaultPoint::AfterPartialJournalFanout.as_str())?;
+            }
         }
-        let write_offset = get_u64(&header, 24)?;
-        let end = write_offset
-            .checked_add(entry.len() as u64)
-            .ok_or_else(|| ArgosError::Invalid("journal append overflow".to_string()))?;
-        if end > sb.journal.length {
-            checkpoint_and_reset_journal(backend, sb, metadata)?;
-            continue;
-        }
-        backend.write_at(&sb.disk_id, sb.journal.offset + write_offset, &entry)?;
-        put_u64(&mut header, 24, end);
-        backend.write_at(&sb.disk_id, sb.journal.offset, &header)?;
-        if !metadata.config.defer_journal_flush {
-            backend.flush_device(&sb.disk_id)?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        for (disk_id, journal_offset, header) in rollback_headers.into_iter().rev() {
+            let _ = backend.write_at(&disk_id, journal_offset, &header);
+            if !metadata.config.defer_journal_flush {
+                let _ = backend.flush_device(&disk_id);
+            }
         }
     }
-    Ok(())
+    result
 }
 
 fn checkpoint_and_reset_journal(
