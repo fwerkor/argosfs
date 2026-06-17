@@ -418,9 +418,21 @@ mark_argosfs_root_active() {
 	: >"$sysroot/run/argosfs-root-active" 2>/dev/null || true
 }
 
+require_new_root_mountpoint() {
+	name="$1"
+	[ -d "$sysroot/$name" ] || emergency "mounted ArgosFS root is missing /$name for switch_root"
+}
+
 prepare_switch_root_mounts() {
-	mkdir -p "$sysroot/proc" "$sysroot/sys" "$sysroot/dev" "$sysroot/run"
-	prepare_new_root_runtime_dirs
+	if [ "$mount_mode" = "ro" ]; then
+		require_new_root_mountpoint proc
+		require_new_root_mountpoint sys
+		require_new_root_mountpoint dev
+		require_new_root_mountpoint run
+	else
+		mkdir -p "$sysroot/proc" "$sysroot/sys" "$sysroot/dev" "$sysroot/run"
+		prepare_new_root_runtime_dirs
+	fi
 	prepare_new_root_dev || emergency "failed to prepare /dev"
 	move_mount_or_mount /run "$sysroot/run" tmpfs tmpfs || emergency "failed to hand off /run"
 	mark_argosfs_root_active
@@ -555,7 +567,9 @@ main() {
 		emergency "no init found in $sysroot"
 	fi
 	log "mounted ArgosFS root at $sysroot pid=$mount_pid"
-	if ! mkdir -p "$sysroot/run"; then
+	if [ "$mount_mode" = "ro" ]; then
+		require_new_root_mountpoint run
+	elif ! mkdir -p "$sysroot/run"; then
 		if [ -s "$mount_log" ]; then
 			while IFS= read -r line; do
 				log "mount-root: $line"
@@ -564,7 +578,7 @@ main() {
 		kill "$mount_pid" 2>/dev/null || true
 		wait "$mount_pid" 2>/dev/null || true
 		umount "$sysroot" 2>/dev/null || umount -l "$sysroot" 2>/dev/null || true
-		emergency "mounted ArgosFS root is not writable/readable enough for switch_root"
+		emergency "mounted ArgosFS root is not writable enough for switch_root"
 	fi
 	prepare_switch_root_mounts
 	unset INITRAMFS

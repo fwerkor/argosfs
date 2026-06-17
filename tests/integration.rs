@@ -42,6 +42,12 @@ fn loop_images(tmp: &TempDir, count: usize) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+fn create_rootfs_mountpoints(fs: &ArgosFs) {
+    for path in ["/dev", "/proc", "/run", "/sys"] {
+        fs.mkdir(path, 0o755).unwrap();
+    }
+}
+
 fn shard_abs(fs: &ArgosFs, disk_id: &str, rel: &std::path::Path) -> std::path::PathBuf {
     let meta = fs.metadata_snapshot();
     let disk = meta.disks.get(disk_id).unwrap();
@@ -546,6 +552,7 @@ fn single_device_loop_rootfs_smoke_import_export() {
     let images = loop_images(&tmp, 1);
     let fs =
         ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    create_rootfs_mountpoints(&fs);
     fs.mkdir("/sbin", 0o755).unwrap();
     fs.write_file("/sbin/init", b"#!/bin/sh\nexit 0\n", 0o755)
         .unwrap();
@@ -574,6 +581,7 @@ fn raw_journal_replay_chains_from_bulk_checkpoint_for_rootfs_writes() {
     let images = loop_images(&tmp, 1);
     let fs =
         ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    create_rootfs_mountpoints(&fs);
 
     let previous_bulk = std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT");
     std::env::set_var("ARGOSFS_BULK_IMPORT_COMMIT", "1");
@@ -929,6 +937,7 @@ fn rootfs_preflight_fails_closed_for_degraded_rw_default() {
     let images = loop_images(&tmp, 3);
     let fs =
         ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    create_rootfs_mountpoints(&fs);
     fs.write_file("/sbin-init", b"init", 0o755).unwrap();
     drop(fs);
 
@@ -954,11 +963,32 @@ fn rootfs_preflight_fails_closed_for_degraded_rw_default() {
 }
 
 #[test]
+fn rootfs_preflight_rejects_missing_switch_root_mountpoint() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs =
+        ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    for path in ["/dev", "/proc", "/sys"] {
+        fs.mkdir(path, 0o755).unwrap();
+    }
+
+    let report = argosfs::rootfs::preflight_report(&fs, argosfs::rootfs::RootMountMode::ReadOnly);
+    assert!(!report.ok);
+    assert!(!report.can_mount_readonly);
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| issue.code == "root-mountpoint-missing"
+            && issue.message.contains("/run is missing")));
+}
+
+#[test]
 fn rootfs_preflight_rejects_dirty_raw_pool_for_rw() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
     let fs =
         ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    create_rootfs_mountpoints(&fs);
     fs.mkdir("/sbin", 0o755).unwrap();
     fs.write_file("/sbin/init", b"init", 0o755).unwrap();
     fs.sync().unwrap();
