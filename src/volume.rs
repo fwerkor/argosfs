@@ -16,7 +16,7 @@ use crate::util::{
     append_json_line, atomic_write, clean_path, content_hash_hex, content_hash_matches, ensure_dir,
     now_f64, parent_name, relative_or_absolute, split_path, stable_u01,
 };
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -43,7 +43,7 @@ pub struct ArgosFs {
     backend: Arc<dyn StorageBackend>,
     backend_writable: bool,
     raw_superblocks: Arc<Vec<RawSuperblock>>,
-    meta: Arc<Mutex<Metadata>>,
+    meta: Arc<RwLock<Metadata>>,
     cache: Arc<BlockCache>,
 }
 
@@ -383,7 +383,7 @@ impl ArgosFs {
             backend_writable: true,
             raw_superblocks: Arc::new(Vec::new()),
             root: Arc::new(root),
-            meta: Arc::new(Mutex::new(meta)),
+            meta: Arc::new(RwLock::new(meta)),
             cache: Arc::new(cache),
         })
     }
@@ -571,7 +571,7 @@ impl ArgosFs {
             backend,
             backend_writable,
             raw_superblocks: Arc::new(superblocks),
-            meta: Arc::new(Mutex::new(meta)),
+            meta: Arc::new(RwLock::new(meta)),
             cache: Arc::new(cache),
         })
     }
@@ -581,11 +581,11 @@ impl ArgosFs {
     }
 
     pub fn metadata_snapshot(&self) -> Metadata {
-        self.meta.lock().clone()
+        self.meta.read().clone()
     }
 
     pub fn transaction_report(&self) -> Result<TransactionReport> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         if meta.backend != BackendKind::Host {
             let superblocks = self.active_superblocks_locked(&meta)?;
             let backend = self.active_block_backend_locked(&meta, false)?;
@@ -595,7 +595,7 @@ impl ArgosFs {
     }
 
     pub fn sync(&self) -> Result<()> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         if meta.backend != BackendKind::Host {
             self.ensure_block_backend_writable_locked(&meta)?;
             if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
@@ -654,7 +654,7 @@ impl ArgosFs {
     }
 
     pub fn snapshot(&self, name: &str) -> Result<PathBuf> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let trimmed = name.trim();
         if trimmed.is_empty() {
             return Err(ArgosError::Invalid(
@@ -692,7 +692,7 @@ impl ArgosFs {
     }
 
     pub fn resolve_path(&self, path: &str, follow_final: bool) -> Result<InodeId> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         self.resolve_path_locked(&meta, path, follow_final, 40)
     }
 
@@ -702,7 +702,7 @@ impl ArgosFs {
     }
 
     pub fn attr_inode(&self, ino: InodeId) -> Result<NodeAttr> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let inode = meta
             .inodes
             .get(&ino)
@@ -711,7 +711,7 @@ impl ArgosFs {
     }
 
     pub fn lookup(&self, parent: InodeId, name: &OsStr) -> Result<NodeAttr> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let parent_inode = self.dir_inode_locked(&meta, parent)?;
         let name = entry_name_from_os(name)?;
         let child = parent_inode
@@ -728,7 +728,7 @@ impl ArgosFs {
     pub fn mkdir(&self, path: &str, mode: u32) -> Result<InodeId> {
         let (parent, name) = parent_name(path)?;
         let name = entry_name_from_str(&name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.mkdir_locked(
             &mut meta,
@@ -753,7 +753,7 @@ impl ArgosFs {
         gid: u32,
     ) -> Result<NodeAttr> {
         let name = entry_name_from_os(name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let ino = self.mkdir_locked(&mut meta, parent, &name, mode, uid, gid)?;
         let inode = meta.inodes.get(&ino).unwrap();
         Ok(Self::attr_from_inode(inode, meta.config.chunk_size))
@@ -762,7 +762,7 @@ impl ArgosFs {
     pub fn mknod_path(&self, path: &str, mode: u32, rdev: u64) -> Result<InodeId> {
         let (parent, name) = parent_name(path)?;
         let name = entry_name_from_str(&name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.mknod_locked(
             &mut meta,
@@ -795,7 +795,7 @@ impl ArgosFs {
         gid: u32,
     ) -> Result<NodeAttr> {
         let name = entry_name_from_os(name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let ino = self.mknod_locked(&mut meta, parent, &name, mode, rdev, uid, gid)?;
         let inode = meta.inodes.get(&ino).unwrap();
         Ok(Self::attr_from_inode(inode, meta.config.chunk_size))
@@ -804,7 +804,7 @@ impl ArgosFs {
     pub fn create_file_path(&self, path: &str, mode: u32) -> Result<InodeId> {
         let (parent, name) = parent_name(path)?;
         let name = entry_name_from_str(&name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.mknod_locked(
             &mut meta,
@@ -830,7 +830,7 @@ impl ArgosFs {
         gid: u32,
     ) -> Result<NodeAttr> {
         let name = entry_name_from_os(name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let ino = self.mknod_locked(
             &mut meta,
             parent,
@@ -877,7 +877,7 @@ impl ArgosFs {
         size: usize,
         repair: bool,
     ) -> Result<(Vec<u8>, Vec<String>, bool)> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let inode = meta
             .inodes
             .get(&ino)
@@ -977,7 +977,7 @@ impl ArgosFs {
             .checked_add(data.len())
             .ok_or_else(|| ArgosError::Invalid("write range is too large".to_string()))?;
 
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         if let Some((uid, gid)) = access {
             let inode = meta
                 .inodes
@@ -1155,7 +1155,7 @@ impl ArgosFs {
         let new_size = usize::try_from(requested_size)
             .map_err(|_| ArgosError::Invalid("truncate size is too large".to_string()))?;
 
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let (old_size, stripe_raw_size) = self.range_update_geometry_locked(&meta, ino)?;
 
         if new_size == old_size {
@@ -1197,7 +1197,7 @@ impl ArgosFs {
     }
 
     pub fn readdir(&self, ino: InodeId) -> Result<Vec<DirEntry>> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let chunk = meta.config.chunk_size;
         let inode = self.dir_inode_locked(&meta, ino)?.clone();
         let parent_ino = self.parent_inode_locked(&meta, ino)?;
@@ -1228,7 +1228,7 @@ impl ArgosFs {
     pub fn unlink_path(&self, path: &str) -> Result<()> {
         let (parent, name) = parent_name(path)?;
         let name = entry_name_from_str(&name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.unlink_locked(&mut meta, parent_ino, &name, false, Some(current_uid()))
     }
@@ -1239,14 +1239,14 @@ impl ArgosFs {
 
     pub fn unlink_at_as(&self, parent: InodeId, name: &OsStr, uid: u32) -> Result<()> {
         let name = entry_name_from_os(name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.unlink_locked(&mut meta, parent, &name, false, Some(uid))
     }
 
     pub fn rmdir_path(&self, path: &str) -> Result<()> {
         let (parent, name) = parent_name(path)?;
         let name = entry_name_from_str(&name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
         self.unlink_locked(&mut meta, parent_ino, &name, true, Some(current_uid()))
     }
@@ -1257,7 +1257,7 @@ impl ArgosFs {
 
     pub fn rmdir_at_as(&self, parent: InodeId, name: &OsStr, uid: u32) -> Result<()> {
         let name = entry_name_from_os(name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.unlink_locked(&mut meta, parent, &name, true, Some(uid))
     }
 
@@ -1266,7 +1266,7 @@ impl ArgosFs {
         let (new_parent, new_name) = parent_name(new)?;
         let old_name = entry_name_from_str(&old_name)?;
         let new_name = entry_name_from_str(&new_name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let old_parent = self.resolve_path_locked(&meta, &old_parent, true, 40)?;
         let new_parent = self.resolve_path_locked(&meta, &new_parent, true, 40)?;
         self.rename_locked(
@@ -1308,7 +1308,7 @@ impl ArgosFs {
     ) -> Result<()> {
         let old_name = entry_name_from_os(old_name)?;
         let new_name = entry_name_from_os(new_name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.rename_locked(
             &mut meta, old_parent, &old_name, new_parent, &new_name, policy,
         )
@@ -1327,7 +1327,7 @@ impl ArgosFs {
         gid: u32,
     ) -> Result<NodeAttr> {
         let name = entry_name_from_os(name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let now = now_f64();
         if self
@@ -1404,7 +1404,7 @@ impl ArgosFs {
     }
 
     pub fn readlink_inode_bytes(&self, ino: InodeId) -> Result<Vec<u8>> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let inode = meta
             .inodes
             .get(&ino)
@@ -1419,7 +1419,7 @@ impl ArgosFs {
 
     pub fn link_at(&self, ino: InodeId, new_parent: InodeId, new_name: &OsStr) -> Result<NodeAttr> {
         let name = entry_name_from_os(new_name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let inode_kind = meta
             .inodes
@@ -1461,7 +1461,7 @@ impl ArgosFs {
     }
 
     pub fn chmod_inode(&self, ino: InodeId, mode: u32) -> Result<NodeAttr> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
@@ -1492,7 +1492,7 @@ impl ArgosFs {
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Result<NodeAttr> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
@@ -1517,7 +1517,7 @@ impl ArgosFs {
     }
 
     pub fn utimens_inode(&self, ino: InodeId, atime: f64, mtime: f64) -> Result<NodeAttr> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
@@ -1548,7 +1548,7 @@ impl ArgosFs {
     }
 
     fn setxattr_inode_unchecked(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<()> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
@@ -1594,7 +1594,7 @@ impl ArgosFs {
 
     pub fn getxattr_inode(&self, ino: InodeId, name: &str) -> Result<Vec<u8>> {
         validate_xattr_read(name)?;
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let inode = meta
             .inodes
             .get(&ino)
@@ -1651,7 +1651,7 @@ impl ArgosFs {
     }
 
     pub fn listxattr_inode(&self, ino: InodeId) -> Result<Vec<String>> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let inode = meta
             .inodes
             .get(&ino)
@@ -1681,7 +1681,7 @@ impl ArgosFs {
 
     pub fn removexattr_inode(&self, ino: InodeId, name: &str) -> Result<()> {
         validate_xattr_write(name)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
@@ -1720,7 +1720,7 @@ impl ArgosFs {
         acl_value: PosixAcl,
     ) -> Result<()> {
         let ino = self.resolve_path(path, false)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
@@ -1746,7 +1746,7 @@ impl ArgosFs {
 
     pub fn get_posix_acl_path(&self, path: &str, default_acl: bool) -> Result<Option<PosixAcl>> {
         let ino = self.resolve_path(path, false)?;
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let inode = meta
             .inodes
             .get(&ino)
@@ -1760,7 +1760,7 @@ impl ArgosFs {
 
     pub fn set_nfs4_acl_path(&self, path: &str, acl_value: Nfs4Acl) -> Result<()> {
         let ino = self.resolve_path(path, false)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
@@ -1777,7 +1777,7 @@ impl ArgosFs {
 
     pub fn get_nfs4_acl_path(&self, path: &str) -> Result<Option<Nfs4Acl>> {
         let ino = self.resolve_path(path, false)?;
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let inode = meta
             .inodes
             .get(&ino)
@@ -1786,7 +1786,7 @@ impl ArgosFs {
     }
 
     pub fn check_access_inode(&self, ino: InodeId, uid: u32, gid: u32, mask: i32) -> Result<()> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let inode = meta
             .inodes
             .get(&ino)
@@ -1807,7 +1807,7 @@ impl ArgosFs {
         zero_copy: bool,
         numa_aware: bool,
     ) -> Result<()> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         meta.config.io_mode = mode;
         meta.config.direct_io = direct_io;
@@ -1826,7 +1826,7 @@ impl ArgosFs {
     }
 
     pub fn io_policy(&self) -> VolumeConfig {
-        self.meta.lock().config.clone()
+        self.meta.read().config.clone()
     }
 
     pub fn enable_encryption(&self, passphrase: &str) -> Result<()> {
@@ -1835,7 +1835,7 @@ impl ArgosFs {
                 "encryption passphrase must not be empty".to_string(),
             ));
         }
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         if meta.encryption.enabled {
             let _ =
@@ -1855,7 +1855,7 @@ impl ArgosFs {
         capacity_bytes: Option<u64>,
         rebalance: bool,
     ) -> Result<String> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let next = meta
             .disks
@@ -1962,7 +1962,7 @@ impl ArgosFs {
             .into_iter()
             .next()
             .ok_or_else(|| ArgosError::MissingDevice(path.display().to_string()))?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let next = meta
             .disks
@@ -2037,7 +2037,7 @@ impl ArgosFs {
     }
 
     pub fn mark_disk(&self, disk_id: &str, status: DiskStatus) -> Result<()> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let disk = meta
             .disks
@@ -2052,7 +2052,7 @@ impl ArgosFs {
     }
 
     pub fn set_disk_health(&self, disk_id: &str, values: HealthCounters) -> Result<()> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let disk = meta
             .disks
@@ -2076,7 +2076,7 @@ impl ArgosFs {
         apply_recommendations: bool,
     ) -> Result<Vec<DiskProbe>> {
         let targets = {
-            let meta = self.meta.lock();
+            let meta = self.meta.read();
             meta.disks
                 .keys()
                 .filter(|id| disk_id.map(|wanted| wanted == id.as_str()).unwrap_or(true))
@@ -2089,11 +2089,11 @@ impl ArgosFs {
             ));
         }
         {
-            let meta = self.meta.lock();
+            let meta = self.meta.read();
             self.ensure_block_backend_writable_locked(&meta)?;
         }
         let mut probes = Vec::new();
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         for id in targets {
             let disk_path = {
                 let disk = meta
@@ -2143,7 +2143,7 @@ impl ArgosFs {
         disk_id: Option<&str>,
     ) -> Result<Vec<(String, HealthCounters)>> {
         let targets = {
-            let meta = self.meta.lock();
+            let meta = self.meta.read();
             meta.disks
                 .iter()
                 .filter(|(id, _)| disk_id.map(|wanted| wanted == id.as_str()).unwrap_or(true))
@@ -2156,7 +2156,7 @@ impl ArgosFs {
             ));
         }
         {
-            let meta = self.meta.lock();
+            let meta = self.meta.read();
             self.ensure_block_backend_writable_locked(&meta)?;
         }
         let mut updates = Vec::new();
@@ -2173,7 +2173,7 @@ impl ArgosFs {
                 serde_json::to_string(&errors)?
             )));
         }
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         for (id, health) in &updates {
             if let Some(disk) = meta.disks.get_mut(id) {
                 disk.health = health.clone();
@@ -2189,7 +2189,7 @@ impl ArgosFs {
 
     pub fn drain_disk(&self, disk_id: &str) -> Result<u64> {
         {
-            let mut meta = self.meta.lock();
+            let mut meta = self.meta.write();
             self.ensure_block_backend_writable_locked(&meta)?;
             if !meta.disks.contains_key(disk_id) {
                 return Err(ArgosError::NotFound(disk_id.to_string()));
@@ -2211,7 +2211,7 @@ impl ArgosFs {
             self.commit_locked(&mut meta, "drain-start", json!({"disk_id": disk_id}))?;
         }
         let targets = {
-            let meta = self.meta.lock();
+            let meta = self.meta.read();
             meta.inodes
                 .iter()
                 .filter_map(|(ino, inode)| {
@@ -2233,7 +2233,7 @@ impl ArgosFs {
         exclude.insert(disk_id.to_string());
         for ino in targets {
             let data = self.read_inode(ino, 0, u64::MAX as usize, false)?;
-            let mut meta = self.meta.lock();
+            let mut meta = self.meta.write();
             self.replace_inode_data_locked(
                 &mut meta,
                 ino,
@@ -2245,7 +2245,7 @@ impl ArgosFs {
             )?;
             rewritten += 1;
         }
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.commit_locked(
             &mut meta,
             "drain-done",
@@ -2256,7 +2256,7 @@ impl ArgosFs {
 
     pub fn remove_disk(&self, disk_id: &str) -> Result<u64> {
         let rewritten = self.drain_disk(disk_id)?;
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let disk = meta
             .disks
@@ -2287,7 +2287,7 @@ impl ArgosFs {
         }
         let max_files = max_files.unwrap_or(usize::MAX);
         let (reshape_id, target_layout) = {
-            let mut meta = self.meta.lock();
+            let mut meta = self.meta.write();
             self.ensure_block_backend_writable_locked(&meta)?;
             normalize_metadata_layouts(&mut meta);
             let have = meta
@@ -2352,7 +2352,7 @@ impl ArgosFs {
                 break;
             };
             let data = self.read_inode(ino, 0, u64::MAX as usize, true)?;
-            let mut meta = self.meta.lock();
+            let mut meta = self.meta.write();
             self.replace_inode_data_locked(
                 &mut meta,
                 ino,
@@ -2377,7 +2377,7 @@ impl ArgosFs {
         }
 
         let remaining = self.reshape_remaining_files(&target_layout);
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         let (state_rewritten, complete) = if remaining == 0 {
             let state_rewritten = meta
                 .reshape
@@ -2426,7 +2426,7 @@ impl ArgosFs {
     }
 
     fn next_reshape_inode(&self, target_layout: &str) -> Option<InodeId> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         meta.inodes.iter().find_map(|(ino, inode)| {
             (inode.kind == NodeKind::File
                 && inode
@@ -2438,7 +2438,7 @@ impl ArgosFs {
     }
 
     fn reshape_remaining_files(&self, target_layout: &str) -> usize {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         meta.inodes
             .values()
             .filter(|inode| {
@@ -2465,14 +2465,14 @@ impl ArgosFs {
             .map(|(ino, _)| ino)
             .collect::<Vec<_>>();
         {
-            let meta = self.meta.lock();
+            let meta = self.meta.read();
             self.ensure_block_backend_writable_locked(&meta)?;
         }
         let mut rewritten = 0;
         let mut next_cursor = cursor;
         for ino in targets {
             let data = self.read_inode(ino, 0, u64::MAX as usize, true)?;
-            let mut meta = self.meta.lock();
+            let mut meta = self.meta.write();
             if let Some(inode) = meta.inodes.get_mut(&ino) {
                 classify_inode(inode);
             }
@@ -2488,7 +2488,7 @@ impl ArgosFs {
             rewritten += 1;
             next_cursor = Some(ino);
         }
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.commit_locked(
             &mut meta,
             "rebalance-done",
@@ -2541,7 +2541,7 @@ impl ArgosFs {
     }
 
     pub fn health_report(&self) -> HealthReport {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let disks = meta
             .disks
             .values()
@@ -2597,7 +2597,7 @@ impl ArgosFs {
                     let mut damaged = false;
                     for block in &inode.blocks {
                         for shard in &block.shards {
-                            let meta = self.meta.lock();
+                            let meta = self.meta.read();
                             match self.read_shard_locked(&meta, shard) {
                                 Ok(data) => {
                                     if !content_hash_matches(&data, &shard.sha256) {
@@ -2694,7 +2694,7 @@ impl ArgosFs {
             }
         }
         if repair || remove_orphans {
-            let mut meta = self.meta.lock();
+            let mut meta = self.meta.write();
             let mut metadata_changed = report.removed_orphans > 0;
             for (disk_id, disk) in meta.disks.iter_mut() {
                 let used_bytes = referenced_usage.get(disk_id).copied().unwrap_or(0);
@@ -2934,7 +2934,7 @@ impl ArgosFs {
         });
         self.save_autopilot_state(&state)?;
         append_json_line(&self.root.join(".argosfs/autopilot.jsonl"), &result)?;
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         self.journal_locked(&meta, "autopilot", json!({"actions": actions}))?;
         Ok(result)
     }
@@ -2957,7 +2957,7 @@ impl ArgosFs {
             .filter(|disk| disk.status == DiskStatus::Online)
             .count();
         let required_after_drain = {
-            let meta = self.meta.lock();
+            let meta = self.meta.read();
             max_layout_total(&meta)
         };
         let mut decisions = Vec::new();
@@ -3075,7 +3075,7 @@ impl ArgosFs {
     }
 
     pub fn iter_path_bytes(&self) -> Vec<(Vec<u8>, InodeId)> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let mut out = vec![(b"/".to_vec(), ROOT_INO)];
 
         fn walk(meta: &Metadata, out: &mut Vec<(Vec<u8>, InodeId)>, prefix: &[u8], ino: InodeId) {
@@ -3105,7 +3105,7 @@ impl ArgosFs {
     }
 
     fn file_window(&self, cursor: Option<InodeId>, max_files: usize) -> Vec<(InodeId, Inode)> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let files = meta
             .inodes
             .iter()
@@ -3551,7 +3551,7 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
-        let mut meta = self.meta.lock();
+        let mut meta = self.meta.write();
         self.replace_inode_data_locked(
             &mut meta,
             ino,
@@ -4927,7 +4927,7 @@ impl ArgosFs {
     }
 
     fn referenced_shards(&self) -> BTreeSet<(String, PathBuf)> {
-        let meta = self.meta.lock();
+        let meta = self.meta.read();
         let mut refs = BTreeSet::new();
         for inode in meta.inodes.values() {
             for block in &inode.blocks {
