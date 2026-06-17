@@ -321,7 +321,7 @@ move_mount_or_mount() {
 	fs_type="$3"
 	fs_source="$4"
 	tries=0
-	mkdir -p "$target"
+	mkdir -p "$target" 2>/dev/null || true
 	while [ "$tries" -lt 10 ]; do
 		is_mounted "$target" && return 0
 		if is_mounted "$source"; then
@@ -414,8 +414,9 @@ prepare_new_root_runtime_dirs() {
 }
 
 mark_argosfs_root_active() {
-	mkdir -p "$sysroot/run"
-	: >"$sysroot/run/argosfs-root-active" 2>/dev/null || true
+	touch /run/argosfs-root-active 2>/dev/null || true
+	touch "$sysroot/run/argosfs-root-active" 2>/dev/null ||
+		emergency "failed to mark ArgosFS root active under /run"
 }
 
 require_new_root_mountpoint() {
@@ -435,9 +436,12 @@ prepare_switch_root_mounts() {
 	fi
 	prepare_new_root_dev || emergency "failed to prepare /dev"
 	move_mount_or_mount /run "$sysroot/run" tmpfs tmpfs || emergency "failed to hand off /run"
+	is_mounted "$sysroot/run" || emergency "failed to verify /run handoff"
 	mark_argosfs_root_active
 	move_mount_or_mount /sys "$sysroot/sys" sysfs sysfs || emergency "failed to hand off /sys"
+	is_mounted "$sysroot/sys" || emergency "failed to verify /sys handoff"
 	move_mount_or_mount /proc "$sysroot/proc" proc proc || emergency "failed to hand off /proc"
+	is_mounted "$sysroot/proc" || emergency "failed to verify /proc handoff"
 }
 
 ensure_block_device_nodes() {
