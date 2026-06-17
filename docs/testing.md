@@ -26,6 +26,7 @@ Privileged checks are provided but skip unless the environment is ready:
 sudo ARGOSFS_RAW_TEST_DEVICES=/dev/...,/dev/... scripts/test_raw_backend.sh --force
 scripts/test_privileged_fuse.sh
 scripts/test_qemu_boot.sh
+scripts/test_qemu_ops.sh
 ```
 
 Loop/raw integration tests include raw superblock backup recovery, duplicate
@@ -34,6 +35,10 @@ raw extent corruption repair, and raw data-write crash injection before journal
 commit. The crash script runs only unprivileged crash/replay cases by default;
 raw block devices, FUSE mounts, and QEMU boot are explicit privileged/local
 checks and print a skip reason when unavailable.
+`scripts/test_qemu_ops.sh` extends the QEMU boot check by activating the serial
+console and running rootfs operations: verify the ArgosFS `/` mount, verify the
+initramfs root marker under `/run`, read `/etc/openwrt_release`, exercise
+create/read/symlink/delete on `/tmp`, and call `sync`.
 
 `scripts/compat/run_deep_roundtrip.sh` adds host-filesystem import/export
 coverage for byte-preserving names, hardlinks, symlinks, xattrs, metadata, and
