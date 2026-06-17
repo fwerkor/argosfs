@@ -568,7 +568,7 @@ impl PagedMetadata {
     pub fn apply_delta(&mut self, delta: &[MetadataPageDeltaOp]) -> Result<()> {
         for op in delta {
             match op {
-                MetadataPageDeltaOp::Put { page } => self.put_page(page.clone())?,
+                MetadataPageDeltaOp::Put { page } => self.put_page((**page).clone())?,
                 MetadataPageDeltaOp::Delete { key } => {
                     self.pages.remove(key);
                 }
@@ -597,7 +597,7 @@ impl MetadataStore for PagedMetadata {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum MetadataPageDeltaOp {
-    Put { page: MetadataPage },
+    Put { page: Box<MetadataPage> },
     Delete { key: MetadataPageKey },
 }
 
@@ -618,7 +618,9 @@ pub fn metadata_page_delta(
             .map(|previous_page| previous_page.body_hash != page.body_hash)
             .unwrap_or(true);
         if changed {
-            delta.push(MetadataPageDeltaOp::Put { page: page.clone() });
+            delta.push(MetadataPageDeltaOp::Put {
+                page: Box::new(page.clone()),
+            });
         }
     }
     delta
