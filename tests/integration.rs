@@ -12,7 +12,7 @@ use argosfs::types::{
     StorageTier, VolumeConfig,
 };
 use argosfs::util::{content_hash_hex, directory_size, sha256_hex};
-use argosfs::{ArgosError, ArgosFs, AutopilotConfig};
+use argosfs::{ArgosError, ArgosFs, AutopilotConfig, AutopilotPolicy};
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -2059,6 +2059,90 @@ fn autopilot_rebalances_with_a_file_budget() {
         .find(|action| action["action"] == "rebalance-incremental")
         .unwrap();
     assert!(rebalance["rewritten_files"].as_u64().unwrap() <= 2);
+}
+
+#[test]
+fn autopilot_dry_run_reports_policy_and_background_throttle() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    let mut health = fs.metadata_snapshot().disks["disk-0000"].health.clone();
+    health.latency_ms = 120.0;
+    fs.set_disk_health("disk-0000", health).unwrap();
+
+    let mut policy = AutopilotPolicy::default();
+    policy.background_io.max_read_mib_s = Some(1.0);
+    policy.background_io.max_write_mib_s = Some(1.0);
+    policy.background_io.target_foreground_p99_ms = 50.0;
+
+    let result = fs
+        .autopilot_dry_run_with_config_and_policy(
+            AutopilotConfig {
+                probe_interval_sec: u64::MAX,
+                smart_interval_sec: u64::MAX,
+                scrub_interval_sec: u64::MAX,
+                rebalance_interval_sec: 0,
+                rebalance_min_skew: 0.0,
+                rebalance_files_per_run: 8,
+                ..AutopilotConfig::default()
+            },
+            policy,
+        )
+        .unwrap();
+
+    assert_eq!(result["policy"]["background_io"]["max_read_mib_s"], 1.0);
+    let decisions = result["planner"]["background_io"]["throttle_decisions"]
+        .as_array()
+        .unwrap();
+    assert!(decisions.iter().any(|decision| {
+        decision["action"] == "rebalance"
+            && decision["requested_budget"].as_u64().unwrap() >= 8
+            && decision["effective_budget"].as_u64().unwrap() <= 1
+            && decision["max_foreground_latency_ms"].as_f64().unwrap() >= 120.0
+    }));
+}
+
+#[test]
+fn autopilot_policy_pauses_scrub_under_foreground_latency_pressure() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/file", b"abcdefghijklmnopqrstuvwxyz", 0o644)
+        .unwrap();
+
+    let meta = fs.metadata_snapshot();
+    let inode = meta.inodes.values().find(|inode| inode.size == 26).unwrap();
+    let shard = &inode.blocks[0].shards[0];
+    fs::write(shard_abs(&fs, &shard.disk_id, &shard.relpath), b"corrupt").unwrap();
+
+    let mut health = fs.metadata_snapshot().disks["disk-0000"].health.clone();
+    health.latency_ms = 100.0;
+    fs.set_disk_health("disk-0000", health).unwrap();
+
+    let mut policy = AutopilotPolicy::default();
+    policy.background_io.target_foreground_p99_ms = 10.0;
+    policy.background_io.pause_if_foreground_p99_ms = Some(25.0);
+
+    let result = fs
+        .autopilot_once_with_config_and_policy(
+            AutopilotConfig {
+                probe_interval_sec: u64::MAX,
+                smart_interval_sec: u64::MAX,
+                scrub_interval_sec: 0,
+                rebalance_interval_sec: u64::MAX,
+                ..AutopilotConfig::default()
+            },
+            policy,
+        )
+        .unwrap();
+
+    let actions = result["actions"].as_array().unwrap();
+    assert!(actions
+        .iter()
+        .any(|action| action["action"] == "scrub-paused"));
+    assert!(!actions
+        .iter()
+        .any(|action| action["action"] == "scrub-incremental"));
+    assert_eq!(fs.fsck(false, false).unwrap().damaged_files, 1);
 }
 
 #[test]

@@ -90,7 +90,8 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
 - RAM + persistent L2 block cache.
 - Health scoring from SMART-like counters plus an `autopilot` planner with
   persistent risk memory, confirmation/cooldown gates, incremental scrub,
-  budgeted rebalance, and metadata-conflict protection.
+  policy-separated user intent, background I/O throttling, budgeted rebalance,
+  and metadata-conflict protection.
 - Root filesystem integration assets for initramfs and systemd.
 - Comprehensive Rust tests and `paper-data/` validation output for later papers.
 
@@ -176,6 +177,7 @@ argosfs fsck ROOT --repair --remove-orphans
 argosfs scrub ROOT
 argosfs rebalance ROOT
 argosfs autopilot ROOT --interval 60
+argosfs autopilot ROOT --policy /etc/argosfs/autopilot-policy.json --interval 60
 argosfs autopilot ROOT --dry-run --explain --json
 argosfs snapshot ROOT before-upgrade
 argosfs enable-encryption ROOT --key-file /etc/argosfs.key --reencrypt
