@@ -11,7 +11,7 @@ argosfs="$repo/target/debug/argosfs"
 
 src="$artifacts/source"
 dst="$artifacts/export"
-mkdir -p "$src/etc" "$src/usr/bin" "$src/var" "$src/home"
+mkdir -p "$src/dev" "$src/etc" "$src/proc" "$src/run" "$src/sys" "$src/usr/bin" "$src/var" "$src/home"
 printf 'NAME=CapOS\n' >"$src/etc/os-release"
 printf '#!/bin/sh\nexit 0\n' >"$src/usr/bin/true"
 chmod 0755 "$src/usr/bin/true"
