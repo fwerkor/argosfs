@@ -616,6 +616,19 @@ pub struct MetadataCandidateReport {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RawJournalMemberReport {
+    pub disk_id: String,
+    pub readable: bool,
+    pub valid_entries: u64,
+    pub invalid_entries: u64,
+    pub last_valid_txid: u64,
+    pub last_valid_generation: u64,
+    pub last_valid_record_hash: String,
+    pub journal_end: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct TransactionReport {
     pub valid_entries: u64,
     pub legacy_entries: u64,
@@ -629,6 +642,10 @@ pub struct TransactionReport {
     pub selected_metadata_source: String,
     pub double_write_mismatches: u64,
     pub metadata_candidates: Vec<MetadataCandidateReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_journal_members: Vec<RawJournalMemberReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_journal_quorum: Option<bool>,
     pub errors: Vec<String>,
 }
 

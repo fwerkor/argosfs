@@ -1005,6 +1005,32 @@ fn raw_journal_partial_tail_is_audited_and_data_remains_readable() {
     );
     let report = reopened.transaction_report().unwrap();
     assert!(report.invalid_entries > 0);
+    assert_eq!(report.raw_journal_quorum, Some(false));
+    assert_eq!(report.raw_journal_members.len(), 1);
+    assert!(report.raw_journal_members[0].invalid_entries > 0);
+}
+
+#[test]
+fn raw_journal_member_reports_quorum_across_devices() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/quorum", b"journal quorum", 0o644).unwrap();
+    fs.sync().unwrap();
+
+    let report = fs.transaction_report().unwrap();
+
+    assert_eq!(report.raw_journal_quorum, Some(true));
+    assert_eq!(report.raw_journal_members.len(), 3);
+    assert!(report
+        .raw_journal_members
+        .iter()
+        .all(|member| member.readable && member.invalid_entries == 0));
+    assert!(report
+        .raw_journal_members
+        .iter()
+        .all(|member| member.last_valid_txid == report.last_valid_txid));
 }
 
 #[test]

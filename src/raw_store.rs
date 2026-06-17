@@ -5,9 +5,13 @@ use crate::raw_format::{
     align_down, align_up, RawDeviceLabel, RawSuperblock, BACKUP_REGION_SIZE, DEVICE_LABEL_OFFSET,
     DEVICE_LABEL_SIZE, PRIMARY_SUPERBLOCK_OFFSET, PROTECTIVE_HEADER_OFFSET, SUPERBLOCK_SIZE,
 };
-use crate::types::{BackendKind, FaultPoint, Metadata, MetadataCandidateReport, TransactionReport};
+use crate::types::{
+    BackendKind, FaultPoint, Metadata, MetadataCandidateReport, RawJournalMemberReport,
+    TransactionReport,
+};
 use crate::util::{now_f64, sha256_hex};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -738,18 +742,30 @@ fn read_latest_journal_metadata(
     base_metadata: Option<&Metadata>,
 ) -> Result<Option<Metadata>> {
     let mut best = None;
+    let mut members = Vec::new();
     for sb in superblocks {
+        let valid_before = report.valid_entries;
+        let invalid_before = report.invalid_entries;
+        let mut member = RawJournalMemberReport {
+            disk_id: sb.disk_id.clone(),
+            ..RawJournalMemberReport::default()
+        };
         let mut latest = base_metadata.cloned();
         let mut header = vec![0u8; RAW_HEADER_SIZE];
-        if backend
-            .read_at(&sb.disk_id, sb.journal.offset, &mut header)
-            .is_err()
-            || &header[..16] != JOURNAL_MAGIC
-        {
+        if let Err(err) = backend.read_at(&sb.disk_id, sb.journal.offset, &mut header) {
+            member.error = Some(err.to_string());
+            members.push(member);
             continue;
         }
+        if &header[..16] != JOURNAL_MAGIC {
+            member.error = Some("raw journal header magic mismatch".to_string());
+            members.push(member);
+            continue;
+        }
+        member.readable = true;
         let mut cursor = RAW_HEADER_SIZE as u64;
         let end = get_u64(&header, 24)?.min(sb.journal.length);
+        member.journal_end = end;
         while cursor + 36 <= end {
             let mut entry_header = [0u8; 36];
             if backend
@@ -784,6 +800,9 @@ fn read_latest_journal_metadata(
                     report.last_valid_txid = report.last_valid_txid.max(record.txid);
                     report.last_valid_generation =
                         report.last_valid_generation.max(record.generation);
+                    member.last_valid_txid = record.txid;
+                    member.last_valid_generation = record.generation;
+                    member.last_valid_record_hash = record.record_hash.clone();
                     let candidate = if let Some(metadata) = record.metadata {
                         let metadata_hash = journal::canonical_metadata_hash(&metadata)?;
                         if metadata_hash != record.meta_hash {
@@ -910,8 +929,37 @@ fn read_latest_journal_metadata(
             }
             cursor += 36 + len as u64;
         }
+        member.valid_entries = report.valid_entries.saturating_sub(valid_before);
+        member.invalid_entries = report.invalid_entries.saturating_sub(invalid_before);
+        members.push(member);
     }
+    report.raw_journal_quorum = Some(raw_journal_quorum(&members, superblocks.len()));
+    report.raw_journal_members = members;
     Ok(best)
+}
+
+fn raw_journal_quorum(members: &[RawJournalMemberReport], total_members: usize) -> bool {
+    if total_members == 0 {
+        return true;
+    }
+    let required = total_members / 2 + 1;
+    let mut counts: BTreeMap<(u64, u64, String), usize> = BTreeMap::new();
+    for member in members {
+        if !member.readable || member.invalid_entries > 0 {
+            continue;
+        }
+        let key = (
+            member.last_valid_txid,
+            member.last_valid_generation,
+            member.last_valid_record_hash.clone(),
+        );
+        let count = counts.entry(key).or_default();
+        *count += 1;
+        if *count >= required {
+            return true;
+        }
+    }
+    false
 }
 
 fn raw_record_previous_meta_hash(record: &RawJournalRecord) -> Option<&str> {

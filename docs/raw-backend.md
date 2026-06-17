@@ -89,6 +89,11 @@ signatures unless `--force` is explicit. `scan` and `inspect-device` are
 readonly. `fsck` is readonly unless repair flags are passed. Recovery mounts are
 readonly by default.
 
+Transaction audit reports include per-member raw journal status and a majority
+quorum flag. This makes partial fanout, unreadable member journals, and member
+tail corruption visible to preflight tooling instead of hiding them behind only
+the aggregate invalid-entry count.
+
 Crash injection for loop/raw can be driven with `ARGOSFS_CRASH_POINT` using
 `before-data-write`, `after-data-write-before-flush`,
 `after-data-flush-before-journal-commit`,
