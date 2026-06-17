@@ -8,7 +8,23 @@ if [ -z "$dest" ]; then
 fi
 
 install -d "$dest/usr/sbin" "$dest/lib/argosfs" "$dest/etc/modules-load.d"
-install -m 0755 "${ARGOSFS_BIN:-/usr/sbin/argosfs}" "$dest/usr/sbin/argosfs"
+if [ -n "${ARGOSFS_BIN:-}" ]; then
+	argosfs_source="$ARGOSFS_BIN"
+elif command -v argosfs >/dev/null 2>&1; then
+	argosfs_source="$(command -v argosfs)"
+elif [ -x /usr/sbin/argosfs ]; then
+	argosfs_source="/usr/sbin/argosfs"
+elif [ -x /usr/local/sbin/argosfs ]; then
+	argosfs_source="/usr/local/sbin/argosfs"
+else
+	printf '%s\n' "argosfs initramfs hook: argosfs binary not found; set ARGOSFS_BIN" >&2
+	exit 1
+fi
+[ -x "$argosfs_source" ] || {
+	printf '%s\n' "argosfs initramfs hook: $argosfs_source is not executable" >&2
+	exit 1
+}
+install -m 0755 "$argosfs_source" "$dest/usr/sbin/argosfs"
 install -m 0755 "${ARGOSFS_INITRD_SCRIPT:-/lib/argosfs/argosfs-root.sh}" \
 	"$dest/lib/argosfs/argosfs-root.sh"
 printf '%s\n' fuse >"$dest/etc/modules-load.d/argosfs.conf"

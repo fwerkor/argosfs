@@ -289,7 +289,10 @@ pool_args() {
 
 resolve_argosfs_binary() {
 	case "$argosfs_bin" in
-		*/*) return 0 ;;
+		*/*)
+			[ -x "$argosfs_bin" ] || emergency "argosfs binary is missing or not executable: $argosfs_bin"
+			return 0
+			;;
 	esac
 	resolved="$(command -v "$argosfs_bin" 2>/dev/null || true)"
 	[ -n "$resolved" ] || emergency "argosfs binary not found in PATH: $argosfs_bin"
