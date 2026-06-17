@@ -8,6 +8,7 @@ use crate::crypto;
 use crate::erasure::RsCodec;
 use crate::error::{ArgosError, Result};
 use crate::health::{classify_inode, probe_disk_path, refresh_smart, risk_report};
+pub use crate::inode_ops::{DirEntry, NodeAttr, RenamePolicy};
 use crate::journal;
 use crate::raw_format::{self, RawSuperblock};
 use crate::raw_store;
@@ -19,9 +20,9 @@ use crate::util::{
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -159,43 +160,6 @@ struct AutopilotActionStats {
 
 fn autopilot_state_version() -> u32 {
     2
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct NodeAttr {
-    pub ino: InodeId,
-    pub kind: NodeKind,
-    pub mode: u32,
-    pub uid: u32,
-    pub gid: u32,
-    pub nlink: u32,
-    pub size: u64,
-    pub rdev: u64,
-    pub atime: f64,
-    pub mtime: f64,
-    pub ctime: f64,
-    pub blocks: u64,
-    pub blksize: u32,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct DirEntry {
-    pub name: String,
-    pub name_bytes: Vec<u8>,
-    pub attr: NodeAttr,
-}
-
-impl DirEntry {
-    pub fn os_name(&self) -> OsString {
-        OsString::from_vec(self.name_bytes.clone())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RenamePolicy {
-    pub no_replace: bool,
-    pub exchange: bool,
-    pub uid: Option<u32>,
 }
 
 struct PlacementRequest<'a> {
