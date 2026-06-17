@@ -300,37 +300,39 @@ resolve_argosfs_binary() {
 }
 
 is_mounted() {
-	target="$1"
+	mount_target="$1"
 	[ -r /proc/mounts ] || return 1
 	while read -r _ mount_path _; do
-		[ "$mount_path" = "$target" ] && return 0
+		[ "$mount_path" = "$mount_target" ] && return 0
 	done </proc/mounts
 	return 1
 }
 
 mount_if_needed() {
-	target="$1"
-	fs_type="$2"
-	source="$3"
-	is_mounted "$target" || mount -t "$fs_type" "$source" "$target" || is_mounted "$target"
+	mount_target="$1"
+	mount_fs_type="$2"
+	mount_source="$3"
+	is_mounted "$mount_target" ||
+		mount -t "$mount_fs_type" "$mount_source" "$mount_target" ||
+		is_mounted "$mount_target"
 }
 
 move_mount_or_mount() {
-	source="$1"
-	target="$2"
-	fs_type="$3"
-	fs_source="$4"
+	move_source="$1"
+	move_target="$2"
+	move_fs_type="$3"
+	move_fs_source="$4"
 	tries=0
-	mkdir -p "$target" 2>/dev/null || true
+	mkdir -p "$move_target" 2>/dev/null || true
 	while [ "$tries" -lt 10 ]; do
-		is_mounted "$target" && return 0
-		if is_mounted "$source"; then
-			mount -o move "$source" "$target" 2>/dev/null ||
-				mount --move "$source" "$target" 2>/dev/null ||
+		is_mounted "$move_target" && return 0
+		if is_mounted "$move_source"; then
+			mount -o move "$move_source" "$move_target" 2>/dev/null ||
+				mount --move "$move_source" "$move_target" 2>/dev/null ||
 				true
-			is_mounted "$target" && return 0
+			is_mounted "$move_target" && return 0
 		else
-			mount_if_needed "$target" "$fs_type" "$fs_source" && return 0
+			mount_if_needed "$move_target" "$move_fs_type" "$move_fs_source" && return 0
 		fi
 		tries=$((tries + 1))
 		sleep 1
@@ -432,18 +434,18 @@ mark_argosfs_root_active() {
 }
 
 prepare_new_root_run() {
-	target="$sysroot/run"
-	mkdir -p "$target" 2>/dev/null || true
+	run_target="$sysroot/run"
+	mkdir -p "$run_target" 2>/dev/null || true
 	if is_mounted /run; then
-		mount -o move /run "$target" 2>/dev/null ||
-			mount --move /run "$target" 2>/dev/null ||
+		mount -o move /run "$run_target" 2>/dev/null ||
+			mount --move /run "$run_target" 2>/dev/null ||
 			true
 	fi
-	if ! dir_is_writable "$target"; then
-		umount "$target" 2>/dev/null || umount -l "$target" 2>/dev/null || true
-		mount -t tmpfs tmpfs "$target" 2>/dev/null || true
+	if ! dir_is_writable "$run_target"; then
+		umount "$run_target" 2>/dev/null || umount -l "$run_target" 2>/dev/null || true
+		mount -t tmpfs tmpfs "$run_target" 2>/dev/null || true
 	fi
-	dir_is_writable "$target"
+	dir_is_writable "$run_target"
 }
 
 require_new_root_mountpoint() {
