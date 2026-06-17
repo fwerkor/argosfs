@@ -1,5 +1,5 @@
 use crate::error::{ArgosError, Result};
-use crate::types::{BackendKind, DiskStatus, Metadata};
+use crate::types::{BackendKind, DiskStatus, Metadata, NodeKind};
 use crate::ArgosFs;
 use serde::Serialize;
 
@@ -157,6 +157,7 @@ pub fn preflight_report(fs: &ArgosFs, mode: RootMountMode) -> RootPreflightRepor
             "degraded-rw was requested but the pool is not degraded",
         );
     }
+    validate_switch_root_mountpoints(fs, &mut issues, &mut errors);
 
     let mut replayed = false;
     let mut invalid_journal_entries = 0;
@@ -219,9 +220,17 @@ pub fn preflight_report(fs: &ArgosFs, mode: RootMountMode) -> RootPreflightRepor
         ),
     }
 
-    let can_mount_readonly = backend != BackendKind::Host && missing_devices <= redundancy;
+    let root_mountpoints_ready = !issues.iter().any(|issue| {
+        matches!(
+            issue.code.as_str(),
+            "root-mountpoint-missing" | "root-mountpoint-not-directory"
+        )
+    });
+    let can_mount_readonly =
+        backend != BackendKind::Host && missing_devices <= redundancy && root_mountpoints_ready;
     let can_mount_readwrite = backend != BackendKind::Host
         && missing_devices <= redundancy
+        && root_mountpoints_ready
         && invalid_journal_entries == 0
         && !issues
             .iter()
@@ -253,6 +262,32 @@ pub fn preflight_report(fs: &ArgosFs, mode: RootMountMode) -> RootPreflightRepor
         invalid_journal_entries,
         issues,
         errors,
+    }
+}
+
+fn validate_switch_root_mountpoints(
+    fs: &ArgosFs,
+    issues: &mut Vec<RootPreflightIssue>,
+    errors: &mut Vec<String>,
+) {
+    for path in ["/dev", "/proc", "/run", "/sys"] {
+        match fs.attr_path(path, true) {
+            Ok(attr) if attr.kind == NodeKind::Directory => {}
+            Ok(attr) => push_issue(
+                issues,
+                errors,
+                "error",
+                "root-mountpoint-not-directory",
+                format!("{path} must be a directory for initramfs switch_root handoff, found {:?}", attr.kind),
+            ),
+            Err(_) => push_issue(
+                issues,
+                errors,
+                "error",
+                "root-mountpoint-missing",
+                format!("{path} is missing; read-only rootfs boot cannot create switch_root mountpoints"),
+            ),
+        }
     }
 }
 

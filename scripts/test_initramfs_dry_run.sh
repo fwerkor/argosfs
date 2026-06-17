@@ -4,7 +4,9 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 artifacts="${ARGOSFS_TEST_ARTIFACTS:-$repo/target/argosfs-test-artifacts/initramfs-dry-run}"
 rm -rf "$artifacts"
-mkdir -p "$artifacts/source/sbin" "$artifacts/sysroot" "$artifacts/run" "$artifacts/dev" "$artifacts/sys/class/block/vda2"
+mkdir -p "$artifacts/source/dev" "$artifacts/source/proc" "$artifacts/source/run" \
+	"$artifacts/source/sbin" "$artifacts/source/sys" "$artifacts/sysroot" \
+	"$artifacts/run" "$artifacts/dev" "$artifacts/sys/class/block/vda2"
 
 sh -n "$repo/contrib/capos/initramfs/argosfs-root.sh"
 cargo build --manifest-path "$repo/Cargo.toml" --bin argosfs
