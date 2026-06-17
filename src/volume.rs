@@ -45,6 +45,7 @@ pub struct ArgosFs {
     raw_superblocks: Arc<Vec<RawSuperblock>>,
     meta: Arc<RwLock<Metadata>>,
     dirty_host_shards: Arc<Mutex<BTreeSet<PathBuf>>>,
+    inode_locks: Arc<Mutex<BTreeMap<InodeId, Arc<Mutex<()>>>>>,
     cache: Arc<BlockCache>,
 }
 
@@ -386,6 +387,7 @@ impl ArgosFs {
             root: Arc::new(root),
             meta: Arc::new(RwLock::new(meta)),
             dirty_host_shards: Arc::new(Mutex::new(BTreeSet::new())),
+            inode_locks: Arc::new(Mutex::new(BTreeMap::new())),
             cache: Arc::new(cache),
         })
     }
@@ -575,6 +577,7 @@ impl ArgosFs {
             raw_superblocks: Arc::new(superblocks),
             meta: Arc::new(RwLock::new(meta)),
             dirty_host_shards: Arc::new(Mutex::new(BTreeSet::new())),
+            inode_locks: Arc::new(Mutex::new(BTreeMap::new())),
             cache: Arc::new(cache),
         })
     }
@@ -666,6 +669,14 @@ impl ArgosFs {
 
     fn mark_host_shard_dirty(&self, path: PathBuf) {
         self.dirty_host_shards.lock().insert(path);
+    }
+
+    fn inode_lock(&self, ino: InodeId) -> Arc<Mutex<()>> {
+        self.inode_locks
+            .lock()
+            .entry(ino)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub fn audit_transactions(root: impl AsRef<Path>) -> Result<TransactionReport> {
@@ -1016,6 +1027,8 @@ impl ArgosFs {
             .checked_add(data.len())
             .ok_or_else(|| ArgosError::Invalid("write range is too large".to_string()))?;
 
+        let inode_lock = self.inode_lock(ino);
+        let _inode_guard = inode_lock.lock();
         let mut meta = self.meta.write();
         if let Some((uid, gid)) = access {
             let inode = meta
@@ -1194,6 +1207,8 @@ impl ArgosFs {
         let new_size = usize::try_from(requested_size)
             .map_err(|_| ArgosError::Invalid("truncate size is too large".to_string()))?;
 
+        let inode_lock = self.inode_lock(ino);
+        let _inode_guard = inode_lock.lock();
         let mut meta = self.meta.write();
         let (old_size, stripe_raw_size) = self.range_update_geometry_locked(&meta, ino)?;
 
@@ -3590,6 +3605,8 @@ impl ArgosFs {
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
+        let inode_lock = self.inode_lock(ino);
+        let _inode_guard = inode_lock.lock();
         let mut meta = self.meta.write();
         self.replace_inode_data_locked(
             &mut meta,
@@ -6157,5 +6174,29 @@ mod tests {
         fs.sync().unwrap();
 
         assert!(fs.dirty_host_shards.lock().is_empty());
+    }
+
+    #[test]
+    fn data_operations_register_per_inode_locks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = ArgosFs::create(
+            tmp.path(),
+            VolumeConfig {
+                k: 1,
+                m: 0,
+                compression: Compression::None,
+                ..VolumeConfig::default()
+            },
+            1,
+            false,
+        )
+        .unwrap();
+
+        fs.write_file("/locked", b"abc", 0o644).unwrap();
+        let ino = fs.resolve_path("/locked", true).unwrap();
+        fs.write_inode_range(ino, 3, b"def").unwrap();
+        fs.truncate_inode(ino, 4).unwrap();
+
+        assert!(fs.inode_locks.lock().contains_key(&ino));
     }
 }
