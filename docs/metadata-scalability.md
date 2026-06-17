@@ -30,6 +30,13 @@ baseline for a future page/B-tree metadata backend.
 4. Compact old checkpoints once every newer delta chain has been verified.
 5. Keep JSON export/import as a debugging and artifact-evaluation format.
 
+The first implementation step is the `metadata_store` module. It keeps the
+current JSON `Metadata` object as the compatibility import/export format, but it
+can split that object into stable B-tree keyed pages for the header, disks,
+inode cores, directory entries, xattrs, and shard indexes. The page store also
+defines put/delete page delta records, which gives the journal a concrete future
+target without replacing the crash-tested JSON COW commit path in one step.
+
 ## Checkpointed Journal
 
 `journal.jsonl` now separates transaction replay from full metadata snapshots.

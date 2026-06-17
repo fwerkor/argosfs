@@ -10,6 +10,7 @@ pub mod error;
 pub mod fusefs;
 pub mod health;
 pub mod journal;
+pub mod metadata_store;
 pub mod metrics;
 pub mod raw_format;
 pub mod raw_store;
