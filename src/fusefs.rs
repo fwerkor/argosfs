@@ -6,8 +6,8 @@ use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
     FopenFlags, Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags,
     RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow,
-    WriteFlags,
+    ReplyEntry, ReplyLseek, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL,
+    TimeOrNow, WriteFlags,
 };
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -660,6 +660,31 @@ impl Filesystem for ArgosFuse {
         };
         match result {
             Ok(written) => reply.written(written as u32),
+            Err(err) => reply.error(errno(&err)),
+        }
+    }
+
+    fn lseek(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: i64,
+        whence: i32,
+        reply: ReplyLseek,
+    ) {
+        if offset < 0 {
+            reply.error(Errno::EINVAL);
+            return;
+        }
+        let result = self
+            .flush_inode_writeback(ino.0)
+            .and_then(|()| self.volume.seek_data_or_hole(ino.0, offset as u64, whence));
+        match result {
+            Ok(next) => match i64::try_from(next) {
+                Ok(next) => reply.offset(next),
+                Err(_) => reply.error(Errno::EOVERFLOW),
+            },
             Err(err) => reply.error(errno(&err)),
         }
     }

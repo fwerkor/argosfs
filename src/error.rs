@@ -12,6 +12,8 @@ pub enum ArgosError {
     Erasure(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("no data: {0}")]
+    NoData(String),
     #[error("already exists: {0}")]
     AlreadyExists(String),
     #[error("not a directory: {0}")]
@@ -62,6 +64,7 @@ impl ArgosError {
     pub fn errno(&self) -> i32 {
         match self {
             ArgosError::NotFound(_) => libc::ENOENT,
+            ArgosError::NoData(_) => libc::ENXIO,
             ArgosError::AlreadyExists(_) => libc::EEXIST,
             ArgosError::NotDirectory(_) => libc::ENOTDIR,
             ArgosError::IsDirectory(_) => libc::EISDIR,

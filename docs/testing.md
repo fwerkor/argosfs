@@ -69,6 +69,10 @@ available, concurrent readers/writers, `fsync`, and `sync`.
 Timestamp checks require sub-millisecond round trips because the current
 metadata format stores times as floating-point seconds.
 
+The unmounted integration suite also covers sparse-file `SEEK_DATA`/`SEEK_HOLE`
+planning from ArgosFS block extents. Mounted FUSE `lseek` forwards those queries
+after flushing any dirty writeback extent for the inode.
+
 `scripts/compat/run_fuse_smoke.sh` remains a quick mounted smoke check for basic
 I/O and metadata.
 

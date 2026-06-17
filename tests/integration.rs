@@ -298,6 +298,19 @@ fn sparse_write_beyond_eof_preserves_holes_and_offsets() {
     assert_eq!(&data[20..], b"XYZ");
 
     assert_eq!(fs.read_inode(ino, 18, 5, true).unwrap(), b"\0\0XYZ");
+    assert_eq!(fs.seek_data_or_hole(ino, 0, libc::SEEK_DATA).unwrap(), 0);
+    assert_eq!(fs.seek_data_or_hole(ino, 0, libc::SEEK_HOLE).unwrap(), 3);
+    assert_eq!(fs.seek_data_or_hole(ino, 3, libc::SEEK_DATA).unwrap(), 16);
+    assert_eq!(fs.seek_data_or_hole(ino, 3, libc::SEEK_HOLE).unwrap(), 3);
+    assert_eq!(fs.seek_data_or_hole(ino, 16, libc::SEEK_DATA).unwrap(), 16);
+    assert_eq!(fs.seek_data_or_hole(ino, 16, libc::SEEK_HOLE).unwrap(), 23);
+    assert_eq!(fs.seek_data_or_hole(ino, 23, libc::SEEK_HOLE).unwrap(), 23);
+    assert_eq!(
+        fs.seek_data_or_hole(ino, 23, libc::SEEK_DATA)
+            .unwrap_err()
+            .errno(),
+        libc::ENXIO
+    );
 }
 
 #[test]
