@@ -436,12 +436,9 @@ prepare_switch_root_mounts() {
 	fi
 	prepare_new_root_dev || emergency "failed to prepare /dev"
 	move_mount_or_mount /run "$sysroot/run" tmpfs tmpfs || emergency "failed to hand off /run"
-	is_mounted "$sysroot/run" || emergency "failed to verify /run handoff"
 	mark_argosfs_root_active
 	move_mount_or_mount /sys "$sysroot/sys" sysfs sysfs || emergency "failed to hand off /sys"
-	is_mounted "$sysroot/sys" || emergency "failed to verify /sys handoff"
 	move_mount_or_mount /proc "$sysroot/proc" proc proc || emergency "failed to hand off /proc"
-	is_mounted "$sysroot/proc" || emergency "failed to verify /proc handoff"
 }
 
 ensure_block_device_nodes() {
