@@ -74,6 +74,9 @@ planning from ArgosFS block extents. Mounted FUSE `lseek` forwards those queries
 after flushing any dirty writeback extent for the inode.
 FUSE `copy_file_range` is wired through the same range read/write path and is
 covered by unmounted range-copy tests.
+`fallocate(mode=0)` extends regular files with zero-filled allocated ranges;
+advanced fallocate modes such as punch-hole and keep-size currently return
+`ENOTSUP`.
 
 `scripts/compat/run_fuse_smoke.sh` remains a quick mounted smoke check for basic
 I/O and metadata.
