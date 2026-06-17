@@ -14,6 +14,9 @@ implemented as a Rust core with a real FUSE frontend.
 - Metadata service: JSON metadata committed with copy-on-write replacement,
   triple metadata copies, hash-chained journal records with full metadata
   snapshots, replay on open, audit log, and point-in-time metadata snapshots.
+- Inode-facing API types live in `inode_ops`, while `volume` owns the current
+  orchestration path. This is the first split toward smaller inode/data-plane
+  modules.
 - Data plane: block compression, optional authenticated encryption,
   Reed-Solomon erasure coding, weighted placement, shard checksum verification,
   hard capacity enforcement, repair, and migration.
