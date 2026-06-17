@@ -23,9 +23,20 @@ pub struct RootPreflightReport {
     pub redundancy: usize,
     pub degraded: bool,
     pub readonly: bool,
+    pub can_mount_readonly: bool,
+    pub can_mount_readwrite: bool,
+    pub recommended_mode: String,
     pub replayed: bool,
     pub invalid_journal_entries: u64,
+    pub issues: Vec<RootPreflightIssue>,
     pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RootPreflightIssue {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
 }
 
 impl std::str::FromStr for RootMountMode {
@@ -40,6 +51,29 @@ impl std::str::FromStr for RootMountMode {
             "recovery" => Ok(Self::Recovery),
             other => Err(format!("unknown root mount mode: {other}")),
         }
+    }
+}
+
+impl RootMountMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadWrite => "rw",
+            Self::ReadOnly => "ro",
+            Self::DegradedReadOnly => "degraded-ro",
+            Self::DegradedReadWrite => "degraded-rw",
+            Self::Recovery => "recovery",
+        }
+    }
+
+    fn is_readwrite(self) -> bool {
+        matches!(self, Self::ReadWrite | Self::DegradedReadWrite)
+    }
+
+    fn is_readonly(self) -> bool {
+        matches!(
+            self,
+            Self::ReadOnly | Self::DegradedReadOnly | Self::Recovery
+        )
     }
 }
 
@@ -58,6 +92,15 @@ pub fn preflight_root(backend: BackendKind, mode: RootMountMode, degraded: bool)
 }
 
 pub fn preflight_volume(fs: &ArgosFs, mode: RootMountMode) -> Result<RootPreflightReport> {
+    let report = preflight_report(fs, mode);
+    if report.ok {
+        Ok(report)
+    } else {
+        Err(preflight_error(&report))
+    }
+}
+
+pub fn preflight_report(fs: &ArgosFs, mode: RootMountMode) -> RootPreflightReport {
     let meta = fs.metadata_snapshot();
     let backend = meta.backend;
     let total_devices = meta.disks.len();
@@ -72,67 +115,211 @@ pub fn preflight_volume(fs: &ArgosFs, mode: RootMountMode) -> Result<RootPreflig
             .disks
             .values()
             .any(|disk| disk.status != DiskStatus::Online);
-    preflight_root(backend, mode, degraded)?;
-
     let redundancy = minimum_active_redundancy(&meta);
+    let mut issues = Vec::new();
+    let mut errors = Vec::new();
+
+    if backend == BackendKind::Host {
+        push_issue(
+            &mut issues,
+            &mut errors,
+            "error",
+            "unsupported-host-backend",
+            "host backend is not accepted as a CapOS rootfs backend",
+        );
+    }
+    if degraded && mode == RootMountMode::ReadWrite {
+        push_issue(
+            &mut issues,
+            &mut errors,
+            "error",
+            "degraded-rootfs-requires-explicit-mode",
+            "degraded rootfs requires degraded-ro or explicit degraded-rw",
+        );
+    }
     if missing_devices > redundancy {
-        return Err(ArgosError::DegradedPool(format!(
-            "rootfs has {missing_devices} missing/offline devices but only {} parity devices",
-            redundancy
-        )));
+        push_issue(
+            &mut issues,
+            &mut errors,
+            "error",
+            "insufficient-redundancy",
+            format!(
+                "rootfs has {missing_devices} missing/offline devices but only {redundancy} parity devices"
+            ),
+        );
     }
     if mode == RootMountMode::DegradedReadWrite && !degraded {
-        return Err(ArgosError::UnsafeMount(
-            "degraded-rw was requested but the pool is not degraded".to_string(),
-        ));
+        push_issue(
+            &mut issues,
+            &mut errors,
+            "error",
+            "unnecessary-degraded-rw",
+            "degraded-rw was requested but the pool is not degraded",
+        );
     }
-    let report = fs.transaction_report()?;
-    if report.invalid_entries > 0
-        && matches!(
-            mode,
-            RootMountMode::ReadWrite | RootMountMode::DegradedReadWrite
-        )
-    {
-        return Err(ArgosError::JournalReplayRequired(format!(
-            "raw journal has {} invalid entries; mount recovery or fsck before rw rootfs",
-            report.invalid_entries
-        )));
-    }
-    if !report.errors.is_empty()
-        && matches!(
-            mode,
-            RootMountMode::ReadWrite | RootMountMode::DegradedReadWrite
-        )
-    {
-        return Err(ArgosError::UnsafeMount(format!(
-            "rootfs preflight has unresolved transaction errors: {}",
-            report.errors.join("; ")
-        )));
-    }
-    Ok(RootPreflightReport {
-        ok: true,
-        backend,
-        mode: match mode {
-            RootMountMode::ReadWrite => "rw",
-            RootMountMode::ReadOnly => "ro",
-            RootMountMode::DegradedReadOnly => "degraded-ro",
-            RootMountMode::DegradedReadWrite => "degraded-rw",
-            RootMountMode::Recovery => "recovery",
+
+    let mut replayed = false;
+    let mut invalid_journal_entries = 0;
+    match fs.transaction_report() {
+        Ok(report) => {
+            replayed = report.replayed;
+            invalid_journal_entries = report.invalid_entries;
+            if report.invalid_entries > 0 && mode.is_readwrite() {
+                push_issue(
+                    &mut issues,
+                    &mut errors,
+                    "error",
+                    "journal-replay-required",
+                    format!(
+                        "raw journal has {} invalid entries; mount recovery or fsck before rw rootfs",
+                        report.invalid_entries
+                    ),
+                );
+            } else if report.invalid_entries > 0 {
+                push_issue(
+                    &mut issues,
+                    &mut errors,
+                    "warning",
+                    "journal-has-invalid-entries",
+                    format!(
+                        "raw journal has {} invalid entries; recovery or fsck is recommended",
+                        report.invalid_entries
+                    ),
+                );
+            }
+            if !report.errors.is_empty() && mode.is_readwrite() {
+                push_issue(
+                    &mut issues,
+                    &mut errors,
+                    "error",
+                    "transaction-errors-block-rw",
+                    format!(
+                        "rootfs preflight has unresolved transaction errors: {}",
+                        report.errors.join("; ")
+                    ),
+                );
+            } else {
+                for message in report.errors {
+                    push_issue(
+                        &mut issues,
+                        &mut errors,
+                        "warning",
+                        "transaction-audit-warning",
+                        message,
+                    );
+                }
+            }
         }
-        .to_string(),
+        Err(err) => push_issue(
+            &mut issues,
+            &mut errors,
+            "error",
+            "transaction-audit-failed",
+            format!("transaction audit failed: {err}"),
+        ),
+    }
+
+    let can_mount_readonly = backend != BackendKind::Host && missing_devices <= redundancy;
+    let can_mount_readwrite = backend != BackendKind::Host
+        && missing_devices <= redundancy
+        && invalid_journal_entries == 0
+        && !issues
+            .iter()
+            .any(|issue| issue.severity == "error" && issue.code != "unnecessary-degraded-rw")
+        && (!degraded || mode == RootMountMode::DegradedReadWrite);
+    let recommended_mode = recommended_mode(
+        backend,
+        degraded,
+        missing_devices,
+        redundancy,
+        invalid_journal_entries,
+        &issues,
+    );
+
+    RootPreflightReport {
+        ok: errors.is_empty(),
+        backend,
+        mode: mode.as_str().to_string(),
         total_devices,
         available_devices,
         missing_devices,
         redundancy,
         degraded,
-        readonly: matches!(
-            mode,
-            RootMountMode::ReadOnly | RootMountMode::DegradedReadOnly | RootMountMode::Recovery
-        ),
-        replayed: report.replayed,
-        invalid_journal_entries: report.invalid_entries,
-        errors: report.errors,
-    })
+        readonly: mode.is_readonly(),
+        can_mount_readonly,
+        can_mount_readwrite,
+        recommended_mode,
+        replayed,
+        invalid_journal_entries,
+        issues,
+        errors,
+    }
+}
+
+fn push_issue(
+    issues: &mut Vec<RootPreflightIssue>,
+    errors: &mut Vec<String>,
+    severity: &str,
+    code: &str,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    if severity == "error" {
+        errors.push(message.clone());
+    }
+    issues.push(RootPreflightIssue {
+        severity: severity.to_string(),
+        code: code.to_string(),
+        message,
+    });
+}
+
+fn preflight_error(report: &RootPreflightReport) -> ArgosError {
+    let message = report.errors.join("; ");
+    let code = report
+        .issues
+        .iter()
+        .find(|issue| issue.severity == "error")
+        .map(|issue| issue.code.as_str())
+        .unwrap_or("root-preflight-failed");
+    match code {
+        "degraded-rootfs-requires-explicit-mode" => ArgosError::ReadonlyRequired(message),
+        "insufficient-redundancy" => ArgosError::DegradedPool(message),
+        "journal-replay-required" => ArgosError::JournalReplayRequired(message),
+        _ => ArgosError::UnsafeMount(message),
+    }
+}
+
+fn recommended_mode(
+    backend: BackendKind,
+    degraded: bool,
+    missing_devices: usize,
+    redundancy: usize,
+    invalid_journal_entries: u64,
+    issues: &[RootPreflightIssue],
+) -> String {
+    if backend == BackendKind::Host {
+        return "unsupported".to_string();
+    }
+    if missing_devices > redundancy {
+        return "recovery".to_string();
+    }
+    if invalid_journal_entries > 0
+        || issues.iter().any(|issue| {
+            issue.severity == "error"
+                && !matches!(
+                    issue.code.as_str(),
+                    "unnecessary-degraded-rw" | "degraded-rootfs-requires-explicit-mode"
+                )
+        })
+    {
+        return "recovery".to_string();
+    }
+    if degraded {
+        "degraded-ro".to_string()
+    } else {
+        "rw".to_string()
+    }
 }
 
 fn minimum_active_redundancy(meta: &Metadata) -> usize {
