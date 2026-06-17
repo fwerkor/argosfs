@@ -3,11 +3,11 @@ use crate::error::{ArgosError, Result};
 use crate::types::{CapacitySource, DiskStatus, InodeId, NodeKind};
 use crate::volume::{ArgosFs, NodeAttr, RenamePolicy};
 use fuser::{
-    AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
-    FopenFlags, Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags,
-    RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty,
-    ReplyEntry, ReplyLseek, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL,
-    TimeOrNow, WriteFlags,
+    AccessFlags, BsdFileFlags, Config, CopyFileRangeFlags, Errno, FileAttr, FileHandle, FileType,
+    Filesystem, FopenFlags, Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption,
+    OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus,
+    ReplyEmpty, ReplyEntry, ReplyLseek, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request,
+    SessionACL, TimeOrNow, WriteFlags,
 };
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -685,6 +685,41 @@ impl Filesystem for ArgosFuse {
                 Ok(next) => reply.offset(next),
                 Err(_) => reply.error(Errno::EOVERFLOW),
             },
+            Err(err) => reply.error(errno(&err)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn copy_file_range(
+        &self,
+        req: &Request,
+        ino_in: INodeNo,
+        _fh_in: FileHandle,
+        offset_in: u64,
+        ino_out: INodeNo,
+        _fh_out: FileHandle,
+        offset_out: u64,
+        len: u64,
+        flags: CopyFileRangeFlags,
+        reply: ReplyWrite,
+    ) {
+        if !flags.is_empty() {
+            reply.error(Errno::EINVAL);
+            return;
+        }
+        let result = self
+            .require_access(req, ino_in, libc::R_OK)
+            .and_then(|()| self.require_access(req, ino_out, libc::W_OK))
+            .and_then(|()| self.flush_inode_writeback(ino_in.0))
+            .and_then(|()| {
+                if ino_out != ino_in {
+                    self.flush_inode_writeback(ino_out.0)?;
+                }
+                self.volume
+                    .copy_inode_range(ino_in.0, offset_in, ino_out.0, offset_out, len)
+            });
+        match result {
+            Ok(copied) => reply.written(copied as u32),
             Err(err) => reply.error(errno(&err)),
         }
     }
