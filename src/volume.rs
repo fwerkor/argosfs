@@ -16,7 +16,7 @@ use crate::util::{
     append_json_line, atomic_write, clean_path, content_hash_hex, content_hash_matches, ensure_dir,
     now_f64, parent_name, relative_or_absolute, split_path, stable_u01,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -44,6 +44,7 @@ pub struct ArgosFs {
     backend_writable: bool,
     raw_superblocks: Arc<Vec<RawSuperblock>>,
     meta: Arc<RwLock<Metadata>>,
+    dirty_host_shards: Arc<Mutex<BTreeSet<PathBuf>>>,
     cache: Arc<BlockCache>,
 }
 
@@ -384,6 +385,7 @@ impl ArgosFs {
             raw_superblocks: Arc::new(Vec::new()),
             root: Arc::new(root),
             meta: Arc::new(RwLock::new(meta)),
+            dirty_host_shards: Arc::new(Mutex::new(BTreeSet::new())),
             cache: Arc::new(cache),
         })
     }
@@ -572,6 +574,7 @@ impl ArgosFs {
             backend_writable,
             raw_superblocks: Arc::new(superblocks),
             meta: Arc::new(RwLock::new(meta)),
+            dirty_host_shards: Arc::new(Mutex::new(BTreeSet::new())),
             cache: Arc::new(cache),
         })
     }
@@ -612,23 +615,7 @@ impl ArgosFs {
             return Ok(());
         }
 
-        let mut shard_paths = BTreeSet::new();
-        for inode in meta.inodes.values() {
-            for block in &inode.blocks {
-                for shard in &block.shards {
-                    if let Some(path) =
-                        self.shard_path_if_disk_exists_locked(&meta, &shard.disk_id, &shard.relpath)
-                    {
-                        shard_paths.insert(path);
-                    }
-                }
-            }
-        }
-        for path in shard_paths {
-            if let Ok(file) = fs::File::open(&path) {
-                file.sync_all()?;
-            }
-        }
+        self.sync_dirty_host_shards()?;
 
         for path in [
             self.root.join(".argosfs/journal.jsonl"),
@@ -647,6 +634,38 @@ impl ArgosFs {
             sync_directory(&disk_root.join("shards"));
         }
         Ok(())
+    }
+
+    fn sync_dirty_host_shards(&self) -> Result<()> {
+        let shard_paths = {
+            let mut dirty = self.dirty_host_shards.lock();
+            std::mem::take(&mut *dirty)
+        };
+        let mut failed = BTreeSet::new();
+        let mut first_error = None;
+        for path in shard_paths {
+            match fs::File::open(&path).and_then(|file| file.sync_all()) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    failed.insert(path);
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+        }
+        if !failed.is_empty() {
+            self.dirty_host_shards.lock().extend(failed);
+        }
+        if let Some(err) = first_error {
+            return Err(ArgosError::Io(err));
+        }
+        Ok(())
+    }
+
+    fn mark_host_shard_dirty(&self, path: PathBuf) {
+        self.dirty_host_shards.lock().insert(path);
     }
 
     pub fn audit_transactions(root: impl AsRef<Path>) -> Result<TransactionReport> {
@@ -4434,6 +4453,7 @@ impl ArgosFs {
         self.ensure_disk_capacity_locked(meta, disk_id, data.len() as u64)?;
         let start = std::time::Instant::now();
         advanced_io::write_all(&path, data, meta.config.io_mode)?;
+        self.mark_host_shard_dirty(path.clone());
         if let Some(parent) = path.parent() {
             sync_directory(parent);
             if let Some(grandparent) = parent.parent() {
@@ -6009,5 +6029,35 @@ fn update_latency_ewma(ewma_ms: &mut f64, throughput_mib_s: &mut f64, seconds: f
         } else {
             *throughput_mib_s = *throughput_mib_s * 0.80 + sample_mib_s * 0.20;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_sync_drains_only_dirty_shard_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = ArgosFs::create(
+            tmp.path(),
+            VolumeConfig {
+                k: 1,
+                m: 0,
+                compression: Compression::None,
+                ..VolumeConfig::default()
+            },
+            1,
+            false,
+        )
+        .unwrap();
+
+        fs.write_file("/dirty", b"dirty shard tracking", 0o644)
+            .unwrap();
+        assert!(!fs.dirty_host_shards.lock().is_empty());
+
+        fs.sync().unwrap();
+
+        assert!(fs.dirty_host_shards.lock().is_empty());
     }
 }
