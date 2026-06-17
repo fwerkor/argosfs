@@ -889,6 +889,26 @@ impl ArgosFs {
             .map(|(data, _, _)| data)
     }
 
+    pub fn seek_data_or_hole(&self, ino: InodeId, offset: u64, whence: i32) -> Result<u64> {
+        let meta = self.meta.read();
+        let inode = meta
+            .inodes
+            .get(&ino)
+            .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+        if inode.kind != NodeKind::File {
+            return Err(ArgosError::Unsupported(format!(
+                "lseek data/hole requires a regular file: inode {ino}"
+            )));
+        }
+        match whence {
+            libc::SEEK_DATA => seek_data(inode, offset),
+            libc::SEEK_HOLE => seek_hole(inode, offset),
+            other => Err(ArgosError::Invalid(format!(
+                "unsupported lseek whence {other}"
+            ))),
+        }
+    }
+
     fn read_inode_with_damage_report(
         &self,
         ino: InodeId,
@@ -6001,6 +6021,84 @@ fn decode_inline_data(inode: &Inode) -> Result<Option<Vec<u8>>> {
         )));
     }
     Ok(Some(data.clone()))
+}
+
+fn seek_data(inode: &Inode, offset: u64) -> Result<u64> {
+    if offset >= inode.size {
+        return Err(ArgosError::NoData(format!(
+            "SEEK_DATA offset {offset} is beyond inode {} size {}",
+            inode.id, inode.size
+        )));
+    }
+    if inode.inline_data.is_some() {
+        return Ok(offset);
+    }
+    let extents = inode_data_extents(inode);
+    for (start, end) in extents {
+        if offset < start {
+            return Ok(start);
+        }
+        if offset < end {
+            return Ok(offset);
+        }
+    }
+    Err(ArgosError::NoData(format!(
+        "no data after offset {offset} in inode {}",
+        inode.id
+    )))
+}
+
+fn seek_hole(inode: &Inode, offset: u64) -> Result<u64> {
+    if offset > inode.size {
+        return Err(ArgosError::NoData(format!(
+            "SEEK_HOLE offset {offset} is beyond inode {} size {}",
+            inode.id, inode.size
+        )));
+    }
+    if offset == inode.size {
+        return Ok(offset);
+    }
+    if inode.inline_data.is_some() {
+        return Ok(inode.size);
+    }
+    let extents = inode_data_extents(inode);
+    let mut cursor = offset;
+    for (start, end) in extents {
+        if cursor < start {
+            return Ok(cursor);
+        }
+        if cursor < end {
+            cursor = end;
+        }
+    }
+    Ok(cursor.min(inode.size))
+}
+
+fn inode_data_extents(inode: &Inode) -> Vec<(u64, u64)> {
+    let mut extents = inode
+        .blocks
+        .iter()
+        .filter_map(|block| {
+            let start = block.raw_offset.min(inode.size);
+            let end = block
+                .raw_offset
+                .saturating_add(block.raw_size as u64)
+                .min(inode.size);
+            (end > start).then_some((start, end))
+        })
+        .collect::<Vec<_>>();
+    extents.sort_by_key(|(start, _)| *start);
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in extents {
+        if let Some((_, previous_end)) = merged.last_mut() {
+            if start <= *previous_end {
+                *previous_end = (*previous_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
 }
 
 fn encryption_aad(volume_uuid: &str, stripe_id: &str) -> Vec<u8> {
