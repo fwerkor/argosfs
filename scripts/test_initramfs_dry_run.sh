@@ -36,4 +36,16 @@ ARGOSFS_INITRD_SYS_CLASS_BLOCK="$artifacts/sys/class/block" \
 	"$repo/contrib/capos/initramfs/argosfs-root.sh" \
 	--dry-run --autoscan --sysroot "$artifacts/sysroot" --argosfs-bin "$argosfs"
 grep -q "autoscan selected loop images $artifacts/dev/argos-root" "$artifacts/initrd.log"
+rm -f "$artifacts/initrd.log"
+if ARGOSFS_INITRD_LOG="$artifacts/initrd.log" \
+	ARGOSFS_INITRD_RUN_DIR="$artifacts/run" \
+	ARGOSFS_INITRD_DEV_ROOT="$artifacts/dev" \
+	ARGOSFS_INITRD_SYS_CLASS_BLOCK="$artifacts/sys/class/block" \
+	"$repo/contrib/capos/initramfs/argosfs-root.sh" \
+	--dry-run --images "$images" --sysroot "$artifacts/sysroot" --argosfs-bin "$artifacts/missing-argosfs"
+then
+	echo "expected missing argosfs binary to fail" >&2
+	exit 1
+fi
+grep -q "argosfs binary is missing or not executable" "$artifacts/initrd.log"
 echo "initramfs dry-run passed; artifacts=$artifacts"
