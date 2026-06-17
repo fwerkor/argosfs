@@ -72,6 +72,8 @@ metadata format stores times as floating-point seconds.
 The unmounted integration suite also covers sparse-file `SEEK_DATA`/`SEEK_HOLE`
 planning from ArgosFS block extents. Mounted FUSE `lseek` forwards those queries
 after flushing any dirty writeback extent for the inode.
+FUSE `copy_file_range` is wired through the same range read/write path and is
+covered by unmounted range-copy tests.
 
 `scripts/compat/run_fuse_smoke.sh` remains a quick mounted smoke check for basic
 I/O and metadata.

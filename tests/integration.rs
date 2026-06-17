@@ -314,6 +314,22 @@ fn sparse_write_beyond_eof_preserves_holes_and_offsets() {
 }
 
 #[test]
+fn copy_inode_range_copies_requested_window() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/src", b"abcdefghijklmnopqrstuvwxyz", 0o644)
+        .unwrap();
+    fs.write_file("/dst", b"0123456789", 0o644).unwrap();
+    let src = fs.resolve_path("/src", true).unwrap();
+    let dst = fs.resolve_path("/dst", true).unwrap();
+
+    let copied = fs.copy_inode_range(src, 4, dst, 3, 8).unwrap();
+
+    assert_eq!(copied, 8);
+    assert_eq!(fs.read_file("/dst", true).unwrap(), b"012efghijkl");
+}
+
+#[test]
 fn snapshot_names_are_rejected_or_protected_from_overwrite() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();

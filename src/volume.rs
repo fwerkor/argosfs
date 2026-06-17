@@ -920,6 +920,26 @@ impl ArgosFs {
         }
     }
 
+    pub fn copy_inode_range(
+        &self,
+        src_ino: InodeId,
+        src_offset: u64,
+        dst_ino: InodeId,
+        dst_offset: u64,
+        len: u64,
+    ) -> Result<usize> {
+        let len = usize::try_from(len)
+            .map_err(|_| ArgosError::Invalid("copy_file_range length is too large".to_string()))?;
+        if len == 0 {
+            return Ok(0);
+        }
+        let data = self.read_inode(src_ino, src_offset, len, true)?;
+        if data.is_empty() {
+            return Ok(0);
+        }
+        self.write_inode_range(dst_ino, dst_offset, &data)
+    }
+
     fn read_inode_with_damage_report(
         &self,
         ino: InodeId,
