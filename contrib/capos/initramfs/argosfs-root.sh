@@ -338,6 +338,18 @@ move_mount_or_mount() {
 	return 1
 }
 
+write_marker() {
+	marker="$1"
+	( : >"$marker" ) 2>/dev/null
+}
+
+dir_is_writable() {
+	dir="$1"
+	marker="$dir/.argosfs-write-test.$$"
+	write_marker "$marker" || return 1
+	rm -f "$marker" 2>/dev/null || true
+}
+
 create_dev_node() {
 	node="$1"
 	node_type="$2"
@@ -414,9 +426,24 @@ prepare_new_root_runtime_dirs() {
 }
 
 mark_argosfs_root_active() {
-	touch /run/argosfs-root-active 2>/dev/null || true
-	touch "$sysroot/run/argosfs-root-active" 2>/dev/null ||
+	write_marker /run/argosfs-root-active || true
+	write_marker "$sysroot/run/argosfs-root-active" ||
 		emergency "failed to mark ArgosFS root active under /run"
+}
+
+prepare_new_root_run() {
+	target="$sysroot/run"
+	mkdir -p "$target" 2>/dev/null || true
+	if is_mounted /run; then
+		mount -o move /run "$target" 2>/dev/null ||
+			mount --move /run "$target" 2>/dev/null ||
+			true
+	fi
+	if ! dir_is_writable "$target"; then
+		umount "$target" 2>/dev/null || umount -l "$target" 2>/dev/null || true
+		mount -t tmpfs tmpfs "$target" 2>/dev/null || true
+	fi
+	dir_is_writable "$target"
 }
 
 require_new_root_mountpoint() {
@@ -435,7 +462,7 @@ prepare_switch_root_mounts() {
 		prepare_new_root_runtime_dirs
 	fi
 	prepare_new_root_dev || emergency "failed to prepare /dev"
-	move_mount_or_mount /run "$sysroot/run" tmpfs tmpfs || emergency "failed to hand off /run"
+	prepare_new_root_run || emergency "failed to hand off writable /run"
 	mark_argosfs_root_active
 	move_mount_or_mount /sys "$sysroot/sys" sysfs sysfs || emergency "failed to hand off /sys"
 	move_mount_or_mount /proc "$sysroot/proc" proc proc || emergency "failed to hand off /proc"
