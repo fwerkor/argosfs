@@ -1,6 +1,7 @@
 use crate::acl;
 use crate::advanced_io;
 use crate::allocator;
+use crate::autopilot::{plan_background_io, AutopilotMode, AutopilotPolicy, BackgroundIoPolicy};
 use crate::backend::{FileBlockBackend, HostFsBackend, StorageBackend};
 use crate::cache::BlockCache;
 use crate::compression::{compress, decompress};
@@ -2127,6 +2128,10 @@ impl ArgosFs {
             .disks
             .get_mut(disk_id)
             .ok_or_else(|| ArgosError::NotFound(disk_id.to_string()))?;
+        if values.latency_ms > 0.0 {
+            disk.read_latency_ewma_ms = values.latency_ms;
+            disk.write_latency_ewma_ms = values.latency_ms;
+        }
         disk.health = values;
         self.commit_locked(&mut meta, "set-health", json!({"disk_id": disk_id}))
     }
@@ -2787,7 +2792,21 @@ impl ArgosFs {
         self.autopilot_once_with_config(AutopilotConfig::default())
     }
 
+    pub fn autopilot_once_with_policy(&self, policy: AutopilotPolicy) -> Result<serde_json::Value> {
+        self.autopilot_once_with_config_and_policy(policy_to_config(&policy), policy)
+    }
+
     pub fn autopilot_once_with_config(&self, config: AutopilotConfig) -> Result<serde_json::Value> {
+        let policy = runtime_policy_from_config(&config);
+        self.autopilot_once_with_config_and_policy(config, policy)
+    }
+
+    pub fn autopilot_once_with_config_and_policy(
+        &self,
+        config: AutopilotConfig,
+        policy: AutopilotPolicy,
+    ) -> Result<serde_json::Value> {
+        policy.validate()?;
         let now = now_f64();
         let (mut state, state_warning) = self.load_autopilot_state();
         state.version = autopilot_state_version();
@@ -2795,6 +2814,7 @@ impl ArgosFs {
         state.last_run_at = now;
 
         let mut actions = Vec::new();
+        let mut throttle_decisions = Vec::new();
         let mut stop_mutations = false;
         if let Some(warning) = state_warning {
             actions.push(json!({"action": "autopilot-state-reset", "error": warning}));
@@ -2838,6 +2858,22 @@ impl ArgosFs {
         update_autopilot_risk_memory(&mut state, &report, now);
 
         if !stop_mutations {
+            let drain_throttle = plan_background_io(
+                "drain",
+                "disks",
+                config.max_drains_per_run,
+                &report,
+                &policy,
+            );
+            let drain_budget = drain_throttle.effective_budget;
+            if drain_budget == 0 {
+                actions.push(json!({
+                    "action": "background-io-paused",
+                    "scope": "drain",
+                    "reason": drain_throttle.pause_reason.clone().unwrap_or_else(|| "background I/O policy budget is zero".to_string())
+                }));
+            }
+            throttle_decisions.push(json!(drain_throttle));
             let mut drains = 0usize;
             for disk in report
                 .disks
@@ -2850,7 +2886,7 @@ impl ArgosFs {
                     .map(|disk_state| autopilot_drain_decision(disk, disk_state, now, &config))
                     .unwrap_or(AutopilotDrainDecision::Observe);
                 match decision {
-                    AutopilotDrainDecision::Drain if drains < config.max_drains_per_run => {
+                    AutopilotDrainDecision::Drain if drains < drain_budget => {
                         drains += 1;
                         if let Some(disk_state) = state.disks.get_mut(&disk.id) {
                             disk_state.last_drain_attempt_at = now;
@@ -2910,27 +2946,39 @@ impl ArgosFs {
         }
 
         if !stop_mutations && autopilot_due(state.last_scrub_at, config.scrub_interval_sec, now) {
-            let scrub_budget = latency_throttled_budget(
+            let scrub_throttle = plan_background_io(
+                "scrub",
+                "files",
                 config.scrub_files_per_run,
                 &report,
-                config.foreground_latency_target_ms,
+                &policy,
             );
-            let (fsck, cursor) = self.scrub_limited(scrub_budget, state.scrub_cursor);
-            let repaired = fsck.repaired_files;
-            let utility = fsck.repaired_files as f64 * 3.0
-                - fsck.unrecoverable_files as f64 * 5.0
-                - fsck.errors.len() as f64;
-            state.scrub_cursor = cursor;
-            state.last_scrub_at = now;
-            record_autopilot_action(
-                &mut state,
-                "scrub",
-                fsck.errors.is_empty(),
-                utility,
-                0,
-                repaired,
-            );
-            actions.push(json!({"action": "scrub-incremental", "budget_files": scrub_budget, "requested_budget_files": config.scrub_files_per_run, "cursor": state.scrub_cursor, "report": fsck}));
+            let scrub_budget = scrub_throttle.effective_budget;
+            let scrub_pause_reason = scrub_throttle.pause_reason.clone();
+            throttle_decisions.push(json!(scrub_throttle));
+            if scrub_budget > 0 {
+                let (fsck, cursor) = self.scrub_limited(scrub_budget, state.scrub_cursor);
+                let repaired = fsck.repaired_files;
+                let utility = fsck.repaired_files as f64 * 3.0
+                    - fsck.unrecoverable_files as f64 * 5.0
+                    - fsck.errors.len() as f64;
+                state.scrub_cursor = cursor;
+                state.last_scrub_at = now;
+                record_autopilot_action(
+                    &mut state,
+                    "scrub",
+                    fsck.errors.is_empty(),
+                    utility,
+                    0,
+                    repaired,
+                );
+                actions.push(json!({"action": "scrub-incremental", "budget_files": scrub_budget, "requested_budget_files": config.scrub_files_per_run, "cursor": state.scrub_cursor, "report": fsck}));
+            } else {
+                actions.push(json!({
+                    "action": "scrub-paused",
+                    "reason": scrub_pause_reason.unwrap_or_else(|| "background I/O policy budget is zero".to_string())
+                }));
+            }
         }
 
         let skew = autopilot_rebalance_skew(&report);
@@ -2938,34 +2986,43 @@ impl ArgosFs {
             && autopilot_due(state.last_rebalance_at, config.rebalance_interval_sec, now)
             && skew >= config.rebalance_min_skew
         {
-            let budget = latency_throttled_budget(
-                adaptive_autopilot_budget(
-                    config.rebalance_files_per_run,
-                    state.action_stats.get("rebalance"),
-                ),
-                &report,
-                config.foreground_latency_target_ms,
+            let requested_budget = adaptive_autopilot_budget(
+                config.rebalance_files_per_run,
+                state.action_stats.get("rebalance"),
             );
-            match self.rebalance_limited(budget, state.rebalance_cursor) {
-                Ok((rewritten, cursor)) => {
-                    state.rebalance_cursor = cursor;
-                    state.last_rebalance_at = now;
-                    record_autopilot_action(
-                        &mut state,
-                        "rebalance",
-                        true,
-                        skew * 10.0 - rewritten as f64 * 0.02,
-                        rewritten,
-                        0,
-                    );
-                    actions.push(json!({"action": "rebalance-incremental", "budget_files": budget, "requested_budget_files": config.rebalance_files_per_run, "rewritten_files": rewritten, "cursor": state.rebalance_cursor, "skew": skew}));
+            let rebalance_throttle =
+                plan_background_io("rebalance", "files", requested_budget, &report, &policy);
+            let budget = rebalance_throttle.effective_budget;
+            let rebalance_pause_reason = rebalance_throttle.pause_reason.clone();
+            throttle_decisions.push(json!(rebalance_throttle));
+            if budget > 0 {
+                match self.rebalance_limited(budget, state.rebalance_cursor) {
+                    Ok((rewritten, cursor)) => {
+                        state.rebalance_cursor = cursor;
+                        state.last_rebalance_at = now;
+                        record_autopilot_action(
+                            &mut state,
+                            "rebalance",
+                            true,
+                            skew * 10.0 - rewritten as f64 * 0.02,
+                            rewritten,
+                            0,
+                        );
+                        actions.push(json!({"action": "rebalance-incremental", "budget_files": budget, "requested_budget_files": config.rebalance_files_per_run, "rewritten_files": rewritten, "cursor": state.rebalance_cursor, "skew": skew}));
+                    }
+                    Err(err) => {
+                        stop_mutations |= matches!(err, ArgosError::Conflict(_));
+                        state.last_rebalance_at = now;
+                        record_autopilot_action(&mut state, "rebalance", false, -2.0, 0, 0);
+                        actions.push(json!({"action": "rebalance-skipped", "budget_files": budget, "skew": skew, "error": err.to_string()}));
+                    }
                 }
-                Err(err) => {
-                    stop_mutations |= matches!(err, ArgosError::Conflict(_));
-                    state.last_rebalance_at = now;
-                    record_autopilot_action(&mut state, "rebalance", false, -2.0, 0, 0);
-                    actions.push(json!({"action": "rebalance-skipped", "budget_files": budget, "skew": skew, "error": err.to_string()}));
-                }
+            } else {
+                actions.push(json!({
+                    "action": "rebalance-paused",
+                    "skew": skew,
+                    "reason": rebalance_pause_reason.unwrap_or_else(|| "background I/O policy budget is zero".to_string())
+                }));
             }
         } else if !stop_mutations {
             actions.push(json!({"action": "rebalance-not-needed", "skew": skew, "threshold": config.rebalance_min_skew}));
@@ -2992,13 +3049,17 @@ impl ArgosFs {
         let result = json!({
             "actions": actions.clone(),
             "health": health,
+            "policy": policy,
             "planner": {
                 "state_version": state.version,
                 "runs": state.runs,
                 "adaptive_mode": adaptive_mode,
                 "scrub_cursor": state.scrub_cursor,
                 "rebalance_cursor": state.rebalance_cursor,
-                "stopped_for_conflict": stop_mutations
+                "stopped_for_conflict": stop_mutations,
+                "background_io": {
+                    "throttle_decisions": throttle_decisions
+                }
             }
         });
         self.save_autopilot_state(&state)?;
@@ -3012,14 +3073,45 @@ impl ArgosFs {
         self.autopilot_dry_run_with_config(AutopilotConfig::default())
     }
 
+    pub fn autopilot_dry_run_with_policy(
+        &self,
+        policy: AutopilotPolicy,
+    ) -> Result<serde_json::Value> {
+        self.autopilot_dry_run_with_config_and_policy(policy_to_config(&policy), policy)
+    }
+
     pub fn autopilot_dry_run_with_config(
         &self,
         config: AutopilotConfig,
     ) -> Result<serde_json::Value> {
+        let policy = runtime_policy_from_config(&config);
+        self.autopilot_dry_run_with_config_and_policy(config, policy)
+    }
+
+    pub fn autopilot_dry_run_with_config_and_policy(
+        &self,
+        config: AutopilotConfig,
+        policy: AutopilotPolicy,
+    ) -> Result<serde_json::Value> {
+        policy.validate()?;
         let now = now_f64();
         let (mut state, state_warning) = self.load_autopilot_state();
         let report = self.health_report();
         update_autopilot_risk_memory(&mut state, &report, now);
+        let drain_throttle = plan_background_io(
+            "drain",
+            "disks",
+            config.max_drains_per_run,
+            &report,
+            &policy,
+        );
+        let scrub_throttle = plan_background_io(
+            "scrub",
+            "files",
+            config.scrub_files_per_run,
+            &report,
+            &policy,
+        );
         let online = report
             .disks
             .iter()
@@ -3038,12 +3130,17 @@ impl ArgosFs {
                 && disk.status == DiskStatus::Online
                 && enough_online_disks
                 && drain_decision == AutopilotDrainDecision::Drain
+                && drain_throttle.effective_budget > 0
             {
                 "drain"
             } else {
                 "observe"
             };
-            let rejected_actions = if !enough_online_disks {
+            let rejected_actions = if drain_throttle.effective_budget == 0 {
+                vec![
+                    json!({"action": "drain", "reason": drain_throttle.pause_reason.clone().unwrap_or_else(|| "background I/O policy budget is zero".to_string())}),
+                ]
+            } else if !enough_online_disks {
                 vec![json!({"action": "drain", "reason": "not enough online disks after drain"})]
             } else if drain_decision == AutopilotDrainDecision::Cooldown {
                 vec![json!({"action": "drain", "reason": "cooldown"})]
@@ -3076,27 +3173,39 @@ impl ArgosFs {
             }));
         }
         let skew = autopilot_rebalance_skew(&report);
-        let rebalance_budget = latency_throttled_budget(
-            adaptive_autopilot_budget(
-                config.rebalance_files_per_run,
-                state.action_stats.get("rebalance"),
-            ),
-            &report,
-            config.foreground_latency_target_ms,
+        let requested_rebalance_budget = adaptive_autopilot_budget(
+            config.rebalance_files_per_run,
+            state.action_stats.get("rebalance"),
         );
+        let rebalance_throttle = plan_background_io(
+            "rebalance",
+            "files",
+            requested_rebalance_budget,
+            &report,
+            &policy,
+        );
+        let rebalance_budget = rebalance_throttle.effective_budget;
         Ok(json!({
             "dry_run": true,
             "mutated": false,
             "state_warning": state_warning,
             "decisions": decisions,
+            "policy": policy,
             "planner": {
                 "state_version": autopilot_state_version(),
                 "adaptive_mode": adaptive_autopilot_mode(&state),
                 "rebalance": {
                     "skew": skew,
                     "threshold": config.rebalance_min_skew,
-                    "would_run": skew >= config.rebalance_min_skew,
+                    "would_run": skew >= config.rebalance_min_skew && rebalance_budget > 0,
                     "budget_files": rebalance_budget
+                },
+                "background_io": {
+                    "throttle_decisions": [
+                        drain_throttle,
+                        scrub_throttle,
+                        rebalance_throttle
+                    ]
                 }
             },
             "health": report
@@ -5526,22 +5635,41 @@ fn adaptive_autopilot_budget(base: usize, stats: Option<&AutopilotActionStats>) 
     ((base as f64 * multiplier).round() as usize).clamp(1, base.saturating_mul(4).max(1))
 }
 
-fn latency_throttled_budget(base: usize, report: &HealthReport, target_ms: f64) -> usize {
-    if base <= 1 || target_ms <= 0.0 {
-        return base;
+fn policy_to_config(policy: &AutopilotPolicy) -> AutopilotConfig {
+    let mut config = AutopilotConfig {
+        max_drains_per_run: policy.max_drains_per_day.min(usize::MAX as u64) as usize,
+        foreground_latency_target_ms: policy.background_io.target_foreground_p99_ms,
+        ..AutopilotConfig::default()
+    };
+    match policy.mode {
+        AutopilotMode::Observe => {
+            config.max_drains_per_run = 0;
+            config.scrub_files_per_run = 0;
+            config.rebalance_files_per_run = 0;
+        }
+        AutopilotMode::Safe => {}
+        AutopilotMode::Balanced => {
+            config.scrub_files_per_run = config.scrub_files_per_run.saturating_mul(2);
+            config.rebalance_files_per_run = config.rebalance_files_per_run.saturating_mul(2);
+        }
+        AutopilotMode::Aggressive => {
+            config.risk_confirmations = 1;
+            config.scrub_files_per_run = config.scrub_files_per_run.saturating_mul(4);
+            config.rebalance_files_per_run = config.rebalance_files_per_run.saturating_mul(4);
+            config.foreground_latency_target_ms *= 1.5;
+        }
     }
-    let max_latency = report
-        .disks
-        .iter()
-        .filter(|disk| disk.status == DiskStatus::Online)
-        .map(|disk| disk.read_latency_ewma_ms.max(disk.write_latency_ewma_ms))
-        .fold(0.0_f64, f64::max);
-    if max_latency > target_ms * 2.0 {
-        1
-    } else if max_latency > target_ms {
-        (base / 2).max(1)
-    } else {
-        base
+    config
+}
+
+fn runtime_policy_from_config(config: &AutopilotConfig) -> AutopilotPolicy {
+    AutopilotPolicy {
+        max_drains_per_day: config.max_drains_per_run as u64,
+        background_io: BackgroundIoPolicy {
+            target_foreground_p99_ms: config.foreground_latency_target_ms,
+            ..BackgroundIoPolicy::default()
+        },
+        ..AutopilotPolicy::default()
     }
 }
 

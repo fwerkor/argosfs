@@ -7,7 +7,7 @@ use argosfs::rootfs::{self, RootMountMode};
 use argosfs::scan;
 use argosfs::types::{BackendKind, Compression, DiskStatus, IoMode, StorageTier, VolumeConfig};
 use argosfs::util::clean_path;
-use argosfs::{ArgosError, ArgosFs};
+use argosfs::{ArgosError, ArgosFs, AutopilotPolicy};
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::ffi::CString;
@@ -400,6 +400,8 @@ enum Command {
     },
     Autopilot {
         root: PathBuf,
+        #[arg(long)]
+        policy: Option<PathBuf>,
         #[arg(long)]
         once: bool,
         #[arg(long)]
@@ -1053,6 +1055,7 @@ fn main() -> Result<()> {
         }
         Command::Autopilot {
             root,
+            policy,
             once,
             dry_run,
             explain,
@@ -1060,10 +1063,11 @@ fn main() -> Result<()> {
             interval,
         } => loop {
             let fs = ArgosFs::open(&root)?;
+            let autopilot_policy = load_autopilot_policy(&root, policy.as_deref())?;
             let report = if dry_run || explain {
-                fs.autopilot_dry_run()?
+                fs.autopilot_dry_run_with_policy(autopilot_policy)?
             } else {
-                fs.autopilot_once()?
+                fs.autopilot_once_with_policy(autopilot_policy)?
             };
             if json {
                 println!("{}", serde_json::to_string(&report)?);
@@ -1194,6 +1198,14 @@ fn require_paths(paths: Vec<PathBuf>, message: &str) -> Result<Vec<PathBuf>> {
         bail!("{message}");
     }
     Ok(paths)
+}
+
+fn load_autopilot_policy(root: &Path, requested: Option<&Path>) -> Result<AutopilotPolicy> {
+    if let Some(path) = requested {
+        return Ok(AutopilotPolicy::load_json(path)?);
+    }
+    let default_path = AutopilotPolicy::default_path(root);
+    Ok(AutopilotPolicy::load_optional_json(&default_path)?.unwrap_or_default())
 }
 
 fn backend_paths(
