@@ -689,6 +689,26 @@ impl Filesystem for ArgosFuse {
         }
     }
 
+    fn fallocate(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        length: u64,
+        mode: i32,
+        reply: ReplyEmpty,
+    ) {
+        let result = self
+            .require_access(req, ino, libc::W_OK)
+            .and_then(|()| self.flush_inode_writeback(ino.0))
+            .and_then(|()| self.volume.fallocate_inode(ino.0, offset, length, mode));
+        match result {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(errno(&err)),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn copy_file_range(
         &self,

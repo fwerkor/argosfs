@@ -940,6 +940,37 @@ impl ArgosFs {
         self.write_inode_range(dst_ino, dst_offset, &data)
     }
 
+    pub fn fallocate_inode(&self, ino: InodeId, offset: u64, length: u64, mode: i32) -> Result<()> {
+        if mode != 0 {
+            return Err(ArgosError::Unsupported(format!(
+                "unsupported fallocate mode {mode:#x}"
+            )));
+        }
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| ArgosError::Invalid("fallocate range overflow".to_string()))?;
+        let size = {
+            let meta = self.meta.read();
+            let inode = meta
+                .inodes
+                .get(&ino)
+                .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+            match inode.kind {
+                NodeKind::Directory => return Err(ArgosError::IsDirectory(format!("inode {ino}"))),
+                NodeKind::File => inode.size,
+                NodeKind::Symlink | NodeKind::Special => {
+                    return Err(ArgosError::Unsupported(format!(
+                        "fallocate requires a regular file: inode {ino}"
+                    )))
+                }
+            }
+        };
+        if end > size {
+            self.truncate_inode(ino, end)?;
+        }
+        Ok(())
+    }
+
     fn read_inode_with_damage_report(
         &self,
         ino: InodeId,

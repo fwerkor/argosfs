@@ -330,6 +330,27 @@ fn copy_inode_range_copies_requested_window() {
 }
 
 #[test]
+fn fallocate_extends_regular_file_with_zeroes() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/alloc", b"abc", 0o644).unwrap();
+    let ino = fs.resolve_path("/alloc", true).unwrap();
+
+    fs.fallocate_inode(ino, 10, 4, 0).unwrap();
+
+    let data = fs.read_file("/alloc", true).unwrap();
+    assert_eq!(data.len(), 14);
+    assert_eq!(&data[..3], b"abc");
+    assert!(data[3..].iter().all(|byte| *byte == 0));
+    assert_eq!(
+        fs.fallocate_inode(ino, 0, 1, libc::FALLOC_FL_KEEP_SIZE)
+            .unwrap_err()
+            .errno(),
+        libc::ENOTSUP
+    );
+}
+
+#[test]
 fn snapshot_names_are_rejected_or_protected_from_overwrite() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
