@@ -750,10 +750,11 @@ fn main() -> Result<()> {
         } => {
             let fs = open_backend(None, backend, images, devices, false)?;
             validate_requested_pool(&fs, pool.as_deref())?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&rootfs::preflight_volume(&fs, mode)?)?
-            );
+            let report = rootfs::preflight_report(&fs, mode);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.ok {
+                bail!("root preflight failed: {}", report.errors.join("; "));
+            }
         }
         Command::ReplayJournal {
             backend,

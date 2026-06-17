@@ -79,6 +79,11 @@ exec switch_root /newroot /sbin/init
 - Use `argosfs verify-journal ROOT` before boot handoff or after unclean
   shutdowns to validate the metadata hash chain and trigger replay/metadata-copy
   repair.
+- Use `argosfs preflight-root --backend loop|raw ... --mode MODE` before
+  handoff. It always emits a JSON report with `ok`, stable issue codes,
+  `recommended_mode`, and readonly/rw eligibility fields; failed preflight exits
+  nonzero after printing the report so initramfs and watchdog jobs can archive
+  the exact reason.
 - Use `argosfs prometheus ROOT --listen 127.0.0.1:9108` for node-local
   Prometheus scraping.
 - Use `argosfs set-posix-acl` and `argosfs set-nfs4-acl` to pre-seed rootfs ACL

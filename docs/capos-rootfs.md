@@ -81,4 +81,7 @@ The repository provides CapOS-targeted systemd assets under
 
 Rootfs mode is conservative: plain `rw` is rejected when devices are missing;
 use `degraded-ro` for readonly degraded boot or explicit `degraded-rw` when
-operators accept the risk. `recovery` maps to a readonly mount.
+operators accept the risk. `recovery` maps to a readonly mount. `preflight-root`
+prints a machine-readable report before returning failure, including stable
+issue codes and a recommended fallback mode for initramfs logs and watchdog
+alerts.

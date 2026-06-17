@@ -884,6 +884,14 @@ fn rootfs_preflight_fails_closed_for_degraded_rw_default() {
 
     let partial = images[..2].to_vec();
     let reopened = ArgosFs::open_loop(&partial, false).unwrap();
+    let report =
+        argosfs::rootfs::preflight_report(&reopened, argosfs::rootfs::RootMountMode::ReadWrite);
+    assert!(!report.ok);
+    assert_eq!(report.recommended_mode, "degraded-ro");
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| issue.code == "degraded-rootfs-requires-explicit-mode"));
     let err =
         argosfs::rootfs::preflight_volume(&reopened, argosfs::rootfs::RootMountMode::ReadWrite)
             .unwrap_err();
@@ -910,6 +918,14 @@ fn rootfs_preflight_rejects_dirty_raw_pool_for_rw() {
     drop(dirty);
 
     let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    let report =
+        argosfs::rootfs::preflight_report(&reopened, argosfs::rootfs::RootMountMode::ReadWrite);
+    assert!(!report.ok);
+    assert_eq!(report.recommended_mode, "recovery");
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| issue.code == "transaction-errors-block-rw"));
     let err =
         argosfs::rootfs::preflight_volume(&reopened, argosfs::rootfs::RootMountMode::ReadWrite)
             .unwrap_err();
