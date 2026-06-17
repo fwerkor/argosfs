@@ -1,6 +1,6 @@
 use crate::acl;
 use crate::error::{ArgosError, Result};
-use crate::types::{CapacitySource, DiskStatus, NodeKind};
+use crate::types::{CapacitySource, DiskStatus, InodeId, NodeKind};
 use crate::volume::{ArgosFs, NodeAttr, RenamePolicy};
 use fuser::{
     AccessFlags, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
@@ -9,20 +9,70 @@ use fuser::{
     ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow,
     WriteFlags,
 };
+use parking_lot::Mutex;
+use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_secs(5);
+const FUSE_WRITEBACK_MAX_BYTES: usize = 1024 * 1024;
 
 pub struct ArgosFuse {
     volume: ArgosFs,
+    writeback: Mutex<FuseWriteback>,
+}
+
+#[derive(Clone, Debug)]
+struct DirtyExtent {
+    offset: u64,
+    data: Vec<u8>,
+}
+
+impl DirtyExtent {
+    fn end(&self) -> Option<u64> {
+        self.offset.checked_add(self.data.len() as u64)
+    }
+
+    fn try_merge(&mut self, offset: u64, data: &[u8], max_bytes: usize) -> bool {
+        let Some(existing_end) = self.end() else {
+            return false;
+        };
+        let Some(new_end) = offset.checked_add(data.len() as u64) else {
+            return false;
+        };
+        if offset > existing_end || self.offset > new_end {
+            return false;
+        }
+        let merged_start = self.offset.min(offset);
+        let merged_end = existing_end.max(new_end);
+        let merged_len = match usize::try_from(merged_end.saturating_sub(merged_start)) {
+            Ok(len) if len <= max_bytes => len,
+            _ => return false,
+        };
+        let mut merged = vec![0; merged_len];
+        let old_start = (self.offset - merged_start) as usize;
+        merged[old_start..old_start + self.data.len()].copy_from_slice(&self.data);
+        let new_start = (offset - merged_start) as usize;
+        merged[new_start..new_start + data.len()].copy_from_slice(data);
+        self.offset = merged_start;
+        self.data = merged;
+        true
+    }
+}
+
+#[derive(Default)]
+struct FuseWriteback {
+    dirty: BTreeMap<InodeId, DirtyExtent>,
 }
 
 impl ArgosFuse {
     pub fn new(volume: ArgosFs) -> Self {
-        Self { volume }
+        Self {
+            volume,
+            writeback: Mutex::new(FuseWriteback::default()),
+        }
     }
 
     fn require_access(&self, req: &Request, ino: INodeNo, mask: i32) -> Result<()> {
@@ -70,10 +120,71 @@ impl ArgosFuse {
         }
         self.require_access(req, ino, libc::W_OK)
     }
+
+    fn require_writeback_access(&self, req: &Request, ino: INodeNo) -> Result<()> {
+        self.require_access(req, ino, libc::W_OK)?;
+        let attr = self.volume.attr_inode(ino.0)?;
+        if attr.kind != NodeKind::File {
+            return Err(ArgosError::IsDirectory(format!("inode {ino}")));
+        }
+        Ok(())
+    }
+
+    fn queue_writeback(&self, ino: InodeId, offset: u64, data: &[u8]) -> bool {
+        if data.len() > FUSE_WRITEBACK_MAX_BYTES {
+            return false;
+        }
+        let mut writeback = self.writeback.lock();
+        if let Some(dirty) = writeback.dirty.get_mut(&ino) {
+            return dirty.try_merge(offset, data, FUSE_WRITEBACK_MAX_BYTES);
+        }
+        writeback.dirty.insert(
+            ino,
+            DirtyExtent {
+                offset,
+                data: data.to_vec(),
+            },
+        );
+        true
+    }
+
+    fn flush_inode_writeback(&self, ino: InodeId) -> Result<()> {
+        let mut writeback = self.writeback.lock();
+        let Some(dirty) = writeback.dirty.remove(&ino) else {
+            return Ok(());
+        };
+        match self
+            .volume
+            .write_inode_range(ino, dirty.offset, dirty.data.as_slice())
+        {
+            Ok(written) if written == dirty.data.len() => Ok(()),
+            Ok(written) => {
+                writeback.dirty.insert(ino, dirty);
+                Err(ArgosError::Invalid(format!(
+                    "short writeback flush for inode {ino}: wrote {written} bytes"
+                )))
+            }
+            Err(err) => {
+                writeback.dirty.insert(ino, dirty);
+                Err(err)
+            }
+        }
+    }
+
+    fn flush_all_writeback(&self) -> Result<()> {
+        loop {
+            let next = self.writeback.lock().dirty.keys().next().copied();
+            let Some(ino) = next else {
+                return Ok(());
+            };
+            self.flush_inode_writeback(ino)?;
+        }
+    }
 }
 
 impl Drop for ArgosFuse {
     fn drop(&mut self) {
+        let _ = self.flush_all_writeback();
         let _ = self.volume.sync();
     }
 }
@@ -170,6 +281,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, parent, libc::X_OK)
             .and_then(|()| self.volume.lookup(parent.0, name))
@@ -180,6 +295,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        if let Err(err) = self.flush_inode_writeback(ino.0) {
+            reply.error(errno(&err));
+            return;
+        }
         match self.volume.attr_inode(ino.0) {
             Ok(attr) => reply.attr(&TTL, &to_file_attr(&attr)),
             Err(err) => reply.error(errno(&err)),
@@ -205,6 +324,10 @@ impl Filesystem for ArgosFuse {
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        if let Err(err) = self.flush_inode_writeback(ino.0) {
+            reply.error(errno(&err));
+            return;
+        }
         let result = (|| -> Result<NodeAttr> {
             let current = self.volume.attr_inode(ino.0)?;
             if mode.is_some() && req.uid() != 0 && req.uid() != current.uid {
@@ -258,6 +381,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        if let Err(err) = self.flush_inode_writeback(ino.0) {
+            reply.error(errno(&err));
+            return;
+        }
         match self.volume.readlink_inode_bytes(ino.0) {
             Ok(target) => reply.data(&target),
             Err(err) => reply.error(errno(&err)),
@@ -274,6 +401,10 @@ impl Filesystem for ArgosFuse {
         rdev: u32,
         reply: ReplyEntry,
     ) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         let file_type = mode & libc::S_IFMT;
         if matches!(file_type, value if value == libc::S_IFCHR || value == libc::S_IFBLK)
             && req.uid() != 0
@@ -307,6 +438,10 @@ impl Filesystem for ArgosFuse {
         umask: u32,
         reply: ReplyEntry,
     ) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
@@ -319,6 +454,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| self.volume.unlink_at_as(parent.0, name, req.uid()))
@@ -329,6 +468,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| self.volume.rmdir_at_as(parent.0, name, req.uid()))
@@ -346,6 +489,10 @@ impl Filesystem for ArgosFuse {
         link: &Path,
         reply: ReplyEntry,
     ) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
@@ -367,6 +514,10 @@ impl Filesystem for ArgosFuse {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         let supported_flags = RenameFlags::RENAME_NOREPLACE
             | RenameFlags::RENAME_EXCHANGE
             | RenameFlags::RENAME_WHITEOUT;
@@ -404,6 +555,10 @@ impl Filesystem for ArgosFuse {
         newname: &OsStr,
         reply: ReplyEntry,
     ) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, newparent, libc::W_OK | libc::X_OK)
             .and_then(|()| self.volume.link_at(ino.0, newparent.0, newname))
@@ -414,6 +569,12 @@ impl Filesystem for ArgosFuse {
     }
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        if flags.0 & libc::O_TRUNC != 0 {
+            if let Err(err) = self.flush_inode_writeback(ino.0) {
+                reply.error(errno(&err));
+                return;
+            }
+        }
         let result = (|| -> Result<NodeAttr> {
             self.require_access(req, ino, open_mask(flags))?;
             let mut attr = self.volume.attr_inode(ino.0)?;
@@ -446,6 +607,10 @@ impl Filesystem for ArgosFuse {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
+        if let Err(err) = self.flush_inode_writeback(ino.0) {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, ino, libc::R_OK)
             .and_then(|()| self.volume.read_inode(ino.0, offset, size as usize, true))
@@ -468,16 +633,42 @@ impl Filesystem for ArgosFuse {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        match self
-            .volume
-            .write_inode_range_as(ino.0, offset, data, req.uid(), req.gid())
-        {
+        if data.is_empty() {
+            reply.written(0);
+            return;
+        }
+        let direct = self.volume.io_policy().direct_io || data.len() > FUSE_WRITEBACK_MAX_BYTES;
+        let result = if direct {
+            self.flush_inode_writeback(ino.0).and_then(|()| {
+                self.volume
+                    .write_inode_range_as(ino.0, offset, data, req.uid(), req.gid())
+            })
+        } else {
+            self.require_writeback_access(req, ino).and_then(|()| {
+                if self.queue_writeback(ino.0, offset, data) {
+                    Ok(data.len())
+                } else {
+                    self.flush_inode_writeback(ino.0)?;
+                    if self.queue_writeback(ino.0, offset, data) {
+                        Ok(data.len())
+                    } else {
+                        self.volume
+                            .write_inode_range_as(ino.0, offset, data, req.uid(), req.gid())
+                    }
+                }
+            })
+        };
+        match result {
             Ok(written) => reply.written(written as u32),
             Err(err) => reply.error(errno(&err)),
         }
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         let meta = self.volume.metadata_snapshot();
         let block = meta.config.chunk_size as u64;
         let (explicit_capacity, grouped_capacity) = meta
@@ -548,7 +739,10 @@ impl Filesystem for ArgosFuse {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        reply.ok();
+        match self.flush_inode_writeback(_ino.0) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(errno(&err)),
+        }
     }
 
     fn fsync(
@@ -559,7 +753,10 @@ impl Filesystem for ArgosFuse {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        match self.volume.sync() {
+        match self
+            .flush_inode_writeback(_ino.0)
+            .and_then(|()| self.volume.sync())
+        {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
         }
@@ -575,6 +772,10 @@ impl Filesystem for ArgosFuse {
         position: u32,
         reply: ReplyEmpty,
     ) {
+        if let Err(err) = self.flush_inode_writeback(ino.0) {
+            reply.error(errno(&err));
+            return;
+        }
         let result = (|| -> Result<()> {
             if position != 0 {
                 return Err(ArgosError::Invalid(format!(
@@ -612,6 +813,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn getxattr(&self, req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        if let Err(err) = self.flush_inode_writeback(ino.0) {
+            reply.error(errno(&err));
+            return;
+        }
         let result = self
             .require_access(req, ino, libc::R_OK)
             .and_then(|()| self.volume.getxattr_inode(ino.0, xattr_name(name)?));
@@ -624,6 +829,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn listxattr(&self, req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        if let Err(err) = self.flush_inode_writeback(ino.0) {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, ino, libc::R_OK)
             .and_then(|()| self.volume.listxattr_inode(ino.0))
@@ -650,6 +859,10 @@ impl Filesystem for ArgosFuse {
     }
 
     fn removexattr(&self, req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        if let Err(err) = self.flush_inode_writeback(ino.0) {
+            reply.error(errno(&err));
+            return;
+        }
         let result = (|| {
             let name = xattr_name(name)?;
             self.require_xattr_write_access(req, ino, name)?;
@@ -678,6 +891,10 @@ impl Filesystem for ArgosFuse {
         _flags: i32,
         reply: ReplyCreate,
     ) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
@@ -708,6 +925,10 @@ impl Filesystem for ArgosFuse {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, ino, libc::R_OK | libc::X_OK)
             .and_then(|()| self.volume.readdir(ino.0))
@@ -738,6 +959,10 @@ impl Filesystem for ArgosFuse {
         offset: u64,
         mut reply: ReplyDirectoryPlus,
     ) {
+        if let Err(err) = self.flush_all_writeback() {
+            reply.error(errno(&err));
+            return;
+        }
         match self
             .require_access(req, ino, libc::R_OK | libc::X_OK)
             .and_then(|()| self.volume.readdir(ino.0))
@@ -899,6 +1124,7 @@ fn xattr_name(name: &OsStr) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::VolumeConfig;
 
     #[test]
     fn allow_other_sets_fuser_session_acl() {
@@ -932,5 +1158,64 @@ mod tests {
     fn missing_xattr_maps_to_enodata() {
         let err = ArgosError::NotFound("xattr security.selinux".to_string());
         assert_eq!(xattr_errno(&err).code(), Errno::NO_XATTR.code());
+    }
+
+    #[test]
+    fn dirty_extent_merges_adjacent_and_overlapping_writes() {
+        let mut dirty = DirtyExtent {
+            offset: 10,
+            data: b"abcd".to_vec(),
+        };
+
+        assert!(dirty.try_merge(14, b"ef", 16));
+        assert_eq!(dirty.offset, 10);
+        assert_eq!(dirty.data, b"abcdef");
+
+        assert!(dirty.try_merge(12, b"XY", 16));
+        assert_eq!(dirty.offset, 10);
+        assert_eq!(dirty.data, b"abXYef");
+    }
+
+    #[test]
+    fn dirty_extent_rejects_gaps_and_oversized_merges() {
+        let mut dirty = DirtyExtent {
+            offset: 10,
+            data: b"abcd".to_vec(),
+        };
+
+        assert!(!dirty.try_merge(15, b"z", 16));
+        assert_eq!(dirty.offset, 10);
+        assert_eq!(dirty.data, b"abcd");
+
+        assert!(!dirty.try_merge(14, b"efgh", 6));
+        assert_eq!(dirty.offset, 10);
+        assert_eq!(dirty.data, b"abcd");
+    }
+
+    #[test]
+    fn fuse_writeback_flushes_merged_extent_to_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let volume = ArgosFs::create(
+            tmp.path(),
+            VolumeConfig {
+                k: 1,
+                m: 0,
+                ..VolumeConfig::default()
+            },
+            1,
+            false,
+        )
+        .unwrap();
+        let ino = volume.create_file_path("/buffered", 0o644).unwrap();
+        let fuse = ArgosFuse::new(volume.clone());
+
+        assert!(fuse.queue_writeback(ino, 0, b"hello"));
+        assert!(fuse.queue_writeback(ino, 5, b" world"));
+        assert_eq!(volume.read_file("/buffered", true).unwrap(), b"");
+
+        fuse.flush_inode_writeback(ino).unwrap();
+
+        assert_eq!(volume.read_file("/buffered", true).unwrap(), b"hello world");
+        assert!(fuse.writeback.lock().dirty.is_empty());
     }
 }
