@@ -14,7 +14,9 @@ Raw/loop backend checks:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+scripts/test_cli_features.sh
 scripts/test_loop_backend.sh
+scripts/test_block_lifecycle.sh
 scripts/test_crash_consistency.sh --unprivileged
 scripts/test_initramfs_dry_run.sh
 scripts/test_rootfs_smoke.sh
@@ -27,6 +29,7 @@ sudo ARGOSFS_RAW_TEST_DEVICES=/dev/...,/dev/... scripts/test_raw_backend.sh --fo
 scripts/test_privileged_fuse.sh
 scripts/test_qemu_boot.sh
 scripts/test_qemu_ops.sh
+scripts/test_qemu_hotplug.sh
 ```
 
 Loop/raw integration tests include raw superblock backup recovery, duplicate
@@ -39,6 +42,18 @@ checks and print a skip reason when unavailable.
 console and running rootfs operations: verify the ArgosFS `/` mount, verify the
 initramfs root marker under `/run`, read `/etc/openwrt_release`, exercise
 create/read/symlink/delete on `/tmp`, and call `sync`.
+
+
+`scripts/test_cli_features.sh` is the fast host-backed feature gate used by the
+CI architecture matrix. It covers CLI create/read/write/stat/ls/cat/get, chmod,
+truncate, symlink, rename, snapshot, POSIX ACL, NFSv4 ACL, transparent
+compression, encryption with re-encryption, scrub, fsck, journal verification,
+and health output.
+
+`scripts/test_block_lifecycle.sh` is the non-destructive loop-block device
+lifecycle gate. It creates a three-device pool, imports a dataset, adds a new
+device, drains and removes an old device, replaces another device, reshapes the
+pool, scrubs/fscks it, exports the dataset, and checks byte-for-byte equality.
 
 `scripts/compat/run_deep_roundtrip.sh` adds host-filesystem import/export
 coverage for byte-preserving names, hardlinks, symlinks, xattrs, metadata, and
@@ -138,6 +153,21 @@ git clone https://github.com/pjd/pjdfstest.git
 # xfstests and its distro-specific dependencies
 git clone https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git
 ```
+
+
+## CI Matrix
+
+The default GitHub Actions workflow splits validation into parallel jobs:
+
+- Rust format, Clippy, and docs on x86_64.
+- Rust unit/integration tests on x86_64 and arm64 GitHub-hosted Linux runners.
+- Host CLI feature tests on x86_64 and arm64.
+- Loop-block lifecycle tests on x86_64 and arm64.
+- Compatibility/rootfs smoke suites split by test family.
+- Artifact-gated QEMU boot, guest operation, and hotplug harnesses for x86_64,
+  arm64, and riscv64.
+- CapOS target compile smoke jobs for `x86_64`, `armsr_armv8`, and
+  `riscv64_sifiveu`.
 
 Known skipped cases:
 
