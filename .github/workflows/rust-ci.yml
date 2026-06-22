@@ -356,3 +356,52 @@ jobs:
           name: argosfs-capos-${{ matrix.capos_target }}
           path: ${{ runner.temp }}/argosfs-capos-${{ matrix.capos_target }}
           if-no-files-found: ignore
+
+  required-rust-compat:
+    name: Format, lint, test, doc, release build
+    runs-on: ubuntu-24.04
+    needs:
+      - rust-style
+      - rust-unit
+      - cli-feature-matrix
+      - block-lifecycle-matrix
+      - compatibility
+      - retained-validation
+      - qemu-harness
+    if: always()
+    steps:
+      - name: Verify required Rust CI gates
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {name: result["result"] for name, result in needs.items() if result["result"] != "success"}
+          if failed:
+              raise SystemExit(f"required Rust CI gates did not all pass: {failed}")
+          print("required Rust CI gates passed")
+          PY
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+
+  required-capos-compat:
+    name: CapOS environment compile smoke
+    runs-on: ubuntu-24.04
+    needs:
+      - capos-target-compile
+    if: always()
+    steps:
+      - name: Verify required CapOS compile gates
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {name: result["result"] for name, result in needs.items() if result["result"] != "success"}
+          if failed:
+              raise SystemExit(f"required CapOS compile gates did not all pass: {failed}")
+          print("required CapOS compile gates passed")
+          PY
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+
