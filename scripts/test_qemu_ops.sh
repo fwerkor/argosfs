@@ -5,8 +5,34 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 artifacts="${ARGOSFS_TEST_ARTIFACTS:-$repo/target/argosfs-test-artifacts/qemu-ops}"
 mkdir -p "$artifacts"
 
-if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-	echo "SKIP: qemu-system-x86_64 not found" >&2
+arch="${ARGOSFS_QEMU_ARCH:-x86_64}"
+case "$arch" in
+	x86_64)
+		qemu_bin="${ARGOSFS_QEMU_BIN:-qemu-system-x86_64}"
+		machine=("${ARGOSFS_QEMU_MACHINE:-pc}")
+		cpu_args=()
+		default_rootdev="/dev/vda"
+		;;
+	aarch64|arm64)
+		qemu_bin="${ARGOSFS_QEMU_BIN:-qemu-system-aarch64}"
+		machine=("${ARGOSFS_QEMU_MACHINE:-virt}")
+		cpu_args=(-cpu "${ARGOSFS_QEMU_CPU:-cortex-a57}")
+		default_rootdev="/dev/vda"
+		;;
+	riscv64)
+		qemu_bin="${ARGOSFS_QEMU_BIN:-qemu-system-riscv64}"
+		machine=("${ARGOSFS_QEMU_MACHINE:-virt}")
+		cpu_args=()
+		default_rootdev="/dev/vda"
+		;;
+	*)
+		echo "unknown ARGOSFS_QEMU_ARCH=$arch" >&2
+		exit 2
+		;;
+esac
+
+if ! command -v "$qemu_bin" >/dev/null 2>&1; then
+	echo "SKIP: $qemu_bin not found" >&2
 	exit 0
 fi
 
@@ -26,9 +52,9 @@ if [ -n "$initrd" ] && [ ! -e "$initrd" ]; then
 	exit 1
 fi
 
-log="$artifacts/qemu-ops.log"
+log="$artifacts/qemu-ops-$arch.log"
 commands="$artifacts/qemu-ops.commands"
-append="${ARGOSFS_QEMU_APPEND:-console=ttyS0 rootwait argosfs.images=${ARGOSFS_QEMU_ROOTDEV:-/dev/vda} argosfs.mode=ro}"
+append="${ARGOSFS_QEMU_APPEND:-console=ttyS0 rootwait argosfs.images=${ARGOSFS_QEMU_ROOTDEV:-$default_rootdev} argosfs.mode=ro}"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-210}"
 login_delay_s="${ARGOSFS_QEMU_OPS_LOGIN_DELAY:-90}"
@@ -54,7 +80,9 @@ poweroff -f || reboot -f || halt -f
 CMDS
 
 qemu_args=(
+	-machine "${machine[0]}"
 	-m "${ARGOSFS_QEMU_MEM:-1024}"
+	"${cpu_args[@]}"
 	-kernel "$kernel"
 	-append "$append"
 	-nographic
@@ -74,7 +102,7 @@ set +e
 		printf '%s\r' "$line"
 		sleep "$command_delay_s"
 	done <"$commands"
-) | timeout "$timeout_s" qemu-system-x86_64 "${qemu_args[@]}" >"$log" 2>&1
+) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log" 2>&1
 status=${PIPESTATUS[1]}
 set -e
 
@@ -95,7 +123,7 @@ if ! grep -Eq 'ARGOSFS_ROOT_MOUNT .* fuse' "$log"; then
 fi
 
 if [ "${#missing[@]}" -eq 0 ]; then
-	echo "QEMU ops smoke passed; artifacts=$artifacts"
+	echo "QEMU ops smoke passed for $arch; artifacts=$artifacts"
 	exit 0
 fi
 

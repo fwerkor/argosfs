@@ -11,7 +11,8 @@ capos_make_jobs="${ARGOSFS_CAPOS_MAKE_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 capos_make_target="${ARGOSFS_CAPOS_MAKE_TARGET:-package/utils/argosfs/host/compile}"
 capos_tools_target="${ARGOSFS_CAPOS_TOOLS_TARGET:-}"
 capos_make_v="${ARGOSFS_CAPOS_MAKE_V:-}"
-capos_target_matrix="${ARGOSFS_CAPOS_TARGET_MATRIX:-x86_64,armsr_armv8,loongarch64_generic}"
+capos_target_matrix="${ARGOSFS_CAPOS_TARGET_MATRIX:-x86_64,armsr_armv8,riscv64_sifiveu}"
+capos_build_target="${ARGOSFS_CAPOS_BUILD_TARGET:-x86_64}"
 system_pkg_config_libdir="$(
 	env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_PATH -u PKG_CONFIG_SYSROOT_DIR \
 		PATH=/usr/local/bin:/usr/bin:/bin \
@@ -233,11 +234,11 @@ CONFIG_ALL_KMODS=n
 CONFIG_ALL_NONSHARED=n
 CONFIG
 			;;
-		loongarch64_generic)
+		riscv64_sifiveu)
 			cat >.config <<'CONFIG'
-CONFIG_TARGET_loongarch64=y
-CONFIG_TARGET_loongarch64_generic=y
-CONFIG_TARGET_loongarch64_generic_DEVICE_generic=y
+CONFIG_TARGET_sifiveu=y
+CONFIG_TARGET_sifiveu_generic=y
+CONFIG_TARGET_sifiveu_generic_DEVICE_sifive_unmatched=y
 CONFIG_PACKAGE_argosfs=y
 CONFIG_PACKAGE_libfuse3=y
 CONFIG_PACKAGE_fuse3-utils=y
@@ -304,8 +305,8 @@ if [ "$capos_full_compile" = "1" ]; then
 			IFS=,
 		done
 		IFS="$old_ifs"
-		write_capos_target_config x86_64
-		make defconfig >"$artifacts/capos-defconfig-build-x86_64.log" 2>&1
+		write_capos_target_config "$capos_build_target"
+		make defconfig >"$artifacts/capos-defconfig-build-$capos_build_target.log" 2>&1
 		make_args=()
 		[ -z "$capos_make_v" ] || make_args+=("V=$capos_make_v")
 		if [ -n "$capos_tools_target" ]; then
