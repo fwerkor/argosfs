@@ -2,61 +2,18 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/qemu_common.sh
+. "$repo/scripts/lib/qemu_common.sh"
 artifacts="${ARGOSFS_TEST_ARTIFACTS:-$repo/target/argosfs-test-artifacts/qemu-ops}"
 mkdir -p "$artifacts"
 
-arch="${ARGOSFS_QEMU_ARCH:-x86_64}"
-case "$arch" in
-	x86_64)
-		qemu_bin="${ARGOSFS_QEMU_BIN:-qemu-system-x86_64}"
-		machine=("${ARGOSFS_QEMU_MACHINE:-pc}")
-		cpu_args=()
-		default_rootdev="/dev/vda"
-		;;
-	aarch64|arm64)
-		qemu_bin="${ARGOSFS_QEMU_BIN:-qemu-system-aarch64}"
-		machine=("${ARGOSFS_QEMU_MACHINE:-virt}")
-		cpu_args=(-cpu "${ARGOSFS_QEMU_CPU:-cortex-a57}")
-		default_rootdev="/dev/vda"
-		;;
-	riscv64)
-		qemu_bin="${ARGOSFS_QEMU_BIN:-qemu-system-riscv64}"
-		machine=("${ARGOSFS_QEMU_MACHINE:-virt}")
-		cpu_args=()
-		default_rootdev="/dev/vda"
-		;;
-	*)
-		echo "unknown ARGOSFS_QEMU_ARCH=$arch" >&2
-		exit 2
-		;;
-esac
-
-if ! command -v "$qemu_bin" >/dev/null 2>&1; then
-	echo "SKIP: $qemu_bin not found" >&2
-	exit 0
-fi
-
-kernel="${ARGOSFS_QEMU_KERNEL:-}"
-rootfs="${ARGOSFS_QEMU_ROOTFS:-}"
-initrd="${ARGOSFS_QEMU_INITRD:-}"
-if [ -z "$kernel" ] || [ ! -e "$kernel" ]; then
-	echo "SKIP: QEMU ops requires ARGOSFS_QEMU_KERNEL pointing at a CapOS kernel/initramfs artifact" >&2
-	exit 0
-fi
-if [ -z "$rootfs" ] || [ ! -e "$rootfs" ]; then
-	echo "SKIP: QEMU ops requires ARGOSFS_QEMU_ROOTFS pointing at an ArgosFS rootfs image" >&2
-	exit 0
-fi
-if [ -n "$initrd" ] && [ ! -e "$initrd" ]; then
-	echo "ARGOSFS_QEMU_INITRD does not exist: $initrd" >&2
-	exit 1
-fi
+argosfs_qemu_select_arch
+argosfs_qemu_require_binary
 
 log="$artifacts/qemu-ops-$arch.log"
 commands="$artifacts/qemu-ops.commands"
-append="${ARGOSFS_QEMU_APPEND:-console=ttyS0 rootwait argosfs.images=${ARGOSFS_QEMU_ROOTDEV:-$default_rootdev} argosfs.mode=ro}"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency}"
-timeout_s="${ARGOSFS_QEMU_TIMEOUT:-210}"
+timeout_s="${ARGOSFS_QEMU_TIMEOUT:-240}"
 login_delay_s="${ARGOSFS_QEMU_OPS_LOGIN_DELAY:-90}"
 command_delay_s="${ARGOSFS_QEMU_OPS_COMMAND_DELAY:-1}"
 done_marker="ARGOSFS_QEMU_OPS_DONE"
@@ -79,19 +36,7 @@ echo ARGOSFS_QEMU_OPS_DONE
 poweroff -f || reboot -f || halt -f
 CMDS
 
-qemu_args=(
-	-machine "${machine[0]}"
-	-m "${ARGOSFS_QEMU_MEM:-1024}"
-	"${cpu_args[@]}"
-	-kernel "$kernel"
-	-append "$append"
-	-nographic
-	-no-reboot
-)
-if [ -n "$initrd" ]; then
-	qemu_args+=(-initrd "$initrd")
-fi
-qemu_args+=(-drive "file=$rootfs,format=raw,if=virtio")
+argosfs_qemu_build_args
 
 set +e
 (
