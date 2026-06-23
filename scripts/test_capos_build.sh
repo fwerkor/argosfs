@@ -218,7 +218,7 @@ CONFIG_TARGET_x86_64_DEVICE_generic=y
 CONFIG_TARGET_ROOTFS_ARGOSFS=y
 CONFIG_TARGET_ROOTFS_INITRAMFS=y
 CONFIG_TARGET_IMAGES_GZIP=n
-CONFIG_TARGET_ROOTFS_PARTSIZE=256
+CONFIG_TARGET_ROOTFS_PARTSIZE=512
 CONFIG_TARGET_KERNEL_PARTSIZE=64
 CONFIG_GRUB_IMAGES=y
 CONFIG_GRUB_EFI_IMAGES=y
@@ -243,7 +243,7 @@ CONFIG_TARGET_armsr_armv8_DEVICE_generic=y
 CONFIG_TARGET_ROOTFS_ARGOSFS=y
 CONFIG_TARGET_ROOTFS_INITRAMFS=y
 CONFIG_TARGET_IMAGES_GZIP=n
-CONFIG_TARGET_ROOTFS_PARTSIZE=256
+CONFIG_TARGET_ROOTFS_PARTSIZE=512
 CONFIG_TARGET_KERNEL_PARTSIZE=64
 CONFIG_GRUB_IMAGES=y
 CONFIG_GRUB_EFI_IMAGES=y
@@ -268,7 +268,7 @@ CONFIG_TARGET_sifiveu_generic_DEVICE_sifive_unmatched=y
 CONFIG_TARGET_ROOTFS_ARGOSFS=y
 CONFIG_TARGET_ROOTFS_INITRAMFS=y
 CONFIG_TARGET_IMAGES_GZIP=n
-CONFIG_TARGET_ROOTFS_PARTSIZE=256
+CONFIG_TARGET_ROOTFS_PARTSIZE=512
 CONFIG_TARGET_KERNEL_PARTSIZE=64
 CONFIG_PACKAGE_argosfs=y
 CONFIG_PACKAGE_libfuse3=y
@@ -343,7 +343,7 @@ if [ "$capos_full_compile" = "1" ]; then
 		if [ -n "$capos_tools_target" ]; then
 			if ! make -j"$capos_make_jobs" "$capos_tools_target" "${make_args[@]}" >"$artifacts/capos-tools-build.log" 2>&1; then
 				tail -n 200 "$artifacts/capos-tools-build.log" >&2 || true
-				return 1
+				exit 1
 			fi
 		else
 			host_pkg_config="$(command -v pkg-config)"
@@ -355,7 +355,7 @@ if [ "$capos_full_compile" = "1" ]; then
 			ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR="$system_pkg_config_libdir" \
 			make -j"$capos_make_jobs" "$capos_make_target" "${make_args[@]}" >"$artifacts/capos-argosfs-build.log" 2>&1; then
 			tail -n 200 "$artifacts/capos-argosfs-build.log" >&2 || true
-			return 1
+			exit 1
 		fi
 		host_argosfs="staging_dir/hostpkg/bin/argosfs"
 		if [ ! -x "$host_argosfs" ]; then
