@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 const JOURNAL_VERSION: u32 = 1;
 pub const DEFAULT_CHECKPOINT_INTERVAL_TXIDS: u64 = 128;
 const CHECKPOINT_INTERVAL_ENV: &str = "ARGOSFS_CHECKPOINT_INTERVAL_TXIDS";
+const JOURNAL_COMPACTION_ENV: &str = "ARGOSFS_DISABLE_JOURNAL_COMPACTION";
 const PRIMARY_META: &str = "meta.primary.json";
 const SECONDARY_META: &str = "meta.secondary.json";
 const COMPAT_META: &str = "meta.json";
@@ -290,24 +291,28 @@ pub fn append_transaction_checked(
     details: serde_json::Value,
 ) -> Result<()> {
     let _lock = FileLock::exclusive(&transaction_lock_path(root))?;
+    let report = scan(root)?;
+    let metadata_copy = latest_metadata_copy(root)?;
+    let previous_metadata = match metadata_copy {
+        Some(metadata) if metadata.txid >= report.last_valid_txid => metadata,
+        _ => latest_recoverable_metadata(root)?,
+    };
     if let Some(expected) = expected_previous_txid {
-        if let Some(current) = latest_metadata_txid_unlocked(root)? {
-            if current > expected {
-                return Err(ArgosError::Conflict(format!(
-                    "volume advanced from txid {expected} to {current}; reopen and retry"
-                )));
-            }
+        if previous_metadata.txid > expected {
+            return Err(ArgosError::Conflict(format!(
+                "volume advanced from txid {expected} to {}; reopen and retry",
+                previous_metadata.txid
+            )));
         }
     }
     inject_crash("before-journal")?;
-    let previous_metadata = latest_recoverable_metadata(root)?;
     let previous_meta_hash = if meta.integrity.meta_hash.is_empty() {
         canonical_metadata_hash(meta)?
     } else {
         meta.integrity.meta_hash.clone()
     };
     prepare_metadata_integrity(meta, previous_meta_hash)?;
-    let previous_record_hash = scan(root)?.last_valid_record_hash;
+    let previous_record_hash = report.last_valid_record_hash;
     let should_checkpoint = should_write_checkpoint(root, meta.txid)?;
     let metadata_delta = if should_checkpoint {
         None
@@ -332,7 +337,15 @@ pub fn append_transaction_checked(
     )?;
     append_record(root, &record)?;
     inject_crash("after-journal")?;
-    write_metadata_copies_with_injection(root, meta)
+    write_metadata_copies_with_injection(root, meta)?;
+    if should_checkpoint {
+        // Journal compaction is maintenance work after the transaction is already
+        // durable in the journal and in the metadata copies.  A compaction
+        // failure must not turn a committed filesystem operation into a
+        // user-visible failure; the uncompacted journal is still valid.
+        let _ = compact_journal_unlocked(root);
+    }
+    Ok(())
 }
 
 pub fn append_event(
@@ -356,6 +369,11 @@ pub fn append_event(
         },
     )?;
     append_record(root, &record)
+}
+
+pub fn compact_journal(root: &Path) -> Result<()> {
+    let _lock = FileLock::exclusive(&transaction_lock_path(root))?;
+    compact_journal_unlocked(root)
 }
 
 pub fn write_metadata_copies(root: &Path, meta: &Metadata) -> Result<()> {
@@ -532,6 +550,73 @@ fn append_record(root: &Path, record: &JournalRecord) -> Result<()> {
     append_json_line(&journal_path(root), record)
 }
 
+fn compact_journal_unlocked(root: &Path) -> Result<()> {
+    if journal_compaction_disabled() {
+        return Ok(());
+    }
+    let journal = journal_path(root);
+    let Ok(text) = fs::read_to_string(&journal) else {
+        return Ok(());
+    };
+    let records = valid_journal_chain_records(&text)?;
+    let Some(checkpoint_index) = records
+        .iter()
+        .rposition(|record| record.record_type.is_checkpoint() && record.metadata.is_some())
+    else {
+        return Ok(());
+    };
+    let mut compacted = records[checkpoint_index..].to_vec();
+    let mut previous_hash = String::new();
+    for record in &mut compacted {
+        record.previous_record_hash = previous_hash;
+        record.record_hash.clear();
+        record.record_hash = record_hash(record)?;
+        previous_hash = record.record_hash.clone();
+    }
+
+    let mut bytes = Vec::new();
+    for record in &compacted {
+        serde_json::to_writer(&mut bytes, record)?;
+        bytes.push(b'\n');
+    }
+    atomic_write(&journal, &bytes)
+}
+
+fn valid_journal_chain_records(text: &str) -> Result<Vec<JournalRecord>> {
+    let mut records = Vec::new();
+    let mut previous_hash = String::new();
+    for raw in text.lines() {
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_value::<JournalRecord>(value.clone()) else {
+            continue;
+        };
+        if record.record_hash.is_empty() {
+            continue;
+        }
+        let valid_hash = match record_hash_is_valid(&value, &record) {
+            Ok(valid) => valid,
+            Err(_) => continue,
+        };
+        if !valid_hash || record.previous_record_hash != previous_hash {
+            continue;
+        }
+        previous_hash = record.record_hash.clone();
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn journal_compaction_disabled() -> bool {
+    std::env::var(JOURNAL_COMPACTION_ENV)
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
 fn read_metadata_candidates(root: &Path) -> Vec<MetadataCandidate> {
     metadata_paths(root)
         .into_iter()
@@ -678,10 +763,7 @@ fn report_latest_recoverable_metadata(root: &Path) -> Result<Option<Metadata>> {
 }
 
 fn latest_recoverable_metadata(root: &Path) -> Result<Metadata> {
-    let mut best = read_metadata_candidates(root)
-        .into_iter()
-        .filter_map(|candidate| candidate.metadata)
-        .max_by(|left, right| metadata_order(left).cmp(&metadata_order(right)));
+    let mut best = latest_metadata_copy(root)?;
     if let Some(replayed) = report_latest_recoverable_metadata(root)? {
         if best
             .as_ref()
@@ -694,21 +776,11 @@ fn latest_recoverable_metadata(root: &Path) -> Result<Metadata> {
     best.ok_or_else(|| ArgosError::Invalid("no recoverable metadata base found".to_string()))
 }
 
-fn latest_metadata_txid_unlocked(root: &Path) -> Result<Option<u64>> {
-    let mut best = read_metadata_candidates(root)
+fn latest_metadata_copy(root: &Path) -> Result<Option<Metadata>> {
+    Ok(read_metadata_candidates(root)
         .into_iter()
         .filter_map(|candidate| candidate.metadata)
-        .max_by(|left, right| metadata_order(left).cmp(&metadata_order(right)));
-    if let Some(snapshot) = report_latest_recoverable_metadata(root)? {
-        if best
-            .as_ref()
-            .map(|metadata| metadata_order(&snapshot) > metadata_order(metadata))
-            .unwrap_or(true)
-        {
-            best = Some(snapshot);
-        }
-    }
-    Ok(best.map(|metadata| metadata.txid))
+        .max_by(|left, right| metadata_order(left).cmp(&metadata_order(right))))
 }
 
 fn should_write_checkpoint(root: &Path, txid: u64) -> Result<bool> {

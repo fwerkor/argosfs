@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use argosfs::acl;
 use argosfs::crypto;
 use argosfs::fusefs;
+use argosfs::journal;
 use argosfs::metrics;
 use argosfs::rootfs::{self, RootMountMode};
 use argosfs::scan;
@@ -473,6 +474,9 @@ enum Command {
         path: String,
     },
     VerifyJournal {
+        root: PathBuf,
+    },
+    CompactJournal {
         root: PathBuf,
     },
 }
@@ -1184,6 +1188,18 @@ fn main() -> Result<()> {
             if report.invalid_entries > 0 || report.double_write_mismatches > 0 {
                 bail!(
                     "journal verification failed: invalid_entries={} double_write_mismatches={}",
+                    report.invalid_entries,
+                    report.double_write_mismatches
+                );
+            }
+        }
+        Command::CompactJournal { root } => {
+            journal::compact_journal(&root)?;
+            let report = ArgosFs::audit_transactions(root)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report.invalid_entries > 0 || report.double_write_mismatches > 0 {
+                bail!(
+                    "journal verification failed after compaction: invalid_entries={} double_write_mismatches={}",
                     report.invalid_entries,
                     report.double_write_mismatches
                 );
