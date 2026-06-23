@@ -13,6 +13,7 @@ capos_tools_target="${ARGOSFS_CAPOS_TOOLS_TARGET:-}"
 capos_make_v="${ARGOSFS_CAPOS_MAKE_V:-}"
 capos_target_matrix="${ARGOSFS_CAPOS_TARGET_MATRIX:-x86_64,armsr_armv8,riscv64_sifiveu}"
 capos_build_target="${ARGOSFS_CAPOS_BUILD_TARGET:-x86_64}"
+capos_dl_dir="${ARGOSFS_CAPOS_DL_DIR:-}"
 system_pkg_config_libdir="$(
 	env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_PATH -u PKG_CONFIG_SYSROOT_DIR \
 		PATH=/usr/local/bin:/usr/bin:/bin \
@@ -37,6 +38,11 @@ if [ -n "$capos_local_source" ]; then
 		"$capos_local_source"/ "$artifacts/capos"/
 else
 	git clone --depth 1 --branch "$capos_ref" "$capos_repo" "$artifacts/capos"
+fi
+if [ -n "$capos_dl_dir" ]; then
+	mkdir -p "$capos_dl_dir"
+	rm -rf "$artifacts/capos/dl"
+	ln -s "$capos_dl_dir" "$artifacts/capos/dl"
 fi
 
 mkdir -p "$artifacts/capos/package/utils/argosfs/files"
@@ -209,6 +215,16 @@ write_capos_target_config() {
 CONFIG_TARGET_x86=y
 CONFIG_TARGET_x86_64=y
 CONFIG_TARGET_x86_64_DEVICE_generic=y
+CONFIG_TARGET_ROOTFS_ARGOSFS=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+CONFIG_TARGET_IMAGES_GZIP=n
+CONFIG_TARGET_ROOTFS_PARTSIZE=256
+CONFIG_TARGET_KERNEL_PARTSIZE=32
+CONFIG_GRUB_IMAGES=y
+CONFIG_GRUB_EFI_IMAGES=y
+CONFIG_GRUB_SERIAL=y
+CONFIG_GRUB_BAUDRATE=115200
+CONFIG_TARGET_SERIAL="ttyS0"
 CONFIG_PACKAGE_argosfs=y
 CONFIG_PACKAGE_libfuse3=y
 CONFIG_PACKAGE_fuse3-utils=y
@@ -224,6 +240,16 @@ CONFIG
 CONFIG_TARGET_armsr=y
 CONFIG_TARGET_armsr_armv8=y
 CONFIG_TARGET_armsr_armv8_DEVICE_generic=y
+CONFIG_TARGET_ROOTFS_ARGOSFS=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+CONFIG_TARGET_IMAGES_GZIP=n
+CONFIG_TARGET_ROOTFS_PARTSIZE=256
+CONFIG_TARGET_KERNEL_PARTSIZE=32
+CONFIG_GRUB_IMAGES=y
+CONFIG_GRUB_EFI_IMAGES=y
+CONFIG_GRUB_SERIAL=y
+CONFIG_GRUB_BAUDRATE=115200
+CONFIG_TARGET_SERIAL="ttyS0"
 CONFIG_PACKAGE_argosfs=y
 CONFIG_PACKAGE_libfuse3=y
 CONFIG_PACKAGE_fuse3-utils=y
@@ -239,6 +265,11 @@ CONFIG
 CONFIG_TARGET_sifiveu=y
 CONFIG_TARGET_sifiveu_generic=y
 CONFIG_TARGET_sifiveu_generic_DEVICE_sifive_unmatched=y
+CONFIG_TARGET_ROOTFS_ARGOSFS=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+CONFIG_TARGET_IMAGES_GZIP=n
+CONFIG_TARGET_ROOTFS_PARTSIZE=256
+CONFIG_TARGET_KERNEL_PARTSIZE=32
 CONFIG_PACKAGE_argosfs=y
 CONFIG_PACKAGE_libfuse3=y
 CONFIG_PACKAGE_fuse3-utils=y
