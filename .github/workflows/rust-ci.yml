@@ -346,7 +346,7 @@ jobs:
           ARGOSFS_CAPOS_TARGET_MATRIX: ${{ matrix.capos_target }}
           ARGOSFS_CAPOS_BUILD_TARGET: ${{ matrix.capos_target }}
           ARGOSFS_CAPOS_MAKE_JOBS: "2"
-          ARGOSFS_CAPOS_MAKE_V: s
+          ARGOSFS_CAPOS_LOG_STDOUT: filtered
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/argosfs-capos-${{ matrix.capos_target }}
         run: scripts/test_capos_build.sh
 

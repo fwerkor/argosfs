@@ -11,6 +11,7 @@ capos_make_jobs="${ARGOSFS_CAPOS_MAKE_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 capos_make_target="${ARGOSFS_CAPOS_MAKE_TARGET:-package/utils/argosfs/host/compile}"
 capos_tools_target="${ARGOSFS_CAPOS_TOOLS_TARGET:-}"
 capos_make_v="${ARGOSFS_CAPOS_MAKE_V:-}"
+capos_log_stdout="${ARGOSFS_CAPOS_LOG_STDOUT:-full}"
 capos_target_matrix="${ARGOSFS_CAPOS_TARGET_MATRIX:-x86_64,armsr_armv8,riscv64_sifiveu}"
 capos_build_target="${ARGOSFS_CAPOS_BUILD_TARGET:-x86_64}"
 capos_dl_dir="${ARGOSFS_CAPOS_DL_DIR:-}"
@@ -23,6 +24,21 @@ system_pkg_config_libdir="$(
 rm -rf "$artifacts"
 mkdir -p "$artifacts/argosfs-src" "$artifacts/capos"
 
+filter_capos_log_for_stdout() {
+	awk '
+		/^[[:space:]]*$/ { next }
+		/(^|[[:space:]])(ERROR|Error|FAILED|failed|warning|Warning|No space left|No such file|permission denied|Permission denied)/ { print; fflush(); next }
+		/^make(\[[0-9]+\])?: / { print; fflush(); next }
+		/^make\[[0-9]+\]: / { print; fflush(); next }
+		/^make -r / { print; fflush(); next }
+		/^make: \*\*\*/ { print; fflush(); next }
+		/^[[:space:]]+ERROR: / { print; fflush(); next }
+		/(Downloaded|Downloading|Compiling|Finished)[[:space:]]/ { print; fflush(); next }
+		/^\[[0-9]+\/[0-9]+\][[:space:]]+(Building|Linking|Generating|Install|Installing)/ { print; fflush(); next }
+		/^[[:space:]]*(CC|CXX|LD|AR|INSTALL|CP|GEN|HOSTCC|HOSTLD|MODPOST)[[:space:]\[]/ { print; fflush(); next }
+	'
+}
+
 run_logged() {
 	local log="$1"
 	shift
@@ -31,8 +47,25 @@ run_logged() {
 	echo "==> $*"
 	echo "    log: $log"
 	set +e
-	"$@" 2>&1 | tee "$log"
-	local status="${PIPESTATUS[0]}"
+	local status
+	case "$capos_log_stdout" in
+		full)
+			"$@" 2>&1 | tee "$log"
+			status="${PIPESTATUS[0]}"
+			;;
+		filtered)
+			"$@" 2>&1 | tee "$log" | filter_capos_log_for_stdout
+			status="${PIPESTATUS[0]}"
+			;;
+		none)
+			"$@" >"$log" 2>&1
+			status="$?"
+			;;
+		*)
+			echo "unknown ARGOSFS_CAPOS_LOG_STDOUT mode: $capos_log_stdout" >&2
+			status=2
+			;;
+	esac
 	set -e
 	return "$status"
 }
