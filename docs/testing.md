@@ -169,6 +169,39 @@ The default GitHub Actions workflow splits validation into parallel jobs:
 - CapOS target compile smoke jobs for `x86_64`, `armsr_armv8`, and
   `riscv64_sifiveu`.
 
+
+## Full CapOS QEMU CI
+
+The heavy `Full CapOS QEMU CI` workflow is separate from the default PR matrix.
+It runs on `workflow_dispatch` and on the weekly schedule. The workflow builds
+full CapOS images with ArgosFS as the root filesystem, discovers bootable QEMU
+artifacts, then runs real guest tests instead of artifact-gated skips.
+
+Default full targets:
+
+- `x86_64` / CapOS `x86_64`
+- `arm64` / CapOS `armsr_armv8`
+- optional experimental `riscv64` / CapOS `riscv64_sifiveu`
+
+The full guest test covers:
+
+- booting the generated CapOS image under QEMU;
+- verifying the ArgosFS root marker and `/` mounted through FUSE;
+- ordinary root filesystem operations on `/root` rather than only `/tmp`;
+- package database queries, UCI query, and init/service status queries when the
+  image exposes those tools;
+- running the `argosfs` CLI inside the guest;
+- creating a guest ArgosFS volume and testing compression, encryption,
+  re-encryption, scrub, fsck, journal verification, and health output;
+- virtio block hot-add and hot-remove, including an ArgosFS raw-backend mkfs,
+  import, readback, fsck, and scrub cycle on the hot-added disk;
+- rebooting the guest and verifying rootfs persistence across journal replay.
+
+The workflow uploads the CapOS build logs, target configs, discovered QEMU
+artifact manifest, serial logs, QEMU command files, and `bin/targets` outputs.
+RISC-V is marked experimental because full RISC-V bootability depends on target
+firmware and QEMU machine support.
+
 Known skipped cases:
 
 - `chown` is skipped when the current user lacks permission.
