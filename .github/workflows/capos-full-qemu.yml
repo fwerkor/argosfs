@@ -8,7 +8,7 @@ on:
       run_riscv:
         description: Include experimental riscv64 full-image/QEMU run
         required: false
-        default: "false"
+        default: "true"
       capos_ref:
         description: CapOS git ref to build
         required: false
@@ -56,7 +56,7 @@ jobs:
             experimental: true
             qemu_mem: "1536"
     env:
-      RUN_FULL_TARGET: ${{ matrix.experimental == false || github.event_name == 'schedule' || inputs.run_riscv == 'true' }}
+      RUN_FULL_TARGET: ${{ matrix.experimental == false || github.event_name != 'workflow_dispatch' || inputs.run_riscv == 'true' }}
 
     steps:
       - name: Skip disabled experimental target
@@ -100,6 +100,7 @@ jobs:
           ARGOSFS_CAPOS_BUILD_TARGET: ${{ matrix.capos_target }}
           ARGOSFS_CAPOS_MAKE_JOBS: ${{ matrix.make_jobs }}
           ARGOSFS_CAPOS_IMAGE_MAKE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.make_target || 'world' }}
+          ARGOSFS_CAPOS_MAKE_V: s
           ARGOSFS_CAPOS_DL_DIR: ${{ runner.temp }}/capos-dl
           CAPOS_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || 'main' }}
         run: scripts/build_capos_qemu_image.sh

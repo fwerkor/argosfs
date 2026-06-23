@@ -23,6 +23,20 @@ system_pkg_config_libdir="$(
 rm -rf "$artifacts"
 mkdir -p "$artifacts/argosfs-src" "$artifacts/capos"
 
+run_logged() {
+	local log="$1"
+	shift
+	mkdir -p "$(dirname "$log")"
+	echo
+	echo "==> $*"
+	echo "    log: $log"
+	set +e
+	"$@" 2>&1 | tee "$log"
+	local status="${PIPESTATUS[0]}"
+	set -e
+	return "$status"
+}
+
 rsync -a --delete \
 	--exclude /.git \
 	--exclude /target \
@@ -291,8 +305,7 @@ verify_capos_argosfs_config() {
 	local target="$1"
 	local log="$artifacts/capos-defconfig-$target.log"
 	write_capos_target_config "$target"
-	if ! make defconfig >"$log" 2>&1; then
-		cat "$log" >&2
+	if ! run_logged "$log" make defconfig; then
 		return 1
 	fi
 	for required in \
@@ -337,12 +350,11 @@ if [ "$capos_full_compile" = "1" ]; then
 		done
 		IFS="$old_ifs"
 		write_capos_target_config "$capos_build_target"
-		make defconfig >"$artifacts/capos-defconfig-build-$capos_build_target.log" 2>&1
+		run_logged "$artifacts/capos-defconfig-build-$capos_build_target.log" make defconfig
 		make_args=()
 		[ -z "$capos_make_v" ] || make_args+=("V=$capos_make_v")
 		if [ -n "$capos_tools_target" ]; then
-			if ! make -j"$capos_make_jobs" "$capos_tools_target" "${make_args[@]}" >"$artifacts/capos-tools-build.log" 2>&1; then
-				tail -n 200 "$artifacts/capos-tools-build.log" >&2 || true
+			if ! run_logged "$artifacts/capos-tools-build.log" make -j"$capos_make_jobs" "$capos_tools_target" "${make_args[@]}"; then
 				exit 1
 			fi
 		else
@@ -350,11 +362,11 @@ if [ "$capos_full_compile" = "1" ]; then
 			mkdir -p staging_dir/host/bin
 			ln -sf "$host_pkg_config" staging_dir/host/bin/pkg-config
 		fi
-		if ! ARGOSFS_CI_LOCAL_SOURCE=1 \
+		if ! run_logged "$artifacts/capos-argosfs-build.log" \
+			env ARGOSFS_CI_LOCAL_SOURCE=1 \
 			ARGOSFS_LOCAL_SOURCE="$artifacts/argosfs-src" \
 			ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR="$system_pkg_config_libdir" \
-			make -j"$capos_make_jobs" "$capos_make_target" "${make_args[@]}" >"$artifacts/capos-argosfs-build.log" 2>&1; then
-			tail -n 200 "$artifacts/capos-argosfs-build.log" >&2 || true
+			make -j"$capos_make_jobs" "$capos_make_target" "${make_args[@]}"; then
 			exit 1
 		fi
 		host_argosfs="staging_dir/hostpkg/bin/argosfs"
