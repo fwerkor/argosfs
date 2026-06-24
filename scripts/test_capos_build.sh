@@ -128,7 +128,8 @@ cat >"$artifacts/capos/package/utils/argosfs/Makefile" <<'MAKEFILE'
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=argosfs
-PKG_RELEASE:=ci
+PKG_VERSION:=0.1.0
+PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/fwerkor/argosfs
