@@ -144,11 +144,30 @@ PKG_MAINTAINER:=FWERKOR
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=LICENSE
 
+PKG_BUILD_DEPENDS:=rust/host fuse3 argosfs/host
+HOST_BUILD_DEPENDS:=rust/host
 PKG_BUILD_PARALLEL:=1
 HOST_BUILD_PARALLEL:=1
 
 include $(INCLUDE_DIR)/host-build.mk
 include $(INCLUDE_DIR)/package.mk
+include $(TOPDIR)/feeds/packages/lang/rust/rust-package.mk
+include $(TOPDIR)/feeds/packages/lang/rust/rust-host-build.mk
+
+HOST_FUSE3_PKG_CONFIG_LIBDIR:=$(ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR)
+ifeq ($(strip $(HOST_FUSE3_PKG_CONFIG_LIBDIR)),)
+HOST_FUSE3_PKG_CONFIG_LIBDIR:=$(shell env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_PATH -u PKG_CONFIG_SYSROOT_DIR PATH=/usr/local/bin:/usr/bin:/bin pkg-config --variable pc_path pkg-config 2>/dev/null)
+endif
+
+CARGO_HOST_VARS += \
+	PKG_CONFIG_ALLOW_CROSS=0 \
+	PKG_CONFIG_LIBDIR=$(STAGING_DIR_HOSTPKG)/lib/pkgconfig:$(STAGING_DIR_HOST)/lib/pkgconfig:$(HOST_FUSE3_PKG_CONFIG_LIBDIR)
+
+CARGO_PKG_VARS += \
+	PKG_CONFIG_ALLOW_CROSS=1 \
+	PKG_CONFIG_SYSROOT_DIR=$(STAGING_DIR) \
+	PKG_CONFIG_LIBDIR=$(STAGING_DIR)/usr/lib/pkgconfig:$(STAGING_DIR)/usr/share/pkgconfig \
+	PKG_CONFIG_PATH=$(STAGING_DIR)/usr/lib/pkgconfig:$(STAGING_DIR)/usr/share/pkgconfig
 
 define Package/argosfs
   SECTION:=utils
@@ -176,21 +195,9 @@ define Host/Prepare
 	cp -a "$(ARGOSFS_LOCAL_SOURCE)" $(HOST_BUILD_DIR)
 endef
 
-define Host/Compile
-	cd $(HOST_BUILD_DIR) && \
-		PKG_CONFIG_LIBDIR="$(STAGING_DIR_HOSTPKG)/lib/pkgconfig:$(STAGING_DIR_HOST)/lib/pkgconfig:$(ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR)" \
-		CARGO_TARGET_DIR="$(HOST_BUILD_DIR)/target" \
-		cargo build --bin argosfs --locked
-endef
-
-define Host/Install
-	$(INSTALL_DIR) $(HOST_INSTALL_DIR)/bin
-	$(INSTALL_BIN) $(HOST_BUILD_DIR)/target/debug/argosfs $(HOST_INSTALL_DIR)/bin/argosfs
-endef
-
 define Package/argosfs/install
 	$(INSTALL_DIR) $(1)/usr/sbin
-	$(INSTALL_BIN) $(HOST_INSTALL_DIR)/bin/argosfs $(1)/usr/sbin/argosfs
+	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/bin/argosfs $(1)/usr/sbin/argosfs
 	$(INSTALL_DIR) $(1)/lib/argosfs
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/contrib/capos/initramfs/argosfs-root.sh $(1)/lib/argosfs/argosfs-root.sh
 	$(INSTALL_DIR) $(1)/lib/argosfs/initramfs-hooks
@@ -208,6 +215,7 @@ define Package/argosfs/install
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/contrib/capos/systemd/argosfs-recovery.target $(1)/lib/systemd/system/
 endef
 
+$(eval $(call RustBinHostBuild))
 $(eval $(call HostBuild))
 $(eval $(call BuildPackage,argosfs))
 MAKEFILE
