@@ -10,9 +10,9 @@ on:
         required: false
         default: "true"
       capos_ref:
-        description: CapOS git ref to build
+        description: CapOS git ref to build; leave empty to use the pinned ArgosFS CI baseline
         required: false
-        default: main
+        default: ""
       make_target:
         description: CapOS make target for full image build
         required: false
@@ -29,6 +29,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  ARGOSFS_CAPOS_REF: af93e085759c8f4a9c522d6e6a9f4f0675fb3400
 
 jobs:
   capos-full-qemu:
@@ -102,7 +103,7 @@ jobs:
           ARGOSFS_CAPOS_IMAGE_MAKE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.make_target || 'world' }}
           ARGOSFS_CAPOS_LOG_STDOUT: filtered
           ARGOSFS_CAPOS_DL_DIR: ${{ runner.temp }}/capos-dl
-          CAPOS_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || 'main' }}
+          CAPOS_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}
         run: scripts/build_capos_qemu_image.sh
 
       - name: Summarize discovered QEMU artifacts
@@ -112,6 +113,8 @@ jobs:
           {
             echo "### Full CapOS QEMU artifacts (${{ matrix.arch }})"
             echo
+            echo "- CapOS ref: '${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}'"
+            echo "- CapOS commit: '$(cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-commit" 2>/dev/null || echo unknown)'"
             echo "- boot mode: '${{ steps.build.outputs.boot_mode }}'"
             echo "- kernel: '${{ steps.build.outputs.kernel }}'"
             echo "- rootfs: '${{ steps.build.outputs.rootfs }}'"
@@ -188,6 +191,7 @@ jobs:
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-full-guest
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-hotplug
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-reboot
+            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-commit
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-*.log
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-config-*
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos/bin/targets

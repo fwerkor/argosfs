@@ -11,6 +11,7 @@ require_bootable="${ARGOSFS_CAPOS_REQUIRE_BOOTABLE:-1}"
 
 rm -rf "$artifacts"
 mkdir -p "$artifacts"
+artifacts="$(cd "$artifacts" && pwd)"
 
 ARGOSFS_TEST_ARTIFACTS="$artifacts" \
 ARGOSFS_CAPOS_FULL_COMPILE=1 \
@@ -20,7 +21,7 @@ ARGOSFS_CAPOS_MAKE_JOBS="$make_jobs" \
 ARGOSFS_CAPOS_MAKE_TARGET="$make_target" \
 ARGOSFS_CAPOS_MAKE_V="${ARGOSFS_CAPOS_MAKE_V:-}" \
 CAPOS_REPO="${CAPOS_REPO:-https://github.com/fwerkor/capos.git}" \
-CAPOS_REF="${CAPOS_REF:-main}" \
+CAPOS_REF="${CAPOS_REF:-af93e085759c8f4a9c522d6e6a9f4f0675fb3400}" \
 CAPOS_LOCAL_SOURCE="${CAPOS_LOCAL_SOURCE:-}" \
 "$repo/scripts/test_capos_build.sh"
 

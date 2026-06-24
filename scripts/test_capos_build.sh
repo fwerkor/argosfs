@@ -4,7 +4,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 artifacts="${ARGOSFS_TEST_ARTIFACTS:-$repo/target/argosfs-test-artifacts/capos-build}"
 capos_repo="${CAPOS_REPO:-https://github.com/fwerkor/capos.git}"
-capos_ref="${CAPOS_REF:-main}"
+capos_ref="${CAPOS_REF:-af93e085759c8f4a9c522d6e6a9f4f0675fb3400}"
 capos_local_source="${CAPOS_LOCAL_SOURCE:-}"
 capos_full_compile="${ARGOSFS_CAPOS_FULL_COMPILE:-1}"
 capos_make_jobs="${ARGOSFS_CAPOS_MAKE_JOBS:-$(nproc 2>/dev/null || echo 2)}"
@@ -22,6 +22,8 @@ system_pkg_config_libdir="$(
 )"
 
 rm -rf "$artifacts"
+mkdir -p "$artifacts"
+artifacts="$(cd "$artifacts" && pwd)"
 mkdir -p "$artifacts/argosfs-src" "$artifacts/capos"
 
 filter_capos_log_for_stdout() {
@@ -70,6 +72,29 @@ run_logged() {
 	return "$status"
 }
 
+fetch_capos_ref() {
+	local ref="$1"
+	git fetch --depth 1 origin "$ref" && return 0
+	git fetch --depth 1 origin "refs/heads/$ref" && return 0
+	git fetch --depth 1 origin "refs/tags/$ref" && return 0
+	return 1
+}
+
+clone_capos_repo() {
+	local dest="$1"
+	local ref="$2"
+
+	echo "Checking out CapOS ref $ref from $capos_repo"
+	git init --initial-branch=main "$dest"
+	(
+		cd "$dest"
+		git remote add origin "$capos_repo"
+		fetch_capos_ref "$ref"
+		git checkout --detach FETCH_HEAD
+		git rev-parse HEAD | tee "$artifacts/capos-commit"
+	)
+}
+
 rsync -a --delete \
 	--exclude /.git \
 	--exclude /target \
@@ -83,8 +108,9 @@ if [ -n "$capos_local_source" ]; then
 		--exclude /tmp \
 		--exclude /dl \
 		"$capos_local_source"/ "$artifacts/capos"/
+	git -C "$capos_local_source" rev-parse HEAD >"$artifacts/capos-commit" 2>/dev/null || echo local-source >"$artifacts/capos-commit"
 else
-	git clone --depth 1 --branch "$capos_ref" "$capos_repo" "$artifacts/capos"
+	clone_capos_repo "$artifacts/capos" "$capos_ref"
 fi
 if [ -n "$capos_dl_dir" ]; then
 	mkdir -p "$capos_dl_dir"
