@@ -19,17 +19,17 @@ and makes it the default rootfs image type, selecting `argosfs`, `kmod-fuse`,
 The package source URL is the GitHub repository, not a local relative checkout.
 
 The image builder creates a loop-backed ArgosFS pool and imports the prepared
-CapOS root tree with metadata batching enabled by default:
+CapOS root tree with build-time batching enabled by default:
 
 ```bash
 argosfs mkfs --backend loop --images disk0.img --k 1 --m 0 \
-  --defer-journal-flush --defer-metadata-commit
+  --defer-journal-flush --defer-metadata-commit --defer-data-flush
 argosfs import-tree --backend loop --images disk0.img ROOT /
 ```
 
-CapOS does not enable `--defer-data-flush` for normal rootfs images. Data flush
-is reserved for explicit bulk/update/build modes where losing the latest writes
-is acceptable and a final sync/fsck boundary is enforced.
+These acceleration flags are used while constructing the immutable image. The
+resulting rootfs still goes through the normal preflight/fsck boundary before it
+is mounted as a runtime root filesystem.
 
 The single-device image can evolve online into redundant layouts as devices are
 added:

@@ -251,7 +251,7 @@ SH
 	grep -q 'define Image/mkfs/argosfs' include/image.mk
 	grep -q -- '--defer-journal-flush' include/image.mk
 	grep -q -- '--defer-metadata-commit' include/image.mk
-	! grep -q -- '--defer-data-flush' include/image.mk
+	grep -q -- '--defer-data-flush' include/image.mk
 )
 
 write_capos_target_config() {
