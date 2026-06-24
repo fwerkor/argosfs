@@ -76,7 +76,10 @@ jobs:
           ARGOSFS_CAPOS_BUILD_TARGET: ${{ matrix.capos_target }}
           ARGOSFS_CAPOS_MAKE_JOBS: ${{ matrix.make_jobs }}
           ARGOSFS_CAPOS_IMAGE_MAKE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.make_target || 'world' }}
-          ARGOSFS_CAPOS_LOG_STDOUT: filtered
+          ARGOSFS_CAPOS_MAKE_V: s
+          ARGOSFS_CAPOS_LOG_STDOUT: periodic
+          ARGOSFS_CI_LOG_INTERVAL_S: "120"
+          ARGOSFS_CI_LOG_TAIL_LINES: "35"
           ARGOSFS_CAPOS_DL_DIR: ${{ runner.temp }}/capos-dl
           CAPOS_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}
         run: scripts/build_capos_qemu_image.sh

@@ -241,7 +241,7 @@ jobs:
       - name: Check shell syntax
         run: |
           sh -n contrib/initramfs/argosfs-root.sh contrib/capos/initramfs/argosfs-root.sh contrib/capos/initramfs/hooks/argosfs
-          bash -n scripts/*.sh scripts/compat/*.sh scripts/experiments/*.sh
+          bash -n scripts/*.sh scripts/ci/*.sh scripts/compat/*.sh scripts/experiments/*.sh
 
       - name: Run retained validation workflow
         run: python3 scripts/run_full_validation.py --output "$RUNNER_TEMP/argosfs-validation"
@@ -342,7 +342,10 @@ jobs:
           ARGOSFS_CAPOS_TARGET_MATRIX: ${{ matrix.capos_target }}
           ARGOSFS_CAPOS_BUILD_TARGET: ${{ matrix.capos_target }}
           ARGOSFS_CAPOS_MAKE_JOBS: "2"
-          ARGOSFS_CAPOS_LOG_STDOUT: filtered
+          ARGOSFS_CAPOS_MAKE_V: s
+          ARGOSFS_CAPOS_LOG_STDOUT: periodic
+          ARGOSFS_CI_LOG_INTERVAL_S: "120"
+          ARGOSFS_CI_LOG_TAIL_LINES: "35"
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/argosfs-capos-${{ matrix.capos_target }}
         run: scripts/test_capos_build.sh
 

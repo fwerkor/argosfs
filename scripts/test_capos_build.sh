@@ -51,6 +51,11 @@ run_logged() {
 	set +e
 	local status
 	case "$capos_log_stdout" in
+		periodic)
+			"$repo/scripts/ci/run-with-log.sh" \
+				"$log" "CapOS $(basename "$log" .log)" -- "$@"
+			status="$?"
+			;;
 		full)
 			"$@" 2>&1 | tee "$log"
 			status="${PIPESTATUS[0]}"
