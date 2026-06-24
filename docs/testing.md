@@ -164,10 +164,9 @@ The default GitHub Actions workflow splits validation into parallel jobs:
 - Host CLI feature tests on x86_64 and arm64.
 - Loop-block lifecycle tests on x86_64 and arm64.
 - Compatibility/rootfs smoke suites split by test family.
-- Artifact-gated QEMU boot, guest operation, and hotplug harnesses for x86_64,
-  arm64, and riscv64.
-- CapOS target compile smoke jobs for `x86_64`, `armsr_armv8`, and
-  `riscv64_sifiveu`.
+- Artifact-gated QEMU boot, guest operation, and hotplug harnesses for x86_64
+  and arm64.
+- CapOS target compile smoke jobs for `x86_64` and `armsr_armv8`.
 
 
 ## Full CapOS QEMU CI
@@ -181,7 +180,6 @@ Default full targets:
 
 - `x86_64` / CapOS `x86_64`
 - `arm64` / CapOS `armsr_armv8`
-- optional experimental `riscv64` / CapOS `riscv64_sifiveu`
 
 The full guest test covers:
 
@@ -199,8 +197,6 @@ The full guest test covers:
 
 The workflow uploads the CapOS build logs, target configs, discovered QEMU
 artifact manifest, serial logs, QEMU command files, and `bin/targets` outputs.
-RISC-V is marked experimental because full RISC-V bootability depends on target
-firmware and QEMU machine support.
 
 Known skipped cases:
 

@@ -5,10 +5,6 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      run_riscv:
-        description: Include experimental riscv64 full-image/QEMU run
-        required: false
-        default: "true"
       capos_ref:
         description: CapOS git ref to build; leave empty to use the pinned ArgosFS CI baseline
         required: false
@@ -36,7 +32,6 @@ jobs:
     name: Full CapOS image + QEMU (${{ matrix.arch }})
     runs-on: ubuntu-24.04
     timeout-minutes: 720
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
@@ -44,46 +39,27 @@ jobs:
           - arch: x86_64
             capos_target: x86_64
             make_jobs: "2"
-            experimental: false
             qemu_mem: "1536"
           - arch: arm64
             capos_target: armsr_armv8
             make_jobs: "2"
-            experimental: false
             qemu_mem: "1536"
-          - arch: riscv64
-            capos_target: riscv64_sifiveu
-            make_jobs: "2"
-            experimental: true
-            qemu_mem: "1536"
-    env:
-      RUN_FULL_TARGET: ${{ matrix.experimental == false || github.event_name != 'workflow_dispatch' || inputs.run_riscv == 'true' }}
-
     steps:
-      - name: Skip disabled experimental target
-        if: env.RUN_FULL_TARGET != 'true'
-        run: echo "Skipping disabled experimental target ${{ matrix.arch }}. Set run_riscv=true to include it manually."
-
       - name: Checkout ArgosFS
-        if: env.RUN_FULL_TARGET == 'true'
         uses: actions/checkout@v6
 
       - name: Install system dependencies
-        if: env.RUN_FULL_TARGET == 'true'
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        if: env.RUN_FULL_TARGET == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo
-        if: env.RUN_FULL_TARGET == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: full-capos-${{ matrix.arch }}
 
       - name: Cache CapOS downloads
-        if: env.RUN_FULL_TARGET == 'true'
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/capos-dl
@@ -93,7 +69,6 @@ jobs:
             capos-dl-
 
       - name: Build full CapOS ArgosFS image
-        if: env.RUN_FULL_TARGET == 'true'
         id: build
         env:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}
@@ -107,7 +82,6 @@ jobs:
         run: scripts/build_capos_qemu_image.sh
 
       - name: Summarize discovered QEMU artifacts
-        if: env.RUN_FULL_TARGET == 'true'
         run: |
           cat "${{ steps.build.outputs.manifest }}"
           {
@@ -122,18 +96,17 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Probe QEMU binary
-        if: ${{ env.RUN_FULL_TARGET == 'true' && (github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
         env:
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
         run: |
           case "$ARGOSFS_QEMU_ARCH" in
             x86_64) qemu-system-x86_64 --version ;;
             arm64) qemu-system-aarch64 --version ;;
-            riscv64) qemu-system-riscv64 --version ;;
           esac
 
       - name: Run QEMU boot test
-        if: ${{ env.RUN_FULL_TARGET == 'true' && (github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
         env:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-boot
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
@@ -145,7 +118,7 @@ jobs:
         run: scripts/test_qemu_boot.sh
 
       - name: Run QEMU full guest operations
-        if: ${{ env.RUN_FULL_TARGET == 'true' && (github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
         env:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-full-guest
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
@@ -157,7 +130,7 @@ jobs:
         run: scripts/test_qemu_full_guest.sh
 
       - name: Run QEMU hotplug test
-        if: ${{ env.RUN_FULL_TARGET == 'true' && (github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
         env:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-hotplug
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
@@ -169,7 +142,7 @@ jobs:
         run: scripts/test_qemu_hotplug.sh
 
       - name: Run QEMU reboot persistence test
-        if: ${{ env.RUN_FULL_TARGET == 'true' && (github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true') }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
         env:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-reboot
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}

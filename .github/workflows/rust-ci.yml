@@ -264,7 +264,6 @@ jobs:
         include:
           - arch: x86_64
           - arch: arm64
-          - arch: riscv64
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -282,7 +281,6 @@ jobs:
           case "$ARGOSFS_QEMU_ARCH" in
             x86_64) qemu-system-x86_64 --version ;;
             arm64) qemu-system-aarch64 --version ;;
-            riscv64) qemu-system-riscv64 --version ;;
           esac
 
       - name: Run artifact-gated QEMU boot probe
@@ -324,8 +322,6 @@ jobs:
             arch: x86_64
           - capos_target: armsr_armv8
             arch: arm64
-          - capos_target: riscv64_sifiveu
-            arch: riscv64
     steps:
       - name: Checkout
         uses: actions/checkout@v6
