@@ -21,7 +21,7 @@ ARGOSFS_CAPOS_MAKE_JOBS="$make_jobs" \
 ARGOSFS_CAPOS_MAKE_TARGET="$make_target" \
 ARGOSFS_CAPOS_MAKE_V="${ARGOSFS_CAPOS_MAKE_V:-}" \
 CAPOS_REPO="${CAPOS_REPO:-https://github.com/fwerkor/capos.git}" \
-CAPOS_REF="${CAPOS_REF:-9d839a752a6c702ec2ef6d0558a58a21be6be6b2}" \
+CAPOS_REF="${CAPOS_REF:-ci-real-qemu-boot-checks}" \
 CAPOS_LOCAL_SOURCE="${CAPOS_LOCAL_SOURCE:-}" \
 "$repo/scripts/test_capos_build.sh"
 
