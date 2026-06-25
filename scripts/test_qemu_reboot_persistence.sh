@@ -46,6 +46,7 @@ echo ARGOSFS_QEMU_REBOOT_DONE
 poweroff -f || reboot -f || halt -f
 CMDS
 
+export ARGOSFS_QEMU_NO_REBOOT=0
 argosfs_qemu_build_args
 
 set +e

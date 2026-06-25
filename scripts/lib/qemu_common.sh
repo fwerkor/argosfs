@@ -79,8 +79,10 @@ argosfs_qemu_build_args() {
 		-m "${ARGOSFS_QEMU_MEM:-1024}"
 		"${cpu_args[@]}"
 		-nographic
-		-no-reboot
 	)
+	if [ "${ARGOSFS_QEMU_NO_REBOOT:-1}" = "1" ]; then
+		qemu_args+=(-no-reboot)
+	fi
 	if [ -n "$firmware_code" ]; then
 		if [ ! -e "$firmware_code" ]; then
 			echo "ARGOSFS_QEMU_FIRMWARE_CODE does not exist: $firmware_code" >&2
