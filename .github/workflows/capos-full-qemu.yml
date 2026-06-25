@@ -42,7 +42,7 @@ jobs:
             qemu_mem: "1536"
           - arch: arm64
             capos_target: armsr_armv8
-            make_jobs: "2"
+            make_jobs: "1"
             qemu_mem: "1536"
     steps:
       - name: Checkout ArgosFS
@@ -50,6 +50,23 @@ jobs:
 
       - name: Install system dependencies
         run: scripts/ci_install_deps.sh
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/node \
+            /opt/hostedtoolcache/Python \
+            /usr/local/.ghcup || true
+          docker system prune -af --volumes || true
+          sudo apt-get clean
+          df -h
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
