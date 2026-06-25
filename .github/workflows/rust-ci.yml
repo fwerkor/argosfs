@@ -81,7 +81,7 @@ jobs:
           key: rust-unit-${{ matrix.arch }}
 
       - name: Run tests
-        run: cargo test --all-targets --all-features
+        run: cargo test --all-targets --all-features -- --test-threads=1
 
       - name: Build release binary
         run: cargo build --release --all-targets --all-features
