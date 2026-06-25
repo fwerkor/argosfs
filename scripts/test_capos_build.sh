@@ -192,6 +192,9 @@ endef
 
 define Host/Compile
 	cd $(HOST_BUILD_DIR) && \
+		CARGO_HOME="$(DL_DIR)/cargo" \
+		CARGO_HTTP_MULTIPLEXING=false \
+		CARGO_NET_RETRY=10 \
 		PKG_CONFIG_ALLOW_CROSS=0 \
 		PKG_CONFIG_LIBDIR="$(STAGING_DIR_HOSTPKG)/lib/pkgconfig:$(STAGING_DIR_HOST)/lib/pkgconfig:$(HOST_FUSE3_PKG_CONFIG_LIBDIR)" \
 		CARGO_TARGET_DIR="$(HOST_BUILD_DIR)/target" \
@@ -199,8 +202,9 @@ define Host/Compile
 endef
 
 define Host/Install
-	$(INSTALL_DIR) $(HOST_INSTALL_DIR)/bin
+	$(INSTALL_DIR) $(HOST_INSTALL_DIR)/bin $(STAGING_DIR_HOSTPKG)/bin
 	$(INSTALL_BIN) $(HOST_BUILD_DIR)/target/debug/argosfs $(HOST_INSTALL_DIR)/bin/argosfs
+	$(INSTALL_BIN) $(HOST_BUILD_DIR)/target/debug/argosfs $(STAGING_DIR_HOSTPKG)/bin/argosfs
 endef
 
 define Package/argosfs/install
