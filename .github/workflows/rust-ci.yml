@@ -35,9 +35,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+        run: scripts/ci_install_rust.sh stable rustfmt clippy
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -73,7 +71,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -106,7 +104,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -146,7 +144,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -194,7 +192,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -228,7 +226,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -330,7 +328,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
