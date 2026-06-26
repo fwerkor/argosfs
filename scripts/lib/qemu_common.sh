@@ -62,6 +62,20 @@ argosfs_qemu_decompress_if_needed() {
 	esac
 }
 
+argosfs_qemu_find_arm64_uefi() {
+	local candidate
+	for candidate in \
+		/usr/share/AAVMF/AAVMF_CODE.fd \
+		/usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+		/usr/share/edk2/aarch64/QEMU_EFI.fd; do
+		if [ -r "$candidate" ]; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
 argosfs_qemu_build_args() {
 	kernel="${ARGOSFS_QEMU_KERNEL:-}"
 	rootfs="${ARGOSFS_QEMU_ROOTFS:-}"
@@ -96,6 +110,13 @@ argosfs_qemu_build_args() {
 			fi
 			qemu_args+=(-drive "if=pflash,format=raw,file=$firmware_vars")
 		fi
+	elif [ "$arch" = "arm64" ] && [ -z "$kernel" ] && [ -n "$disk_image" ]; then
+		firmware_code="$(argosfs_qemu_find_arm64_uefi || true)"
+		if [ -z "$firmware_code" ]; then
+			echo "missing AArch64 UEFI firmware for disk-image boot" >&2
+			exit 1
+		fi
+		qemu_args+=(-bios "$firmware_code")
 	fi
 	if [ -n "$kernel" ]; then
 		if [ ! -e "$kernel" ]; then
