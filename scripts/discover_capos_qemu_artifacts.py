@@ -77,6 +77,12 @@ def main() -> int:
         kernel = first(kernels, ["initramfs", "generic-kernel", "image"])
         rootfs = first(rootfses, ["rootfs", "argosfs"])
         disk = first(disks, ["combined-efi", "combined", "generic"])
+        # arm64 now uses compressed EFI/GRUB kernels. Prefer the complete UEFI
+        # disk image for QEMU so the same boot path is tested as release images,
+        # instead of asking qemu -kernel to load a compressed kernel directly.
+        if disk is not None:
+            kernel = None
+            rootfs = None
     else:
         kernel = first(kernels, ["initramfs", "image", "kernel"])
         rootfs = first(rootfses, ["rootfs", "argosfs"])
