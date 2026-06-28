@@ -28,8 +28,6 @@ if old not in text:
     raise SystemExit("expected armsr kernel partition override was not found")
 path.write_text(text.replace(old, new, 1))
 PY
-	grep -q 'CONFIG_GRUB_BOOTOPTS="argosfs.images=/dev/vda2"' scripts/test_capos_build.sh || \
-		sed -i '/CONFIG_TARGET_SERIAL="ttyS0"/a CONFIG_GRUB_BOOTOPTS="argosfs.images=/dev/vda2"' scripts/test_capos_build.sh
 fi
 
 ARGOSFS_TEST_ARTIFACTS="$artifacts" \
