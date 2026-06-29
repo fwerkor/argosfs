@@ -65,9 +65,9 @@ argosfs_qemu_decompress_if_needed() {
 argosfs_qemu_find_arm64_uefi() {
 	local candidate
 	for candidate in \
-		/usr/share/AAVMF/AAVMF_CODE.fd \
 		/usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
-		/usr/share/edk2/aarch64/QEMU_EFI.fd; do
+		/usr/share/edk2/aarch64/QEMU_EFI.fd \
+		/usr/share/AAVMF/AAVMF_CODE.fd; do
 		if [ -r "$candidate" ]; then
 			echo "$candidate"
 			return 0

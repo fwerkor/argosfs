@@ -68,6 +68,24 @@ jobs:
           sudo apt-get clean
           df -h
 
+      - name: Probe QEMU host prerequisites
+        env:
+          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          source scripts/lib/qemu_common.sh
+          argosfs_qemu_select_arch
+          argosfs_qemu_require_binary
+          "$qemu_bin" --version
+          if [ "$arch" = "arm64" ]; then
+            firmware="$(argosfs_qemu_find_arm64_uefi || true)"
+            if [ -z "$firmware" ]; then
+              echo "missing AArch64 UEFI firmware for arm64 disk-image boot" >&2
+              exit 1
+            fi
+            echo "AArch64 UEFI firmware: $firmware"
+          fi
+
       - name: Install Rust toolchain
         run: scripts/ci_install_rust.sh stable
 

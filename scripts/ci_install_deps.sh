@@ -29,6 +29,7 @@ sudo apt-get install -y --no-install-recommends \
 
 optional_packages=(
 	gcc-multilib
+	qemu-efi-aarch64
 	qemu-system-arm
 	qemu-system-misc
 	qemu-system-x86
