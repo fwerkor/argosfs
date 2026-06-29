@@ -25,7 +25,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  ARGOSFS_CAPOS_REF: ci-real-qemu-boot-checks
+  ARGOSFS_CAPOS_REF: 9e636b9b45941e9d9219af97054b4c661d416294
 
 jobs:
   capos-full-qemu:
