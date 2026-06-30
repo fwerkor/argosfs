@@ -30,17 +30,19 @@ env:
 jobs:
   capos-full-qemu:
     name: Full CapOS image + QEMU (${{ matrix.arch }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 720
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
+            runner: ubuntu-24.04
             capos_target: x86_64
             make_jobs: "2"
             qemu_mem: "1536"
           - arch: arm64
+            runner: ubuntu-24.04-arm
             capos_target: armsr_armv8
             make_jobs: "1"
             qemu_mem: "1536"
@@ -49,6 +51,8 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install system dependencies
+        env:
+          ARGOSFS_CI_QEMU_ARCH: ${{ matrix.arch }}
         run: scripts/ci_install_deps.sh
 
       - name: Free runner disk space
@@ -116,6 +120,9 @@ jobs:
           ARGOSFS_CI_LOG_INTERVAL_S: "120"
           ARGOSFS_CI_LOG_TAIL_LINES: "35"
           ARGOSFS_CAPOS_DL_DIR: ${{ runner.temp }}/capos-dl
+          ARGOSFS_CAPOS_PREBUILD_ARGOSFS: "1"
+          ARGOSFS_CAPOS_PRUNE_CARGO_TARGET: "1"
+          ARGOSFS_CI_LIGHT_RUST_PROFILE: "1"
           CAPOS_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}
         run: scripts/build_capos_qemu_image.sh
 

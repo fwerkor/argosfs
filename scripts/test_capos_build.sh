@@ -10,6 +10,9 @@ capos_full_compile="${ARGOSFS_CAPOS_FULL_COMPILE:-1}"
 capos_make_jobs="${ARGOSFS_CAPOS_MAKE_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 capos_make_target="${ARGOSFS_CAPOS_MAKE_TARGET:-package/utils/argosfs/host/compile}"
 capos_tools_target="${ARGOSFS_CAPOS_TOOLS_TARGET:-}"
+capos_prebuild_argosfs="${ARGOSFS_CAPOS_PREBUILD_ARGOSFS:-0}"
+capos_prune_cargo_target="${ARGOSFS_CAPOS_PRUNE_CARGO_TARGET:-0}"
+argosfs_ci_light_rust_profile="${ARGOSFS_CI_LIGHT_RUST_PROFILE:-0}"
 capos_make_v="${ARGOSFS_CAPOS_MAKE_V:-}"
 capos_log_stdout="${ARGOSFS_CAPOS_LOG_STDOUT:-full}"
 capos_target_matrix="${ARGOSFS_CAPOS_TARGET_MATRIX:-x86_64,armsr_armv8}"
@@ -39,6 +42,31 @@ filter_capos_log_for_stdout() {
 		/^\[[0-9]+\/[0-9]+\][[:space:]]+(Building|Linking|Generating|Install|Installing)/ { print; fflush(); next }
 		/^[[:space:]]*(CC|CXX|LD|AR|INSTALL|CP|GEN|HOSTCC|HOSTLD|MODPOST)[[:space:]\[]/ { print; fflush(); next }
 	'
+}
+
+report_disk_usage() {
+	local label="$1"
+	echo
+	echo "==> Disk usage: $label"
+	df -h "$artifacts" "$artifacts/capos" 2>/dev/null || df -h
+	if [ -d "$artifacts/capos" ]; then
+		du -xhd1 "$artifacts/capos" 2>/dev/null | sort -h | tail -n 20 || true
+	fi
+}
+
+prune_capos_argosfs_cargo_targets() {
+	[ "$capos_prune_cargo_target" = "1" ] || return 0
+	[ -d "$artifacts/capos/build_dir" ] || return 0
+	local removed=0
+	while IFS= read -r target_dir; do
+		[ -d "$target_dir" ] || continue
+		echo "Pruning Cargo target directory: $target_dir"
+		rm -rf "$target_dir"
+		removed=1
+	done < <(find "$artifacts/capos/build_dir" -path '*/argosfs-*/target' -type d 2>/dev/null)
+	if [ "$removed" = "1" ]; then
+		report_disk_usage "after ArgosFS Cargo target prune"
+	fi
 }
 
 run_logged() {
@@ -163,6 +191,12 @@ CARGO_PKG_VARS += \
 	PKG_CONFIG_SYSROOT_DIR=$(STAGING_DIR) \
 	PKG_CONFIG_LIBDIR=$(STAGING_DIR)/usr/lib/pkgconfig:$(STAGING_DIR)/usr/share/pkgconfig \
 	PKG_CONFIG_PATH=$(STAGING_DIR)/usr/lib/pkgconfig:$(STAGING_DIR)/usr/share/pkgconfig
+
+ifeq ($(ARGOSFS_CI_LIGHT_RUST_PROFILE),1)
+CARGO_PKG_VARS += \
+	CARGO_PROFILE_RELEASE_LTO=false \
+	CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+endif
 
 define Package/argosfs
   SECTION:=utils
@@ -416,6 +450,10 @@ verify_capos_argosfs_config() {
 PKG_CONFIG_LIBDIR="$system_pkg_config_libdir" pkg-config --exists fuse3
 cargo build --manifest-path "$artifacts/argosfs-src/Cargo.toml" --bin argosfs --locked
 "$artifacts/argosfs-src/target/debug/argosfs" --help >/dev/null
+if [ "$capos_prune_cargo_target" = "1" ]; then
+	rm -rf "$artifacts/argosfs-src/target"
+	report_disk_usage "after host ArgosFS smoke target prune"
+fi
 
 if [ "$capos_full_compile" = "1" ]; then
 	(
@@ -445,10 +483,26 @@ if [ "$capos_full_compile" = "1" ]; then
 			mkdir -p staging_dir/host/bin
 			ln -sf "$host_pkg_config" staging_dir/host/bin/pkg-config
 		fi
+		argosfs_make_env=(
+			env ARGOSFS_CI_LOCAL_SOURCE=1
+			ARGOSFS_LOCAL_SOURCE="$artifacts/argosfs-src"
+			ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR="$system_pkg_config_libdir"
+		)
+		if [ "$argosfs_ci_light_rust_profile" = "1" ]; then
+			argosfs_make_env+=(ARGOSFS_CI_LIGHT_RUST_PROFILE=1)
+		fi
+		if [ "$capos_prebuild_argosfs" = "1" ] && [ "$capos_make_target" = "world" ]; then
+			report_disk_usage "before ArgosFS package prebuild"
+			if ! run_logged "$artifacts/capos-argosfs-prebuild.log" \
+				"${argosfs_make_env[@]}" \
+				make -j"$capos_make_jobs" package/utils/argosfs/compile "${make_args[@]}"; then
+				exit 1
+			fi
+			prune_capos_argosfs_cargo_targets
+		fi
+		report_disk_usage "before CapOS $capos_make_target"
 		if ! run_logged "$artifacts/capos-argosfs-build.log" \
-			env ARGOSFS_CI_LOCAL_SOURCE=1 \
-			ARGOSFS_LOCAL_SOURCE="$artifacts/argosfs-src" \
-			ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR="$system_pkg_config_libdir" \
+			"${argosfs_make_env[@]}" \
 			make -j"$capos_make_jobs" "$capos_make_target" "${make_args[@]}"; then
 			exit 1
 		fi
