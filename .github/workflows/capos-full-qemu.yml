@@ -120,6 +120,7 @@ jobs:
           ARGOSFS_CI_LOG_INTERVAL_S: "120"
           ARGOSFS_CI_LOG_TAIL_LINES: "35"
           ARGOSFS_CAPOS_DL_DIR: ${{ runner.temp }}/capos-dl
+          ARGOSFS_CAPOS_TOOLS_TARGET: "tools/install toolchain/install"
           ARGOSFS_CAPOS_PREBUILD_ARGOSFS: "1"
           ARGOSFS_CAPOS_PRUNE_CARGO_TARGET: "1"
           ARGOSFS_CI_LIGHT_RUST_PROFILE: "1"

@@ -475,7 +475,8 @@ if [ "$capos_full_compile" = "1" ]; then
 		make_args=()
 		[ -z "$capos_make_v" ] || make_args+=("V=$capos_make_v")
 		if [ -n "$capos_tools_target" ]; then
-			if ! run_logged "$artifacts/capos-tools-build.log" make -j"$capos_make_jobs" "$capos_tools_target" "${make_args[@]}"; then
+			read -r -a capos_tools_targets <<<"$capos_tools_target"
+			if ! run_logged "$artifacts/capos-tools-build.log" make -j"$capos_make_jobs" "${capos_tools_targets[@]}" "${make_args[@]}"; then
 				exit 1
 			fi
 		else
