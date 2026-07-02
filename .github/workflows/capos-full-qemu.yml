@@ -42,7 +42,7 @@ jobs:
             make_jobs: "2"
             qemu_mem: "1536"
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-24.04
             capos_target: armsr_armv8
             make_jobs: "1"
             qemu_mem: "1536"
@@ -62,11 +62,16 @@ jobs:
           sudo rm -rf \
             /usr/share/dotnet \
             /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/local/share/chromium \
             /opt/ghc \
+            /opt/az \
+            /opt/google-cloud-cli \
             /opt/hostedtoolcache/CodeQL \
             /opt/hostedtoolcache/go \
             /opt/hostedtoolcache/node \
             /opt/hostedtoolcache/Python \
+            /opt/microsoft \
             /usr/local/.ghcup || true
           docker system prune -af --volumes || true
           sudo apt-get clean
