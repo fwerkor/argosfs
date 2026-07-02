@@ -14,7 +14,7 @@ on:
         required: false
         default: world
       qemu_tests:
-        description: Run QEMU boot/full guest/hotplug/reboot tests after image build
+        description: Run QEMU boot/full guest/hotplug/reboot/stress tests after image build
         required: false
         default: "true"
   schedule:
@@ -28,8 +28,8 @@ env:
   ARGOSFS_CAPOS_REF: 9e636b9b45941e9d9219af97054b4c661d416294
 
 jobs:
-  capos-full-qemu:
-    name: Full CapOS image + QEMU (${{ matrix.arch }})
+  capos-full-build:
+    name: Build CapOS QEMU image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 720
     strategy:
@@ -129,91 +129,219 @@ jobs:
           CAPOS_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}
         run: scripts/build_capos_qemu_image.sh
 
+      - name: Pack QEMU bundle
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}
+        run: scripts/ci/pack-qemu-bundle.sh
+
       - name: Summarize discovered QEMU artifacts
         run: |
-          cat "${{ steps.build.outputs.manifest }}"
+          cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu/qemu-artifacts.json"
+          cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-bundle/bundle.env"
           {
-            echo "### Full CapOS QEMU artifacts (${{ matrix.arch }})"
+            echo "### Full CapOS QEMU build (${{ matrix.arch }})"
             echo
             echo "- CapOS ref: '${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}'"
             echo "- CapOS commit: '$(cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-commit" 2>/dev/null || echo unknown)'"
-            echo "- boot mode: '${{ steps.build.outputs.boot_mode }}'"
-            echo "- kernel: '${{ steps.build.outputs.kernel }}'"
-            echo "- rootfs: '${{ steps.build.outputs.rootfs }}'"
-            echo "- disk image: '${{ steps.build.outputs.disk_image }}'"
+            echo "- Bundle: capos-qemu-bundle-${{ matrix.arch }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Probe QEMU binary
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
-        env:
-          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
-        run: |
-          case "$ARGOSFS_QEMU_ARCH" in
-            x86_64) qemu-system-x86_64 --version ;;
-            arm64) qemu-system-aarch64 --version ;;
-          esac
+      - name: Upload QEMU bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: capos-qemu-bundle-${{ matrix.arch }}
+          path: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-bundle
+          if-no-files-found: error
 
-      - name: Run QEMU boot test
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
-        env:
-          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-boot
-          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
-          ARGOSFS_QEMU_MEM: ${{ matrix.qemu_mem }}
-          ARGOSFS_QEMU_KERNEL: ${{ steps.build.outputs.kernel }}
-          ARGOSFS_QEMU_ROOTFS: ${{ steps.build.outputs.rootfs }}
-          ARGOSFS_QEMU_DISK_IMAGE: ${{ steps.build.outputs.disk_image }}
-          ARGOSFS_QEMU_TIMEOUT: "240"
-        run: scripts/test_qemu_boot.sh
-
-      - name: Run QEMU full guest operations
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
-        env:
-          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-full-guest
-          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
-          ARGOSFS_QEMU_MEM: ${{ matrix.qemu_mem }}
-          ARGOSFS_QEMU_KERNEL: ${{ steps.build.outputs.kernel }}
-          ARGOSFS_QEMU_ROOTFS: ${{ steps.build.outputs.rootfs }}
-          ARGOSFS_QEMU_DISK_IMAGE: ${{ steps.build.outputs.disk_image }}
-          ARGOSFS_QEMU_TIMEOUT: "420"
-        run: scripts/test_qemu_full_guest.sh
-
-      - name: Run QEMU hotplug test
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
-        env:
-          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-hotplug
-          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
-          ARGOSFS_QEMU_MEM: ${{ matrix.qemu_mem }}
-          ARGOSFS_QEMU_KERNEL: ${{ steps.build.outputs.kernel }}
-          ARGOSFS_QEMU_ROOTFS: ${{ steps.build.outputs.rootfs }}
-          ARGOSFS_QEMU_DISK_IMAGE: ${{ steps.build.outputs.disk_image }}
-          ARGOSFS_QEMU_TIMEOUT: "420"
-        run: scripts/test_qemu_hotplug.sh
-
-      - name: Run QEMU reboot persistence test
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
-        env:
-          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-reboot
-          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
-          ARGOSFS_QEMU_MEM: ${{ matrix.qemu_mem }}
-          ARGOSFS_QEMU_KERNEL: ${{ steps.build.outputs.kernel }}
-          ARGOSFS_QEMU_ROOTFS: ${{ steps.build.outputs.rootfs }}
-          ARGOSFS_QEMU_DISK_IMAGE: ${{ steps.build.outputs.disk_image }}
-          ARGOSFS_QEMU_TIMEOUT: "480"
-        run: scripts/test_qemu_reboot_persistence.sh
-
-      - name: Upload full CapOS/QEMU artifacts
+      - name: Upload full CapOS build logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: capos-full-qemu-${{ matrix.arch }}
+          name: capos-full-build-${{ matrix.arch }}
           path: |
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu
-            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-boot
-            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-full-guest
-            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-hotplug
-            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-reboot
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-commit
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-*.log
             ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-config-*
-            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos/bin/targets
           if-no-files-found: ignore
+
+  capos-qemu-test:
+    name: QEMU ${{ matrix.suite }} (${{ matrix.arch }})
+    needs: capos-full-build
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.job_timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            suite: boot
+            script: scripts/test_qemu_boot.sh
+            qemu_mem: "1536"
+            qemu_timeout: "300"
+            stress_seconds: ""
+            job_timeout: 20
+          - arch: x86_64
+            suite: full-guest
+            script: scripts/test_qemu_full_guest.sh
+            qemu_mem: "1536"
+            qemu_timeout: "600"
+            stress_seconds: ""
+            job_timeout: 30
+          - arch: x86_64
+            suite: hotplug
+            script: scripts/test_qemu_hotplug.sh
+            qemu_mem: "1536"
+            qemu_timeout: "600"
+            stress_seconds: ""
+            job_timeout: 30
+          - arch: x86_64
+            suite: reboot-persistence
+            script: scripts/test_qemu_reboot_persistence.sh
+            qemu_mem: "1536"
+            qemu_timeout: "720"
+            stress_seconds: ""
+            job_timeout: 35
+          - arch: x86_64
+            suite: rootfs-stress
+            script: scripts/test_qemu_rootfs_stress.sh
+            qemu_mem: "1536"
+            qemu_timeout: "2400"
+            stress_seconds: "1800"
+            job_timeout: 50
+          - arch: x86_64
+            suite: block-lifecycle-stress
+            script: scripts/test_qemu_block_lifecycle_stress.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1800"
+            stress_seconds: ""
+            job_timeout: 45
+          - arch: x86_64
+            suite: degraded-rootfs
+            script: scripts/test_qemu_degraded_rootfs.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1200"
+            stress_seconds: ""
+            job_timeout: 35
+          - arch: x86_64
+            suite: crash-recovery
+            script: scripts/test_qemu_crash_recovery.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1800"
+            stress_seconds: ""
+            job_timeout: 45
+          - arch: arm64
+            suite: boot
+            script: scripts/test_qemu_boot.sh
+            qemu_mem: "1536"
+            qemu_timeout: "300"
+            stress_seconds: ""
+            job_timeout: 20
+          - arch: arm64
+            suite: full-guest
+            script: scripts/test_qemu_full_guest.sh
+            qemu_mem: "1536"
+            qemu_timeout: "600"
+            stress_seconds: ""
+            job_timeout: 30
+          - arch: arm64
+            suite: hotplug
+            script: scripts/test_qemu_hotplug.sh
+            qemu_mem: "1536"
+            qemu_timeout: "600"
+            stress_seconds: ""
+            job_timeout: 30
+          - arch: arm64
+            suite: reboot-persistence
+            script: scripts/test_qemu_reboot_persistence.sh
+            qemu_mem: "1536"
+            qemu_timeout: "720"
+            stress_seconds: ""
+            job_timeout: 35
+          - arch: arm64
+            suite: rootfs-stress
+            script: scripts/test_qemu_rootfs_stress.sh
+            qemu_mem: "1536"
+            qemu_timeout: "2400"
+            stress_seconds: "1800"
+            job_timeout: 50
+          - arch: arm64
+            suite: block-lifecycle-stress
+            script: scripts/test_qemu_block_lifecycle_stress.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1800"
+            stress_seconds: ""
+            job_timeout: 45
+          - arch: arm64
+            suite: degraded-rootfs
+            script: scripts/test_qemu_degraded_rootfs.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1200"
+            stress_seconds: ""
+            job_timeout: 35
+          - arch: arm64
+            suite: crash-recovery
+            script: scripts/test_qemu_crash_recovery.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1800"
+            stress_seconds: ""
+            job_timeout: 45
+    steps:
+      - name: Checkout ArgosFS
+        uses: actions/checkout@v6
+
+      - name: Install QEMU test dependencies
+        env:
+          ARGOSFS_CI_QEMU_ARCH: ${{ matrix.arch }}
+        run: scripts/ci_install_deps.sh
+
+      - name: Download QEMU bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: capos-qemu-bundle-${{ matrix.arch }}
+          path: ${{ runner.temp }}/capos-qemu-bundle-${{ matrix.arch }}
+
+      - name: Prepare mutable QEMU image
+        env:
+          ARGOSFS_QEMU_BUNDLE_DIR: ${{ runner.temp }}/capos-qemu-bundle-${{ matrix.arch }}
+          ARGOSFS_QEMU_WORKDIR: ${{ runner.temp }}/qemu-work-${{ matrix.arch }}-${{ matrix.suite }}
+        run: scripts/ci/prepare-qemu-test-env.sh
+
+      - name: Run QEMU ${{ matrix.suite }} test
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/qemu-test-${{ matrix.arch }}-${{ matrix.suite }}
+          ARGOSFS_QEMU_MEM: ${{ matrix.qemu_mem }}
+          ARGOSFS_QEMU_TIMEOUT: ${{ matrix.qemu_timeout }}
+          ARGOSFS_QEMU_STRESS_SECONDS: ${{ matrix.stress_seconds }}
+        run: ${{ matrix.script }}
+
+      - name: Upload QEMU test artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: capos-qemu-test-${{ matrix.arch }}-${{ matrix.suite }}
+          path: ${{ runner.temp }}/qemu-test-${{ matrix.arch }}-${{ matrix.suite }}
+          if-no-files-found: ignore
+
+  full-capos-qemu-required:
+    name: Full CapOS QEMU matrix
+    runs-on: ubuntu-24.04
+    needs:
+      - capos-full-build
+      - capos-qemu-test
+    if: always()
+    steps:
+      - name: Verify full CapOS QEMU gates
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {name: result["result"] for name, result in needs.items() if result["result"] != "success"}
+          if failed:
+              raise SystemExit(f"full CapOS QEMU gates did not all pass: {failed}")
+          print("full CapOS QEMU gates passed")
+          PY
