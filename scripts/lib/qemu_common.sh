@@ -94,6 +94,9 @@ argosfs_qemu_build_args() {
 		"${cpu_args[@]}"
 		-nographic
 	)
+	if [ "${ARGOSFS_QEMU_NET:-none}" = "none" ]; then
+		qemu_args+=(-nic none)
+	fi
 	if [ "${ARGOSFS_QEMU_NO_REBOOT:-1}" = "1" ]; then
 		qemu_args+=(-no-reboot)
 	fi
@@ -138,14 +141,26 @@ argosfs_qemu_build_args() {
 				echo "ARGOSFS_QEMU_ROOTFS does not exist: $rootfs" >&2
 				exit 1
 			fi
-			qemu_args+=(-drive "file=$rootfs,format=raw,if=${ARGOSFS_QEMU_DRIVE_IF:-$default_drive_if},id=rootdisk")
+			drive_if="${ARGOSFS_QEMU_DRIVE_IF:-$default_drive_if}"
+			if [ "$arch" = "arm64" ] && [ "$drive_if" = "virtio" ]; then
+				qemu_args+=(-drive "file=$rootfs,format=raw,if=none,id=rootdisk")
+				qemu_args+=(-device "virtio-blk-pci,drive=rootdisk,romfile=")
+			else
+				qemu_args+=(-drive "file=$rootfs,format=raw,if=$drive_if,id=rootdisk")
+			fi
 		fi
 	elif [ -n "$disk_image" ]; then
 		if [ ! -e "$disk_image" ]; then
 			echo "ARGOSFS_QEMU_DISK_IMAGE does not exist: $disk_image" >&2
 			exit 1
 		fi
-		qemu_args+=(-drive "file=$disk_image,format=raw,if=${ARGOSFS_QEMU_DRIVE_IF:-$default_drive_if},id=rootdisk")
+		drive_if="${ARGOSFS_QEMU_DRIVE_IF:-$default_drive_if}"
+		if [ "$arch" = "arm64" ] && [ "$drive_if" = "virtio" ]; then
+			qemu_args+=(-drive "file=$disk_image,format=raw,if=none,id=rootdisk")
+			qemu_args+=(-device "virtio-blk-pci,drive=rootdisk,romfile=")
+		else
+			qemu_args+=(-drive "file=$disk_image,format=raw,if=$drive_if,id=rootdisk")
+		fi
 	else
 		echo "SKIP: QEMU requires ARGOSFS_QEMU_KERNEL or ARGOSFS_QEMU_DISK_IMAGE" >&2
 		exit 0
