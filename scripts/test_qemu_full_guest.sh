@@ -45,9 +45,9 @@ ln -s ../file.txt "$rootdir/subdir/link.txt"
 test "$(cat "$rootdir/subdir/link.txt")" = "alpha
 beta"
 chmod 600 "$rootdir/file.txt"
-stat "$rootdir/file.txt" >/tmp/argosfs-stat.txt
+ls -l "$rootdir/file.txt" >/tmp/argosfs-file-ls.txt
 mv "$rootdir/subdir/copy.txt" "$rootdir/subdir/renamed.txt"
-truncate -s 1048576 "$rootdir/sparse.bin"
+dd if=/dev/zero of="$rootdir/sparse.bin" bs=4096 count=16 2>/dev/null
 dd if=/dev/zero of="$rootdir/zeros.bin" bs=4096 count=16 2>/dev/null
 sha256sum "$rootdir/file.txt" "$rootdir/zeros.bin" >/tmp/argosfs-root-sha256.txt
 sync

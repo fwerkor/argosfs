@@ -65,17 +65,17 @@ set +e
 		sleep "$command_delay_s"
 		if [ "$line" = "echo ARGOSFS_WAIT_HOTPLUG" ]; then
 			for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
-			printf 'drive_add 0 if=none,file=%s,format=raw,id=hot0\n' "$hotplug_disk" | socat - "UNIX-CONNECT:$monitor" || true
+			printf 'drive_add 0 if=none,file=%s,format=raw,id=hot0\n' "$hotplug_disk" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
 			if [ "$arch" = "arm64" ]; then
-				printf 'device_add virtio-blk-pci,drive=hot0,id=hotdisk0,romfile=\n' | socat - "UNIX-CONNECT:$monitor" || true
+				printf 'device_add virtio-blk-pci,drive=hot0,id=hotdisk0,romfile=\n' | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
 			else
-				printf 'device_add virtio-blk-pci,drive=hot0,id=hotdisk0\n' | socat - "UNIX-CONNECT:$monitor" || true
+				printf 'device_add virtio-blk-pci,drive=hot0,id=hotdisk0\n' | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
 			fi
 		fi
 		if [ "$line" = "echo ARGOSFS_WAIT_UNPLUG" ]; then
-			printf 'device_del hotdisk0\n' | socat - "UNIX-CONNECT:$monitor" || true
+			printf 'device_del hotdisk0\n' | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
 			sleep 2
-			printf 'drive_del hot0\n' | socat - "UNIX-CONNECT:$monitor" || true
+			printf 'drive_del hot0\n' | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
 		fi
 	done <"$commands"
 ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log" 2>&1

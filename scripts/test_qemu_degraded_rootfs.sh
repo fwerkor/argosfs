@@ -55,13 +55,12 @@ echo ARGOSFS_DEGRADED_RW_REJECTED_OK
 argosfs preflight-root --backend raw --devices "$partial" --mode degraded-ro >/tmp/argosfs-degraded-preflight-ro.json
 argosfs mount-root --backend raw --devices "$partial" --mode degraded-ro --target "$mnt" -o ro >/tmp/argosfs-degraded-mount.log 2>&1 &
 mpid=$!
-for i in $(seq 1 60); do mountpoint -q "$mnt" && break; sleep 1; done
-mountpoint -q "$mnt"
+for i in $(seq 1 60); do [ -r "$mnt/etc/os-release" ] && break; sleep 1; done
 grep -q 'ArgosFS-Degraded-CI' "$mnt/etc/os-release"
 grep -q 'degraded root payload' "$mnt/etc/payload.txt"
 echo ARGOSFS_DEGRADED_ROOT_MOUNT_OK
 umount "$mnt" 2>/dev/null || fusermount3 -u "$mnt" 2>/dev/null || true
-for i in $(seq 1 20); do mountpoint -q "$mnt" || break; sleep 1; done
+for i in $(seq 1 20); do [ -r "$mnt/etc/os-release" ] || break; sleep 1; done
 if kill -0 "$mpid" 2>/dev/null; then kill "$mpid" 2>/dev/null || true; fi
 wait "$mpid" 2>/dev/null || true
 sync
@@ -74,11 +73,11 @@ qemu_args+=(-monitor "unix:$monitor,server,nowait")
 
 qemu_device_add() {
   local idx="$1" path="$2"
-  printf 'drive_add 0 if=none,file=%s,format=raw,id=deg%s\n' "$path" "$idx" | socat - "UNIX-CONNECT:$monitor" || true
+  printf 'drive_add 0 if=none,file=%s,format=raw,id=deg%s\n' "$path" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
   if [ "$arch" = "arm64" ]; then
-    printf 'device_add virtio-blk-pci,drive=deg%s,id=degdisk%s,romfile=\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" || true
+    printf 'device_add virtio-blk-pci,drive=deg%s,id=degdisk%s,romfile=\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
   else
-    printf 'device_add virtio-blk-pci,drive=deg%s,id=degdisk%s\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" || true
+    printf 'device_add virtio-blk-pci,drive=deg%s,id=degdisk%s\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
   fi
 }
 

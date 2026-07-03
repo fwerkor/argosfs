@@ -86,11 +86,11 @@ CMDS
 
 qemu_device_add() {
   local idx="$1" path="$2"
-  printf 'drive_add 0 if=none,file=%s,format=raw,id=crash%s\n' "$path" "$idx" | socat - "UNIX-CONNECT:$monitor" || true
+  printf 'drive_add 0 if=none,file=%s,format=raw,id=crash%s\n' "$path" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
   if [ "$arch" = "arm64" ]; then
-    printf 'device_add virtio-blk-pci,drive=crash%s,id=crashdisk%s,romfile=\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" || true
+    printf 'device_add virtio-blk-pci,drive=crash%s,id=crashdisk%s,romfile=\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
   else
-    printf 'device_add virtio-blk-pci,drive=crash%s,id=crashdisk%s\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" || true
+    printf 'device_add virtio-blk-pci,drive=crash%s,id=crashdisk%s\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
   fi
 }
 

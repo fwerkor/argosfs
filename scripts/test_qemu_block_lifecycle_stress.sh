@@ -75,11 +75,11 @@ qemu_args+=(-monitor "unix:$monitor,server,nowait")
 
 qemu_device_add() {
   local idx="$1" path="$2"
-  printf 'drive_add 0 if=none,file=%s,format=raw,id=life%s\n' "$path" "$idx" | socat - "UNIX-CONNECT:$monitor" || true
+  printf 'drive_add 0 if=none,file=%s,format=raw,id=life%s\n' "$path" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
   if [ "$arch" = "arm64" ]; then
-    printf 'device_add virtio-blk-pci,drive=life%s,id=lifedisk%s,romfile=\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" || true
+    printf 'device_add virtio-blk-pci,drive=life%s,id=lifedisk%s,romfile=\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
   else
-    printf 'device_add virtio-blk-pci,drive=life%s,id=lifedisk%s\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" || true
+    printf 'device_add virtio-blk-pci,drive=life%s,id=lifedisk%s\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
   fi
 }
 

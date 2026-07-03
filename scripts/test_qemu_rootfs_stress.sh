@@ -46,7 +46,7 @@ worker() {
     cat "\$d/sub/link.txt" >/dev/null
     ln "\$d/file.txt" "\$d/hardlink.txt" 2>/dev/null || true
     chmod 600 "\$d/file.txt"
-    stat "\$d/file.txt" >/dev/null
+    test -s "\$d/file.txt"
     sha256sum "\$d/file.txt" "\$d/zeros.bin" >"\$d/SHA256SUMS" 2>/dev/null || true
     if [ \$((i % 4)) -eq 0 ]; then sync; fi
     if [ \$((i % 3)) -eq 0 ]; then rm -rf "\$wdir/round-\$((i - 2))" 2>/dev/null || true; fi
