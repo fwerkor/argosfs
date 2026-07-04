@@ -13,6 +13,7 @@ commands="$artifacts/qemu-rootfs-stress.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault|EXT4-fs error|I/O error}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-2400}"
 login_delay_s="${ARGOSFS_QEMU_STRESS_LOGIN_DELAY:-140}"
+login_delay_s="$(argosfs_qemu_adjust_login_delay "$login_delay_s")"
 command_delay_s="${ARGOSFS_QEMU_STRESS_COMMAND_DELAY:-1}"
 stress_s="${ARGOSFS_QEMU_STRESS_SECONDS:-1800}"
 workers="${ARGOSFS_QEMU_STRESS_WORKERS:-6}"
@@ -39,7 +40,12 @@ worker() {
     mkdir -p "\$d/sub"
     printf 'worker=%s round=%s payload=%s\n' "\$id" "\$i" "\$(date +%s)" >"\$d/file.txt"
     cat "\$d/file.txt" >"\$d/copy.txt"
-    dd if=/dev/zero of="\$d/zeros.bin" bs=4096 count=32 conv=fsync 2>/dev/null
+    if ! dd if=/dev/zero of="\$d/zeros.bin" bs=4096 count=32 conv=fsync 2>/dev/null; then
+      # BusyBox dd builds do not always support conv=fsync. Keep the stress
+      # workload running and force durability with a separate sync instead.
+      dd if=/dev/zero of="\$d/zeros.bin" bs=4096 count=32 2>/dev/null
+      sync
+    fi
     printf 'append-%s-%s\n' "\$id" "\$i" >>"\$d/file.txt"
     mv "\$d/copy.txt" "\$d/sub/renamed.txt"
     ln -s ../file.txt "\$d/sub/link.txt"

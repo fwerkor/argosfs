@@ -18,6 +18,7 @@ commands="$artifacts/qemu-hotplug.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-260}"
 login_delay_s="${ARGOSFS_QEMU_HOTPLUG_LOGIN_DELAY:-90}"
+login_delay_s="$(argosfs_qemu_adjust_login_delay "$login_delay_s")"
 command_delay_s="${ARGOSFS_QEMU_HOTPLUG_COMMAND_DELAY:-1}"
 done_marker="ARGOSFS_QEMU_HOTPLUG_DONE"
 

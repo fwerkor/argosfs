@@ -16,6 +16,7 @@ commands2="$artifacts/qemu-crash-recovery-phase2.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-1800}"
 login_delay_s="${ARGOSFS_QEMU_CRASH_LOGIN_DELAY:-140}"
+login_delay_s="$(argosfs_qemu_adjust_login_delay "$login_delay_s")"
 command_delay_s="${ARGOSFS_QEMU_CRASH_COMMAND_DELAY:-1}"
 done_marker="ARGOSFS_QEMU_CRASH_RECOVERY_DONE"
 
@@ -124,9 +125,10 @@ run_phase1_until_kill_marker() {
     sleep 1
   done
   if [ "$wait_status" -eq 0 ] && kill -0 "$qemu_pid" 2>/dev/null; then
-    kill -9 "$qemu_pid" 2>/dev/null || true
+    argosfs_qemu_kill_tree "$qemu_pid"
   fi
   wait "$qemu_pid" >/dev/null 2>&1 || true
+  argosfs_qemu_wait_process_gone "$qemu_pid" 30 || true
   set -e
   return "$wait_status"
 }

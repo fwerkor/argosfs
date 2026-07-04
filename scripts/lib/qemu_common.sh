@@ -50,7 +50,8 @@ argosfs_qemu_decompress_if_needed() {
 	case "$input" in
 		*.gz)
 			mkdir -p "$outdir"
-			local output="$outdir/$(basename "${input%.gz}")"
+			local output
+			output="$outdir/$(basename "${input%.gz}")"
 			if [ ! -e "$output" ] || [ "$input" -nt "$output" ]; then
 				gzip -dc "$input" >"$output"
 			fi
@@ -72,6 +73,40 @@ argosfs_qemu_find_arm64_uefi() {
 			echo "$candidate"
 			return 0
 		fi
+	done
+	return 1
+}
+
+
+argosfs_qemu_adjust_login_delay() {
+	local delay="$1"
+	if [ "${arch:-}" = "arm64" ] && [ "${delay:-0}" -lt "${ARGOSFS_QEMU_ARM64_MIN_LOGIN_DELAY:-220}" ]; then
+		echo "${ARGOSFS_QEMU_ARM64_MIN_LOGIN_DELAY:-220}"
+	else
+		echo "$delay"
+	fi
+}
+
+argosfs_qemu_kill_tree() {
+	local pid="$1"
+	[ -n "$pid" ] || return 0
+	local child
+	for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+		argosfs_qemu_kill_tree "$child"
+	done
+	kill -9 "$pid" 2>/dev/null || true
+}
+
+argosfs_qemu_wait_process_gone() {
+	local pid="$1"
+	local tries="${2:-30}"
+	local i=0
+	while [ "$i" -lt "$tries" ]; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			return 0
+		fi
+		sleep 1
+		i=$((i + 1))
 	done
 	return 1
 }
