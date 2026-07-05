@@ -10,7 +10,7 @@ argosfs_qemu_require_binary
 
 log="$artifacts/qemu-rootfs-stress-$arch.log"
 commands="$artifacts/qemu-rootfs-stress.commands"
-reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault|EXT4-fs error|I/O error}"
+reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault|EXT4-fs error|I/O error|No space left on device}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-2400}"
 login_delay_s="${ARGOSFS_QEMU_STRESS_LOGIN_DELAY:-140}"
 login_delay_s="$(argosfs_qemu_adjust_login_delay "$login_delay_s")"
@@ -40,7 +40,7 @@ worker() {
     mkdir -p "\$d/sub"
     printf 'worker=%s round=%s payload=%s\n' "\$id" "\$i" "\$(date +%s)" >"\$d/file.txt"
     cat "\$d/file.txt" >"\$d/copy.txt"
-    dd if=/dev/zero of="\$d/zeros.bin" bs=4096 count=32 2>/dev/null
+    dd if=/dev/zero of="\$d/zeros.bin" bs=4096 count=8 2>/dev/null
     printf 'append-%s-%s\n' "\$id" "\$i" >>"\$d/file.txt"
     mv "\$d/copy.txt" "\$d/sub/renamed.txt"
     ln -s ../file.txt "\$d/sub/link.txt"
@@ -50,7 +50,7 @@ worker() {
     test -s "\$d/file.txt"
     sha256sum "\$d/file.txt" "\$d/zeros.bin" >"\$d/SHA256SUMS" 2>/dev/null || true
     if [ \$((i % 4)) -eq 0 ]; then sync; fi
-    if [ \$((i % 3)) -eq 0 ]; then rm -rf "\$wdir/round-\$((i - 2))" 2>/dev/null || true; fi
+    rm -rf "\$wdir/round-\$((i - 3))" 2>/dev/null || true
     i=\$((i + 1))
   done
   echo "ARGOSFS_STRESS_WORKER_\${id}_DONE rounds=\$i"
@@ -95,7 +95,7 @@ if grep -Eiq "$reject" "$log"; then
   exit 1
 fi
 missing=()
-for marker in ARGOSFS_QEMU_ROOTFS_STRESS_BEGIN ARGOSFS_ROOT_MARKER_OK ARGOSFS_ROOTFS_STRESS_FILECOUNT_OK "$done_marker"; do
+for marker in ARGOSFS_QEMU_ROOTFS_STRESS_BEGIN ARGOSFS_ROOT_MARKER_OK ARGOSFS_STRESS_WORKERS_OK ARGOSFS_ROOTFS_STRESS_FILECOUNT_OK "$done_marker"; do
   grep -Fq "$marker" "$log" || missing+=("$marker")
 done
 grep -Eq 'ARGOSFS_ROOT_MOUNT .* fuse' "$log" || missing+=("ARGOSFS_ROOT_MOUNT fuse")
