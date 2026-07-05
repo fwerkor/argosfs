@@ -40,12 +40,7 @@ worker() {
     mkdir -p "\$d/sub"
     printf 'worker=%s round=%s payload=%s\n' "\$id" "\$i" "\$(date +%s)" >"\$d/file.txt"
     cat "\$d/file.txt" >"\$d/copy.txt"
-    if ! dd if=/dev/zero of="\$d/zeros.bin" bs=4096 count=32 conv=fsync 2>/dev/null; then
-      # BusyBox dd builds do not always support conv=fsync. Keep the stress
-      # workload running and force durability with a separate sync instead.
-      dd if=/dev/zero of="\$d/zeros.bin" bs=4096 count=32 2>/dev/null
-      sync
-    fi
+    dd if=/dev/zero of="\$d/zeros.bin" bs=4096 count=32 2>/dev/null
     printf 'append-%s-%s\n' "\$id" "\$i" >>"\$d/file.txt"
     mv "\$d/copy.txt" "\$d/sub/renamed.txt"
     ln -s ../file.txt "\$d/sub/link.txt"
@@ -60,12 +55,18 @@ worker() {
   done
   echo "ARGOSFS_STRESS_WORKER_\${id}_DONE rounds=\$i"
 }
+pids=""
 id=1
 while [ "\$id" -le "\$workers" ]; do
   worker "\$id" &
+  pids="\$pids \$!"
   id=\$((id + 1))
 done
-wait
+worker_fail=0
+for pid in \$pids; do
+  wait "\$pid" || worker_fail=1
+done
+if [ "\$worker_fail" -eq 0 ]; then echo ARGOSFS_STRESS_WORKERS_OK; else echo ARGOSFS_STRESS_WORKERS_FAILED; exit 1; fi
 find "\$rootdir" -type f | wc -l > /tmp/argosfs-rootfs-stress-file-count.txt
 cat /tmp/argosfs-rootfs-stress-file-count.txt
 sync

@@ -50,19 +50,19 @@ devs=/dev/vdb,/dev/vdc,/dev/vdd
 argosfs mkfs --backend raw --devices "$devs" --k 2 --m 1 --chunk-size 65536 --compression zstd --force >/tmp/argosfs-lifecycle-mkfs.json
 argosfs import-tree --backend raw --devices "$devs" "$src" /
 argosfs fsck --backend raw --devices "$devs" --repair --remove-orphans >/tmp/argosfs-lifecycle-fsck-initial.json
-all=/dev/vdb,/dev/vdc,/dev/vdd,/dev/vde
+all="$devs"
 argosfs add-device --backend raw --devices "$all" --device /dev/vde --image-size 134217728 --force >/tmp/argosfs-lifecycle-add.json
+all="$all,/dev/vde"
 argosfs list-devices --backend raw --devices "$all" >/tmp/argosfs-lifecycle-devices-after-add.json
 argosfs reshape --backend raw --devices "$all" --k 2 --m 1 --max-files 96 >/tmp/argosfs-lifecycle-reshape.json
 argosfs scrub --backend raw --devices "$all" >/tmp/argosfs-lifecycle-scrub-after-reshape.json
 argosfs drain-device --backend raw --devices "$all" --device disk-0000 >/tmp/argosfs-lifecycle-drain.json
 argosfs remove-device --backend raw --devices "$all" --device disk-0000 >/tmp/argosfs-lifecycle-remove.json
-with_replacement=/dev/vdc,/dev/vdd,/dev/vde,/dev/vdf
-argosfs replace-device --backend raw --devices "$with_replacement" --old disk-0001 --new /dev/vdf --image-size 134217728 --force >/tmp/argosfs-lifecycle-replace.json
-final=/dev/vdd,/dev/vde,/dev/vdf
-argosfs fsck --backend raw --devices "$final" --repair --remove-orphans >/tmp/argosfs-lifecycle-fsck-final.json
-argosfs scrub --backend raw --devices "$final" >/tmp/argosfs-lifecycle-scrub-final.json
-argosfs export-tree --backend raw --devices "$final" "$out"
+argosfs replace-device --backend raw --devices "$all" --old disk-0001 --new /dev/vdf --image-size 134217728 --force >/tmp/argosfs-lifecycle-replace.json
+all="$all,/dev/vdf"
+argosfs fsck --backend raw --devices "$all" --repair --remove-orphans >/tmp/argosfs-lifecycle-fsck-final.json
+argosfs scrub --backend raw --devices "$all" >/tmp/argosfs-lifecycle-scrub-final.json
+argosfs export-tree --backend raw --devices "$all" "$out"
 cmp "$src/data/meta-37.txt" "$out/data/meta-37.txt"
 cmp "$src/data/blob-111.bin" "$out/data/blob-111.bin"
 echo ARGOSFS_BLOCK_LIFECYCLE_CONTENT_OK

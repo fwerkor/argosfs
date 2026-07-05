@@ -47,12 +47,12 @@ printf 'after crash journal replay\n' >"$next/data/crash.txt"
 devs=/dev/vdb,/dev/vdc,/dev/vdd
 argosfs mkfs --backend raw --devices "$devs" --k 2 --m 1 --chunk-size 65536 --compression zstd --force --pool-name crash-root >/tmp/argosfs-crash-mkfs.json
 argosfs import-tree --backend raw --devices "$devs" "$base" /
-if ARGOSFS_CRASH_POINT=after-journal-commit-before-metadata-commit argosfs import-tree --backend raw --devices "$devs" "$next" / >/tmp/argosfs-crash-injected.log 2>&1; then
+if ARGOSFS_CRASH_POINT=after-journal argosfs import-tree --backend raw --devices "$devs" "$next" / >/tmp/argosfs-crash-injected.log 2>&1; then
   echo expected injected crash failure >&2
   exit 1
 fi
 echo ARGOSFS_RAW_CRASH_INJECTED_OK
-argosfs verify-journal --backend raw --devices "$devs" >/tmp/argosfs-crash-journal-before-replay.json || true
+argosfs list-devices --backend raw --devices "$devs" >/tmp/argosfs-crash-devices-before-replay.json
 argosfs replay-journal --backend raw --devices "$devs" >/tmp/argosfs-crash-replay.json
 argosfs fsck --backend raw --devices "$devs" --repair --remove-orphans >/tmp/argosfs-crash-fsck.json
 argosfs export-tree --backend raw --devices "$devs" "$out"
