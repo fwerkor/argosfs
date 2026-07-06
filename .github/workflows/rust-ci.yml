@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: scripts/ci_install_deps.sh
@@ -65,7 +65,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: scripts/ci_install_deps.sh
@@ -98,7 +98,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: scripts/ci_install_deps.sh
@@ -138,7 +138,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: scripts/ci_install_deps.sh
@@ -188,7 +188,7 @@ jobs:
             command: scripts/compat/run_pjdfstest.sh "$RUNNER_TEMP/pjdfstest.jsonl"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: scripts/ci_install_deps.sh
@@ -222,7 +222,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.run_retained_validation == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: scripts/ci_install_deps.sh
@@ -266,7 +266,7 @@ jobs:
           - arch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: scripts/ci_install_deps.sh
@@ -324,7 +324,7 @@ jobs:
             arch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install CapOS package build prerequisites
         run: scripts/ci_install_deps.sh
