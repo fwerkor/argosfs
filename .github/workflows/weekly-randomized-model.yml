@@ -1,0 +1,108 @@
+name: Weekly randomized model stress
+
+on:
+  schedule:
+    - cron: "20 19 * * 6"
+  workflow_dispatch:
+    inputs:
+      ops:
+        description: Number of randomized operations per seed
+        required: false
+        default: "1200"
+      seeds:
+        description: Comma-separated deterministic seeds
+        required: false
+        default: "0xA2605F5,0xC0FFEE,0x5EED2026"
+      max_file_size:
+        description: Maximum generated file size in bytes
+        required: false
+        default: "131072"
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  randomized-model-stress:
+    name: Randomized model stress (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: scripts/ci_install_deps.sh
+
+      - name: Install Rust toolchain
+        run: scripts/ci_install_rust.sh stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: weekly-randomized-model-${{ matrix.arch }}
+
+      - name: Run high-intensity randomized model stress
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}
+          ARGOSFS_RANDOM_MODEL_OPS: ${{ github.event_name == 'workflow_dispatch' && inputs.ops || '1200' }}
+          ARGOSFS_RANDOM_MODEL_CHECK_INTERVAL: "100"
+          ARGOSFS_RANDOM_MODEL_MAX_FILE_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.max_file_size || '131072' }}
+          ARGOSFS_RANDOM_MODEL_SEEDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seeds || '0xA2605F5,0xC0FFEE,0x5EED2026' }}
+          ARGOSFS_RANDOM_MODEL_DISKS: "6"
+          ARGOSFS_RANDOM_MODEL_K: "4"
+          ARGOSFS_RANDOM_MODEL_M: "2"
+          ARGOSFS_RANDOM_MODEL_CHUNK_SIZE: "65536"
+        run: scripts/test_randomized_model.sh
+
+      - name: Upload randomized model artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-randomized-model-${{ matrix.arch }}
+          path: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}
+          if-no-files-found: ignore
+
+  open-issue-on-failure:
+    name: Open issue on weekly failure
+    needs: randomized-model-stress
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Open or update failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ github.sha }}
+          TITLE: Weekly randomized model CI failure
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
+          body="$(cat <<EOF
+          Weekly randomized model stress failed.
+
+          - Run: $RUN_URL
+          - Commit: $HEAD_SHA
+          - Workflow: $GITHUB_WORKFLOW
+          - Run ID: $GITHUB_RUN_ID
+
+          The uploaded artifacts contain per-seed operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in logs/metadata.json.
+          EOF
+          )"
+          if [ -n "$existing" ]; then
+            gh issue comment --repo "$REPO" "$existing" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body "$body"
+          fi
