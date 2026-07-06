@@ -29,11 +29,26 @@ sudo apt-get install -y --no-install-recommends \
 
 optional_packages=(
 	gcc-multilib
-	qemu-system-arm
-	qemu-system-misc
-	qemu-system-x86
 	qemu-utils
 )
+case "${ARGOSFS_CI_QEMU_ARCH:-all}" in
+	x86_64)
+		optional_packages+=(qemu-system-x86)
+		;;
+	aarch64|arm64)
+		optional_packages+=(qemu-efi-aarch64 qemu-system-arm)
+		;;
+	riscv64)
+		optional_packages+=(qemu-system-misc)
+		;;
+	all)
+		optional_packages+=(qemu-efi-aarch64 qemu-system-arm qemu-system-misc qemu-system-x86)
+		;;
+	*)
+		echo "unknown ARGOSFS_CI_QEMU_ARCH=${ARGOSFS_CI_QEMU_ARCH}" >&2
+		exit 2
+		;;
+esac
 for package in "${optional_packages[@]}"; do
 	if sudo apt-get install -y --no-install-recommends "$package"; then
 		continue

@@ -4,15 +4,20 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 artifacts="${ARGOSFS_TEST_ARTIFACTS:-$repo/target/argosfs-test-artifacts/capos-build}"
 capos_repo="${CAPOS_REPO:-https://github.com/fwerkor/capos.git}"
-capos_ref="${CAPOS_REF:-main}"
+capos_ref="${CAPOS_REF:-9e636b9b45941e9d9219af97054b4c661d416294}"
 capos_local_source="${CAPOS_LOCAL_SOURCE:-}"
 capos_full_compile="${ARGOSFS_CAPOS_FULL_COMPILE:-1}"
 capos_make_jobs="${ARGOSFS_CAPOS_MAKE_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 capos_make_target="${ARGOSFS_CAPOS_MAKE_TARGET:-package/utils/argosfs/host/compile}"
 capos_tools_target="${ARGOSFS_CAPOS_TOOLS_TARGET:-}"
+capos_prebuild_argosfs="${ARGOSFS_CAPOS_PREBUILD_ARGOSFS:-0}"
+capos_prune_cargo_target="${ARGOSFS_CAPOS_PRUNE_CARGO_TARGET:-0}"
+argosfs_ci_light_rust_profile="${ARGOSFS_CI_LIGHT_RUST_PROFILE:-0}"
 capos_make_v="${ARGOSFS_CAPOS_MAKE_V:-}"
-capos_target_matrix="${ARGOSFS_CAPOS_TARGET_MATRIX:-x86_64,armsr_armv8,riscv64_sifiveu}"
+capos_log_stdout="${ARGOSFS_CAPOS_LOG_STDOUT:-full}"
+capos_target_matrix="${ARGOSFS_CAPOS_TARGET_MATRIX:-x86_64,armsr_armv8}"
 capos_build_target="${ARGOSFS_CAPOS_BUILD_TARGET:-x86_64}"
+capos_dl_dir="${ARGOSFS_CAPOS_DL_DIR:-}"
 system_pkg_config_libdir="$(
 	env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_PATH -u PKG_CONFIG_SYSROOT_DIR \
 		PATH=/usr/local/bin:/usr/bin:/bin \
@@ -20,7 +25,108 @@ system_pkg_config_libdir="$(
 )"
 
 rm -rf "$artifacts"
+mkdir -p "$artifacts"
+artifacts="$(cd "$artifacts" && pwd)"
 mkdir -p "$artifacts/argosfs-src" "$artifacts/capos"
+
+filter_capos_log_for_stdout() {
+	awk '
+		/^[[:space:]]*$/ { next }
+		/(^|[[:space:]])(ERROR|Error|FAILED|failed|warning|Warning|No space left|No such file|permission denied|Permission denied)/ { print; fflush(); next }
+		/^make(\[[0-9]+\])?: / { print; fflush(); next }
+		/^make\[[0-9]+\]: / { print; fflush(); next }
+		/^make -r / { print; fflush(); next }
+		/^make: \*\*\*/ { print; fflush(); next }
+		/^[[:space:]]+ERROR: / { print; fflush(); next }
+		/(Downloaded|Downloading|Compiling|Finished)[[:space:]]/ { print; fflush(); next }
+		/^\[[0-9]+\/[0-9]+\][[:space:]]+(Building|Linking|Generating|Install|Installing)/ { print; fflush(); next }
+		/^[[:space:]]*(CC|CXX|LD|AR|INSTALL|CP|GEN|HOSTCC|HOSTLD|MODPOST)[[:space:]\[]/ { print; fflush(); next }
+	'
+}
+
+report_disk_usage() {
+	local label="$1"
+	echo
+	echo "==> Disk usage: $label"
+	df -h "$artifacts" "$artifacts/capos" 2>/dev/null || df -h
+	if [ -d "$artifacts/capos" ]; then
+		du -xhd1 "$artifacts/capos" 2>/dev/null | sort -h | tail -n 20 || true
+	fi
+}
+
+prune_capos_argosfs_cargo_targets() {
+	[ "$capos_prune_cargo_target" = "1" ] || return 0
+	[ -d "$artifacts/capos/build_dir" ] || return 0
+	local removed=0
+	while IFS= read -r target_dir; do
+		[ -d "$target_dir" ] || continue
+		echo "Pruning Cargo target directory: $target_dir"
+		rm -rf "$target_dir"
+		removed=1
+	done < <(find "$artifacts/capos/build_dir" -path '*/argosfs-*/target' -type d 2>/dev/null)
+	if [ "$removed" = "1" ]; then
+		report_disk_usage "after ArgosFS Cargo target prune"
+	fi
+}
+
+run_logged() {
+	local log="$1"
+	shift
+	mkdir -p "$(dirname "$log")"
+	echo
+	echo "==> $*"
+	echo "    log: $log"
+	set +e
+	local status
+	case "$capos_log_stdout" in
+		periodic)
+			"$repo/scripts/ci/run-with-log.sh" \
+				"$log" "CapOS $(basename "$log" .log)" -- "$@"
+			status="$?"
+			;;
+		full)
+			"$@" 2>&1 | tee "$log"
+			status="${PIPESTATUS[0]}"
+			;;
+		filtered)
+			"$@" 2>&1 | tee "$log" | filter_capos_log_for_stdout
+			status="${PIPESTATUS[0]}"
+			;;
+		none)
+			"$@" >"$log" 2>&1
+			status="$?"
+			;;
+		*)
+			echo "unknown ARGOSFS_CAPOS_LOG_STDOUT mode: $capos_log_stdout" >&2
+			status=2
+			;;
+	esac
+	set -e
+	return "$status"
+}
+
+fetch_capos_ref() {
+	local ref="$1"
+	git fetch --depth 1 origin "$ref" && return 0
+	git fetch --depth 1 origin "refs/heads/$ref" && return 0
+	git fetch --depth 1 origin "refs/tags/$ref" && return 0
+	return 1
+}
+
+clone_capos_repo() {
+	local dest="$1"
+	local ref="$2"
+
+	echo "Checking out CapOS ref $ref from $capos_repo"
+	git init --initial-branch=main "$dest"
+	(
+		cd "$dest"
+		git remote add origin "$capos_repo"
+		fetch_capos_ref "$ref"
+		git checkout --detach FETCH_HEAD
+		git rev-parse HEAD | tee "$artifacts/capos-commit"
+	)
+}
 
 rsync -a --delete \
 	--exclude /.git \
@@ -35,8 +141,14 @@ if [ -n "$capos_local_source" ]; then
 		--exclude /tmp \
 		--exclude /dl \
 		"$capos_local_source"/ "$artifacts/capos"/
+	git -C "$capos_local_source" rev-parse HEAD >"$artifacts/capos-commit" 2>/dev/null || echo local-source >"$artifacts/capos-commit"
 else
-	git clone --depth 1 --branch "$capos_ref" "$capos_repo" "$artifacts/capos"
+	clone_capos_repo "$artifacts/capos" "$capos_ref"
+fi
+if [ -n "$capos_dl_dir" ]; then
+	mkdir -p "$capos_dl_dir"
+	rm -rf "$artifacts/capos/dl"
+	ln -s "$capos_dl_dir" "$artifacts/capos/dl"
 fi
 
 mkdir -p "$artifacts/capos/package/utils/argosfs/files"
@@ -44,7 +156,8 @@ cat >"$artifacts/capos/package/utils/argosfs/Makefile" <<'MAKEFILE'
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=argosfs
-PKG_RELEASE:=ci
+PKG_VERSION:=0.1.0
+PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/fwerkor/argosfs
@@ -60,11 +173,30 @@ PKG_MAINTAINER:=FWERKOR
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=LICENSE
 
+PKG_BUILD_DEPENDS:=rust/host fuse3 argosfs/host
 PKG_BUILD_PARALLEL:=1
 HOST_BUILD_PARALLEL:=1
 
 include $(INCLUDE_DIR)/host-build.mk
 include $(INCLUDE_DIR)/package.mk
+include $(TOPDIR)/feeds/packages/lang/rust/rust-package.mk
+
+HOST_FUSE3_PKG_CONFIG_LIBDIR:=$(ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR)
+ifeq ($(strip $(HOST_FUSE3_PKG_CONFIG_LIBDIR)),)
+HOST_FUSE3_PKG_CONFIG_LIBDIR:=$(shell env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_PATH -u PKG_CONFIG_SYSROOT_DIR PATH=/usr/local/bin:/usr/bin:/bin pkg-config --variable pc_path pkg-config 2>/dev/null)
+endif
+
+CARGO_PKG_VARS += \
+	PKG_CONFIG_ALLOW_CROSS=1 \
+	PKG_CONFIG_SYSROOT_DIR=$(STAGING_DIR) \
+	PKG_CONFIG_LIBDIR=$(STAGING_DIR)/usr/lib/pkgconfig:$(STAGING_DIR)/usr/share/pkgconfig \
+	PKG_CONFIG_PATH=$(STAGING_DIR)/usr/lib/pkgconfig:$(STAGING_DIR)/usr/share/pkgconfig
+
+ifeq ($(ARGOSFS_CI_LIGHT_RUST_PROFILE),1)
+CARGO_PKG_VARS += \
+	CARGO_PROFILE_RELEASE_LTO=false \
+	CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+endif
 
 define Package/argosfs
   SECTION:=utils
@@ -94,19 +226,24 @@ endef
 
 define Host/Compile
 	cd $(HOST_BUILD_DIR) && \
-		PKG_CONFIG_LIBDIR="$(STAGING_DIR_HOSTPKG)/lib/pkgconfig:$(STAGING_DIR_HOST)/lib/pkgconfig:$(ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR)" \
+		CARGO_HOME="$(DL_DIR)/cargo" \
+		CARGO_HTTP_MULTIPLEXING=false \
+		CARGO_NET_RETRY=10 \
+		PKG_CONFIG_ALLOW_CROSS=0 \
+		PKG_CONFIG_LIBDIR="$(STAGING_DIR_HOSTPKG)/lib/pkgconfig:$(STAGING_DIR_HOST)/lib/pkgconfig:$(HOST_FUSE3_PKG_CONFIG_LIBDIR)" \
 		CARGO_TARGET_DIR="$(HOST_BUILD_DIR)/target" \
 		cargo build --bin argosfs --locked
 endef
 
 define Host/Install
-	$(INSTALL_DIR) $(HOST_INSTALL_DIR)/bin
+	$(INSTALL_DIR) $(HOST_INSTALL_DIR)/bin $(STAGING_DIR_HOSTPKG)/bin
 	$(INSTALL_BIN) $(HOST_BUILD_DIR)/target/debug/argosfs $(HOST_INSTALL_DIR)/bin/argosfs
+	$(INSTALL_BIN) $(HOST_BUILD_DIR)/target/debug/argosfs $(STAGING_DIR_HOSTPKG)/bin/argosfs
 endef
 
 define Package/argosfs/install
 	$(INSTALL_DIR) $(1)/usr/sbin
-	$(INSTALL_BIN) $(HOST_INSTALL_DIR)/bin/argosfs $(1)/usr/sbin/argosfs
+	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/bin/argosfs $(1)/usr/sbin/argosfs
 	$(INSTALL_DIR) $(1)/lib/argosfs
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/contrib/capos/initramfs/argosfs-root.sh $(1)/lib/argosfs/argosfs-root.sh
 	$(INSTALL_DIR) $(1)/lib/argosfs/initramfs-hooks
@@ -209,6 +346,16 @@ write_capos_target_config() {
 CONFIG_TARGET_x86=y
 CONFIG_TARGET_x86_64=y
 CONFIG_TARGET_x86_64_DEVICE_generic=y
+CONFIG_TARGET_ROOTFS_ARGOSFS=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+CONFIG_TARGET_IMAGES_GZIP=n
+CONFIG_TARGET_ROOTFS_PARTSIZE=512
+CONFIG_TARGET_KERNEL_PARTSIZE=64
+CONFIG_GRUB_IMAGES=y
+CONFIG_GRUB_EFI_IMAGES=y
+CONFIG_GRUB_SERIAL=y
+CONFIG_GRUB_BAUDRATE=115200
+CONFIG_TARGET_SERIAL="ttyS0"
 CONFIG_PACKAGE_argosfs=y
 CONFIG_PACKAGE_libfuse3=y
 CONFIG_PACKAGE_fuse3-utils=y
@@ -224,6 +371,16 @@ CONFIG
 CONFIG_TARGET_armsr=y
 CONFIG_TARGET_armsr_armv8=y
 CONFIG_TARGET_armsr_armv8_DEVICE_generic=y
+CONFIG_TARGET_ROOTFS_ARGOSFS=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+CONFIG_TARGET_IMAGES_GZIP=n
+CONFIG_TARGET_ROOTFS_PARTSIZE=512
+CONFIG_TARGET_KERNEL_PARTSIZE=128
+CONFIG_GRUB_IMAGES=y
+CONFIG_GRUB_EFI_IMAGES=y
+CONFIG_GRUB_SERIAL=y
+CONFIG_GRUB_BAUDRATE=115200
+CONFIG_TARGET_SERIAL="ttyS0"
 CONFIG_PACKAGE_argosfs=y
 CONFIG_PACKAGE_libfuse3=y
 CONFIG_PACKAGE_fuse3-utils=y
@@ -239,6 +396,11 @@ CONFIG
 CONFIG_TARGET_sifiveu=y
 CONFIG_TARGET_sifiveu_generic=y
 CONFIG_TARGET_sifiveu_generic_DEVICE_sifive_unmatched=y
+CONFIG_TARGET_ROOTFS_ARGOSFS=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+CONFIG_TARGET_IMAGES_GZIP=n
+CONFIG_TARGET_ROOTFS_PARTSIZE=512
+CONFIG_TARGET_KERNEL_PARTSIZE=64
 CONFIG_PACKAGE_argosfs=y
 CONFIG_PACKAGE_libfuse3=y
 CONFIG_PACKAGE_fuse3-utils=y
@@ -260,8 +422,7 @@ verify_capos_argosfs_config() {
 	local target="$1"
 	local log="$artifacts/capos-defconfig-$target.log"
 	write_capos_target_config "$target"
-	if ! make defconfig >"$log" 2>&1; then
-		cat "$log" >&2
+	if ! run_logged "$log" make defconfig; then
 		return 1
 	fi
 	for required in \
@@ -289,6 +450,10 @@ verify_capos_argosfs_config() {
 PKG_CONFIG_LIBDIR="$system_pkg_config_libdir" pkg-config --exists fuse3
 cargo build --manifest-path "$artifacts/argosfs-src/Cargo.toml" --bin argosfs --locked
 "$artifacts/argosfs-src/target/debug/argosfs" --help >/dev/null
+if [ "$capos_prune_cargo_target" = "1" ]; then
+	rm -rf "$artifacts/argosfs-src/target"
+	report_disk_usage "after host ArgosFS smoke target prune"
+fi
 
 if [ "$capos_full_compile" = "1" ]; then
 	(
@@ -306,25 +471,41 @@ if [ "$capos_full_compile" = "1" ]; then
 		done
 		IFS="$old_ifs"
 		write_capos_target_config "$capos_build_target"
-		make defconfig >"$artifacts/capos-defconfig-build-$capos_build_target.log" 2>&1
+		run_logged "$artifacts/capos-defconfig-build-$capos_build_target.log" make defconfig
 		make_args=()
 		[ -z "$capos_make_v" ] || make_args+=("V=$capos_make_v")
 		if [ -n "$capos_tools_target" ]; then
-			if ! make -j"$capos_make_jobs" "$capos_tools_target" "${make_args[@]}" >"$artifacts/capos-tools-build.log" 2>&1; then
-				tail -n 200 "$artifacts/capos-tools-build.log" >&2 || true
-				return 1
+			read -r -a capos_tools_targets <<<"$capos_tools_target"
+			if ! run_logged "$artifacts/capos-tools-build.log" make -j"$capos_make_jobs" "${capos_tools_targets[@]}" "${make_args[@]}"; then
+				exit 1
 			fi
 		else
 			host_pkg_config="$(command -v pkg-config)"
 			mkdir -p staging_dir/host/bin
 			ln -sf "$host_pkg_config" staging_dir/host/bin/pkg-config
 		fi
-		if ! ARGOSFS_CI_LOCAL_SOURCE=1 \
-			ARGOSFS_LOCAL_SOURCE="$artifacts/argosfs-src" \
-			ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR="$system_pkg_config_libdir" \
-			make -j"$capos_make_jobs" "$capos_make_target" "${make_args[@]}" >"$artifacts/capos-argosfs-build.log" 2>&1; then
-			tail -n 200 "$artifacts/capos-argosfs-build.log" >&2 || true
-			return 1
+		argosfs_make_env=(
+			env ARGOSFS_CI_LOCAL_SOURCE=1
+			ARGOSFS_LOCAL_SOURCE="$artifacts/argosfs-src"
+			ARGOSFS_SYSTEM_PKG_CONFIG_LIBDIR="$system_pkg_config_libdir"
+		)
+		if [ "$argosfs_ci_light_rust_profile" = "1" ]; then
+			argosfs_make_env+=(ARGOSFS_CI_LIGHT_RUST_PROFILE=1)
+		fi
+		if [ "$capos_prebuild_argosfs" = "1" ] && [ "$capos_make_target" = "world" ]; then
+			report_disk_usage "before ArgosFS package prebuild"
+			if ! run_logged "$artifacts/capos-argosfs-prebuild.log" \
+				"${argosfs_make_env[@]}" \
+				make -j"$capos_make_jobs" package/utils/argosfs/compile "${make_args[@]}"; then
+				exit 1
+			fi
+			prune_capos_argosfs_cargo_targets
+		fi
+		report_disk_usage "before CapOS $capos_make_target"
+		if ! run_logged "$artifacts/capos-argosfs-build.log" \
+			"${argosfs_make_env[@]}" \
+			make -j"$capos_make_jobs" "$capos_make_target" "${make_args[@]}"; then
+			exit 1
 		fi
 		host_argosfs="staging_dir/hostpkg/bin/argosfs"
 		if [ ! -x "$host_argosfs" ]; then

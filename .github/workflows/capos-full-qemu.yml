@@ -1,0 +1,347 @@
+name: Full CapOS QEMU CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      capos_ref:
+        description: CapOS git ref to build; leave empty to use the pinned ArgosFS CI baseline
+        required: false
+        default: ""
+      make_target:
+        description: CapOS make target for full image build
+        required: false
+        default: world
+      qemu_tests:
+        description: Run QEMU boot/full guest/hotplug/reboot/stress tests after image build
+        required: false
+        default: "true"
+  schedule:
+    - cron: "30 18 * * 0"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  ARGOSFS_CAPOS_REF: 9e636b9b45941e9d9219af97054b4c661d416294
+
+jobs:
+  capos-full-build:
+    name: Build CapOS QEMU image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            capos_target: x86_64
+            make_jobs: "2"
+            qemu_mem: "1536"
+          - arch: arm64
+            runner: ubuntu-24.04
+            capos_target: armsr_armv8
+            make_jobs: "1"
+            qemu_mem: "1536"
+    steps:
+      - name: Checkout ArgosFS
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        env:
+          ARGOSFS_CI_QEMU_ARCH: ${{ matrix.arch }}
+        run: scripts/ci_install_deps.sh
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/local/share/chromium \
+            /opt/ghc \
+            /opt/az \
+            /opt/google-cloud-cli \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/node \
+            /opt/hostedtoolcache/Python \
+            /opt/microsoft \
+            /usr/local/.ghcup || true
+          docker system prune -af --volumes || true
+          sudo apt-get clean
+          df -h
+
+      - name: Probe QEMU host prerequisites
+        env:
+          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          source scripts/lib/qemu_common.sh
+          argosfs_qemu_select_arch
+          argosfs_qemu_require_binary
+          "$qemu_bin" --version
+          if [ "$arch" = "arm64" ]; then
+            firmware="$(argosfs_qemu_find_arm64_uefi || true)"
+            if [ -z "$firmware" ]; then
+              echo "missing AArch64 UEFI firmware for arm64 disk-image boot" >&2
+              exit 1
+            fi
+            echo "AArch64 UEFI firmware: $firmware"
+          fi
+
+      - name: Install Rust toolchain
+        run: scripts/ci_install_rust.sh stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: full-capos-${{ matrix.arch }}
+
+      - name: Cache CapOS downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/capos-dl
+          key: capos-dl-${{ matrix.capos_target }}-${{ github.run_id }}
+          restore-keys: |
+            capos-dl-${{ matrix.capos_target }}-
+            capos-dl-
+
+      - name: Build full CapOS ArgosFS image
+        id: build
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}
+          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
+          ARGOSFS_CAPOS_BUILD_TARGET: ${{ matrix.capos_target }}
+          ARGOSFS_CAPOS_MAKE_JOBS: ${{ matrix.make_jobs }}
+          ARGOSFS_CAPOS_IMAGE_MAKE_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.make_target || 'world' }}
+          ARGOSFS_CAPOS_MAKE_V: s
+          ARGOSFS_CAPOS_LOG_STDOUT: periodic
+          ARGOSFS_CI_LOG_INTERVAL_S: "120"
+          ARGOSFS_CI_LOG_TAIL_LINES: "35"
+          ARGOSFS_CAPOS_DL_DIR: ${{ runner.temp }}/capos-dl
+          ARGOSFS_CI_LIGHT_RUST_PROFILE: "1"
+          CAPOS_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}
+        run: scripts/build_capos_qemu_image.sh
+
+      - name: Pack QEMU bundle
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}
+        run: scripts/ci/pack-qemu-bundle.sh
+
+      - name: Summarize discovered QEMU artifacts
+        run: |
+          cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu/qemu-artifacts.json"
+          cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-bundle/bundle.env"
+          {
+            echo "### Full CapOS QEMU build (${{ matrix.arch }})"
+            echo
+            echo "- CapOS ref: '${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}'"
+            echo "- CapOS commit: '$(cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-commit" 2>/dev/null || echo unknown)'"
+            echo "- Bundle: capos-qemu-bundle-${{ matrix.arch }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload QEMU bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: capos-qemu-bundle-${{ matrix.arch }}
+          path: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-bundle
+          if-no-files-found: error
+
+      - name: Upload full CapOS build logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: capos-full-build-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu
+            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-commit
+            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-*.log
+            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-config-*
+          if-no-files-found: ignore
+
+  capos-qemu-test:
+    name: QEMU ${{ matrix.suite }} (${{ matrix.arch }})
+    needs: capos-full-build
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.qemu_tests == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.job_timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            suite: boot
+            script: scripts/test_qemu_boot.sh
+            qemu_mem: "1536"
+            qemu_timeout: "300"
+            stress_seconds: ""
+            job_timeout: 20
+          - arch: x86_64
+            suite: full-guest
+            script: scripts/test_qemu_full_guest.sh
+            qemu_mem: "1536"
+            qemu_timeout: "600"
+            stress_seconds: ""
+            job_timeout: 30
+          - arch: x86_64
+            suite: hotplug
+            script: scripts/test_qemu_hotplug.sh
+            qemu_mem: "1536"
+            qemu_timeout: "600"
+            stress_seconds: ""
+            job_timeout: 30
+          - arch: x86_64
+            suite: reboot-persistence
+            script: scripts/test_qemu_reboot_persistence.sh
+            qemu_mem: "1536"
+            qemu_timeout: "720"
+            stress_seconds: ""
+            job_timeout: 35
+          - arch: x86_64
+            suite: rootfs-stress
+            script: scripts/test_qemu_rootfs_stress.sh
+            qemu_mem: "1536"
+            qemu_timeout: "2400"
+            stress_seconds: "1800"
+            job_timeout: 50
+          - arch: x86_64
+            suite: block-lifecycle-stress
+            script: scripts/test_qemu_block_lifecycle_stress.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1800"
+            stress_seconds: ""
+            job_timeout: 45
+          - arch: x86_64
+            suite: degraded-rootfs
+            script: scripts/test_qemu_degraded_rootfs.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1200"
+            stress_seconds: ""
+            job_timeout: 35
+          - arch: x86_64
+            suite: crash-recovery
+            script: scripts/test_qemu_crash_recovery.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1800"
+            stress_seconds: ""
+            job_timeout: 45
+          - arch: arm64
+            suite: boot
+            script: scripts/test_qemu_boot.sh
+            qemu_mem: "1536"
+            qemu_timeout: "300"
+            stress_seconds: ""
+            job_timeout: 20
+          - arch: arm64
+            suite: full-guest
+            script: scripts/test_qemu_full_guest.sh
+            qemu_mem: "1536"
+            qemu_timeout: "600"
+            stress_seconds: ""
+            job_timeout: 30
+          - arch: arm64
+            suite: hotplug
+            script: scripts/test_qemu_hotplug.sh
+            qemu_mem: "1536"
+            qemu_timeout: "600"
+            stress_seconds: ""
+            job_timeout: 30
+          - arch: arm64
+            suite: reboot-persistence
+            script: scripts/test_qemu_reboot_persistence.sh
+            qemu_mem: "1536"
+            qemu_timeout: "720"
+            stress_seconds: ""
+            job_timeout: 35
+          - arch: arm64
+            suite: rootfs-stress
+            script: scripts/test_qemu_rootfs_stress.sh
+            qemu_mem: "1536"
+            qemu_timeout: "2400"
+            stress_seconds: "1800"
+            job_timeout: 50
+          - arch: arm64
+            suite: block-lifecycle-stress
+            script: scripts/test_qemu_block_lifecycle_stress.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1800"
+            stress_seconds: ""
+            job_timeout: 45
+          - arch: arm64
+            suite: degraded-rootfs
+            script: scripts/test_qemu_degraded_rootfs.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1200"
+            stress_seconds: ""
+            job_timeout: 35
+          - arch: arm64
+            suite: crash-recovery
+            script: scripts/test_qemu_crash_recovery.sh
+            qemu_mem: "1536"
+            qemu_timeout: "1800"
+            stress_seconds: ""
+            job_timeout: 45
+    steps:
+      - name: Checkout ArgosFS
+        uses: actions/checkout@v6
+
+      - name: Install QEMU test dependencies
+        env:
+          ARGOSFS_CI_QEMU_ARCH: ${{ matrix.arch }}
+        run: scripts/ci_install_deps.sh
+
+      - name: Download QEMU bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: capos-qemu-bundle-${{ matrix.arch }}
+          path: ${{ runner.temp }}/capos-qemu-bundle-${{ matrix.arch }}
+
+      - name: Prepare mutable QEMU image
+        env:
+          ARGOSFS_QEMU_BUNDLE_DIR: ${{ runner.temp }}/capos-qemu-bundle-${{ matrix.arch }}
+          ARGOSFS_QEMU_WORKDIR: ${{ runner.temp }}/qemu-work-${{ matrix.arch }}-${{ matrix.suite }}
+        run: scripts/ci/prepare-qemu-test-env.sh
+
+      - name: Run QEMU ${{ matrix.suite }} test
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/qemu-test-${{ matrix.arch }}-${{ matrix.suite }}
+          ARGOSFS_QEMU_MEM: ${{ matrix.qemu_mem }}
+          ARGOSFS_QEMU_TIMEOUT: ${{ matrix.qemu_timeout }}
+          ARGOSFS_QEMU_STRESS_SECONDS: ${{ matrix.stress_seconds }}
+        run: ${{ matrix.script }}
+
+      - name: Upload QEMU test artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: capos-qemu-test-${{ matrix.arch }}-${{ matrix.suite }}
+          path: ${{ runner.temp }}/qemu-test-${{ matrix.arch }}-${{ matrix.suite }}
+          if-no-files-found: ignore
+
+  full-capos-qemu-required:
+    name: Full CapOS QEMU matrix
+    runs-on: ubuntu-24.04
+    needs:
+      - capos-full-build
+      - capos-qemu-test
+    if: always()
+    steps:
+      - name: Verify full CapOS QEMU gates
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {name: result["result"] for name, result in needs.items() if result["result"] != "success"}
+          if failed:
+              raise SystemExit(f"full CapOS QEMU gates did not all pass: {failed}")
+          print("full CapOS QEMU gates passed")
+          PY

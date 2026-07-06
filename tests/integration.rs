@@ -2893,6 +2893,74 @@ fn ordinary_delta_journal_growth_stays_below_full_metadata_size_between_checkpoi
 }
 
 #[test]
+fn checkpoint_compaction_bounds_host_journal_growth_and_preserves_replay() {
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "4");
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    for index in 1..11 {
+        fs.mkdir(&format!("/compact-{index}"), 0o755).unwrap();
+    }
+    drop(fs);
+
+    let journal_text = fs::read_to_string(tmp.path().join(".argosfs/journal.jsonl")).unwrap();
+    let lines: Vec<&str> = journal_text.lines().collect();
+    assert!(
+        lines.len() <= 4,
+        "compacted journal should only retain the latest checkpoint plus suffix, got {} lines",
+        lines.len()
+    );
+    let first: serde_json::Value =
+        serde_json::from_str(lines.first().expect("journal line")).unwrap();
+    assert_eq!(first["record_type"], "checkpoint");
+    assert_eq!(first["previous_record_hash"], "");
+    assert!(first.get("metadata").is_some());
+
+    let report = ArgosFs::audit_transactions(tmp.path()).unwrap();
+    assert_eq!(report.invalid_entries, 0);
+    assert!(report.latest_snapshot_txid >= 8);
+
+    for name in ["meta.primary.json", "meta.secondary.json", "meta.json"] {
+        fs::remove_file(tmp.path().join(".argosfs").join(name)).unwrap();
+    }
+    let reopened = ArgosFs::open(tmp.path()).unwrap();
+    assert!(reopened.resolve_path("/compact-10", false).is_ok());
+    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
+}
+
+#[test]
+fn manual_journal_compaction_rebases_hash_chain() {
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "4");
+    std::env::set_var("ARGOSFS_DISABLE_JOURNAL_COMPACTION", "1");
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+
+    for index in 1..10 {
+        fs.mkdir(&format!("/manual-compact-{index}"), 0o755)
+            .unwrap();
+    }
+    drop(fs);
+
+    let before = fs::read_to_string(tmp.path().join(".argosfs/journal.jsonl")).unwrap();
+    assert!(before.lines().count() > 4);
+
+    std::env::remove_var("ARGOSFS_DISABLE_JOURNAL_COMPACTION");
+    journal::compact_journal(tmp.path()).unwrap();
+
+    let after = fs::read_to_string(tmp.path().join(".argosfs/journal.jsonl")).unwrap();
+    assert!(after.lines().count() <= 3);
+    let report = ArgosFs::audit_transactions(tmp.path()).unwrap();
+    assert_eq!(report.invalid_entries, 0);
+
+    for name in ["meta.primary.json", "meta.secondary.json", "meta.json"] {
+        fs::remove_file(tmp.path().join(".argosfs").join(name)).unwrap();
+    }
+    let reopened = ArgosFs::open(tmp.path()).unwrap();
+    assert!(reopened.resolve_path("/manual-compact-9", false).is_ok());
+    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
+}
+
+#[test]
 fn before_journal_write_failure_rolls_back_live_metadata() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();

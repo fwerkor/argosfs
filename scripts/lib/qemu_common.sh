@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+
+argosfs_qemu_select_arch() {
+	arch="${ARGOSFS_QEMU_ARCH:-x86_64}"
+	case "$arch" in
+		x86_64)
+			qemu_bin="${ARGOSFS_QEMU_BIN:-qemu-system-x86_64}"
+			machine="${ARGOSFS_QEMU_MACHINE:-pc}"
+			cpu_args=()
+			default_rootdev="/dev/vda"
+			default_drive_if="virtio"
+			;;
+		aarch64|arm64)
+			arch="arm64"
+			qemu_bin="${ARGOSFS_QEMU_BIN:-qemu-system-aarch64}"
+			machine="${ARGOSFS_QEMU_MACHINE:-virt}"
+			cpu_args=(-cpu "${ARGOSFS_QEMU_CPU:-cortex-a57}")
+			default_rootdev="/dev/vda"
+			default_drive_if="virtio"
+			;;
+		riscv64)
+			qemu_bin="${ARGOSFS_QEMU_BIN:-qemu-system-riscv64}"
+			machine="${ARGOSFS_QEMU_MACHINE:-virt}"
+			cpu_args=()
+			default_rootdev="/dev/vda"
+			default_drive_if="virtio"
+			;;
+		*)
+			echo "unknown ARGOSFS_QEMU_ARCH=$arch" >&2
+			exit 2
+			;;
+	esac
+}
+
+argosfs_qemu_require_binary() {
+	if ! command -v "$qemu_bin" >/dev/null 2>&1; then
+		echo "SKIP: $qemu_bin not found" >&2
+		exit 0
+	fi
+}
+
+argosfs_qemu_decompress_if_needed() {
+	local input="$1"
+	local outdir="$2"
+	[ -n "$input" ] || return 0
+	if [ ! -e "$input" ]; then
+		echo "$input"
+		return 0
+	fi
+	case "$input" in
+		*.gz)
+			mkdir -p "$outdir"
+			local output
+			output="$outdir/$(basename "${input%.gz}")"
+			if [ ! -e "$output" ] || [ "$input" -nt "$output" ]; then
+				gzip -dc "$input" >"$output"
+			fi
+			echo "$output"
+			;;
+		*)
+			echo "$input"
+			;;
+	esac
+}
+
+argosfs_qemu_find_arm64_uefi() {
+	local candidate
+	for candidate in \
+		/usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+		/usr/share/edk2/aarch64/QEMU_EFI.fd \
+		/usr/share/AAVMF/AAVMF_CODE.fd; do
+		if [ -r "$candidate" ]; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+
+argosfs_qemu_adjust_login_delay() {
+	local delay="$1"
+	if [ "${arch:-}" = "arm64" ] && [ "${delay:-0}" -lt "${ARGOSFS_QEMU_ARM64_MIN_LOGIN_DELAY:-220}" ]; then
+		echo "${ARGOSFS_QEMU_ARM64_MIN_LOGIN_DELAY:-220}"
+	else
+		echo "$delay"
+	fi
+}
+
+argosfs_qemu_kill_tree() {
+	local pid="$1"
+	[ -n "$pid" ] || return 0
+	local child
+	for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+		argosfs_qemu_kill_tree "$child"
+	done
+	kill -9 "$pid" 2>/dev/null || true
+}
+
+argosfs_qemu_wait_process_gone() {
+	local pid="$1"
+	local tries="${2:-30}"
+	local i=0
+	while [ "$i" -lt "$tries" ]; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			return 0
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+argosfs_qemu_build_args() {
+	kernel="${ARGOSFS_QEMU_KERNEL:-}"
+	rootfs="${ARGOSFS_QEMU_ROOTFS:-}"
+	initrd="${ARGOSFS_QEMU_INITRD:-}"
+	disk_image="${ARGOSFS_QEMU_DISK_IMAGE:-}"
+	firmware_code="${ARGOSFS_QEMU_FIRMWARE_CODE:-}"
+	firmware_vars="${ARGOSFS_QEMU_FIRMWARE_VARS:-}"
+	qemu_scratch="${ARGOSFS_QEMU_SCRATCH:-$artifacts/qemu-scratch}"
+	mkdir -p "$qemu_scratch"
+	rootfs="$(argosfs_qemu_decompress_if_needed "$rootfs" "$qemu_scratch")"
+	disk_image="$(argosfs_qemu_decompress_if_needed "$disk_image" "$qemu_scratch")"
+
+	qemu_args=(
+		-machine "$machine"
+		-m "${ARGOSFS_QEMU_MEM:-1024}"
+		"${cpu_args[@]}"
+		-nographic
+	)
+	if [ "${ARGOSFS_QEMU_NET:-none}" = "none" ]; then
+		qemu_args+=(-nic none)
+	fi
+	if [ "${ARGOSFS_QEMU_NO_REBOOT:-1}" = "1" ]; then
+		qemu_args+=(-no-reboot)
+	fi
+	if [ -n "$firmware_code" ]; then
+		if [ ! -e "$firmware_code" ]; then
+			echo "ARGOSFS_QEMU_FIRMWARE_CODE does not exist: $firmware_code" >&2
+			exit 1
+		fi
+		qemu_args+=(-drive "if=pflash,format=raw,readonly=on,file=$firmware_code")
+		if [ -n "$firmware_vars" ]; then
+			if [ ! -e "$firmware_vars" ]; then
+				echo "ARGOSFS_QEMU_FIRMWARE_VARS does not exist: $firmware_vars" >&2
+				exit 1
+			fi
+			qemu_args+=(-drive "if=pflash,format=raw,file=$firmware_vars")
+		fi
+	elif [ "$arch" = "arm64" ] && [ -z "$kernel" ] && [ -n "$disk_image" ]; then
+		firmware_code="$(argosfs_qemu_find_arm64_uefi || true)"
+		if [ -z "$firmware_code" ]; then
+			echo "missing AArch64 UEFI firmware for disk-image boot" >&2
+			exit 1
+		fi
+		qemu_args+=(-bios "$firmware_code")
+	fi
+	if [ -n "$kernel" ]; then
+		if [ ! -e "$kernel" ]; then
+			echo "ARGOSFS_QEMU_KERNEL does not exist: $kernel" >&2
+			exit 1
+		fi
+		qemu_args+=(-kernel "$kernel")
+		append="${ARGOSFS_QEMU_APPEND:-console=ttyS0 rootwait argosfs.images=${ARGOSFS_QEMU_ROOTDEV:-$default_rootdev} argosfs.mode=${ARGOSFS_QEMU_ROOT_MODE:-rw}}"
+		qemu_args+=(-append "$append")
+		if [ -n "$initrd" ]; then
+			if [ ! -e "$initrd" ]; then
+				echo "ARGOSFS_QEMU_INITRD does not exist: $initrd" >&2
+				exit 1
+			fi
+			qemu_args+=(-initrd "$initrd")
+		fi
+		if [ -n "$rootfs" ]; then
+			if [ ! -e "$rootfs" ]; then
+				echo "ARGOSFS_QEMU_ROOTFS does not exist: $rootfs" >&2
+				exit 1
+			fi
+			drive_if="${ARGOSFS_QEMU_DRIVE_IF:-$default_drive_if}"
+			if [ "$arch" = "arm64" ] && [ "$drive_if" = "virtio" ]; then
+				qemu_args+=(-drive "file=$rootfs,format=raw,if=none,id=rootdisk")
+				qemu_args+=(-device "virtio-blk-pci,drive=rootdisk,romfile=")
+			else
+				qemu_args+=(-drive "file=$rootfs,format=raw,if=$drive_if,id=rootdisk")
+			fi
+		fi
+	elif [ -n "$disk_image" ]; then
+		if [ ! -e "$disk_image" ]; then
+			echo "ARGOSFS_QEMU_DISK_IMAGE does not exist: $disk_image" >&2
+			exit 1
+		fi
+		drive_if="${ARGOSFS_QEMU_DRIVE_IF:-$default_drive_if}"
+		if [ "$arch" = "arm64" ] && [ "$drive_if" = "virtio" ]; then
+			qemu_args+=(-drive "file=$disk_image,format=raw,if=none,id=rootdisk")
+			qemu_args+=(-device "virtio-blk-pci,drive=rootdisk,romfile=")
+		else
+			qemu_args+=(-drive "file=$disk_image,format=raw,if=$drive_if,id=rootdisk")
+		fi
+	else
+		echo "SKIP: QEMU requires ARGOSFS_QEMU_KERNEL or ARGOSFS_QEMU_DISK_IMAGE" >&2
+		exit 0
+	fi
+}

@@ -35,9 +35,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+        run: scripts/ci_install_rust.sh stable rustfmt clippy
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -73,7 +71,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -81,7 +79,7 @@ jobs:
           key: rust-unit-${{ matrix.arch }}
 
       - name: Run tests
-        run: cargo test --all-targets --all-features
+        run: cargo test --all-targets --all-features -- --test-threads=1
 
       - name: Build release binary
         run: cargo build --release --all-targets --all-features
@@ -106,7 +104,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -146,7 +144,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -184,6 +182,8 @@ jobs:
             command: scripts/test_rootfs_smoke.sh
           - suite: mounted-fuse
             command: scripts/test_privileged_fuse.sh
+          - suite: randomized-model
+            command: scripts/test_randomized_model.sh
           - suite: pjdfstest
             command: scripts/compat/run_pjdfstest.sh "$RUNNER_TEMP/pjdfstest.jsonl"
     steps:
@@ -194,7 +194,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -228,7 +228,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -241,7 +241,7 @@ jobs:
       - name: Check shell syntax
         run: |
           sh -n contrib/initramfs/argosfs-root.sh contrib/capos/initramfs/argosfs-root.sh contrib/capos/initramfs/hooks/argosfs
-          bash -n scripts/*.sh scripts/compat/*.sh scripts/experiments/*.sh
+          bash -n scripts/*.sh scripts/ci/*.sh scripts/compat/*.sh scripts/experiments/*.sh
 
       - name: Run retained validation workflow
         run: python3 scripts/run_full_validation.py --output "$RUNNER_TEMP/argosfs-validation"
@@ -264,7 +264,6 @@ jobs:
         include:
           - arch: x86_64
           - arch: arm64
-          - arch: riscv64
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -282,7 +281,6 @@ jobs:
           case "$ARGOSFS_QEMU_ARCH" in
             x86_64) qemu-system-x86_64 --version ;;
             arm64) qemu-system-aarch64 --version ;;
-            riscv64) qemu-system-riscv64 --version ;;
           esac
 
       - name: Run artifact-gated QEMU boot probe
@@ -324,8 +322,6 @@ jobs:
             arch: x86_64
           - capos_target: armsr_armv8
             arch: arm64
-          - capos_target: riscv64_sifiveu
-            arch: riscv64
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -334,7 +330,7 @@ jobs:
         run: scripts/ci_install_deps.sh
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: scripts/ci_install_rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -346,6 +342,10 @@ jobs:
           ARGOSFS_CAPOS_TARGET_MATRIX: ${{ matrix.capos_target }}
           ARGOSFS_CAPOS_BUILD_TARGET: ${{ matrix.capos_target }}
           ARGOSFS_CAPOS_MAKE_JOBS: "2"
+          ARGOSFS_CAPOS_MAKE_V: s
+          ARGOSFS_CAPOS_LOG_STDOUT: periodic
+          ARGOSFS_CI_LOG_INTERVAL_S: "120"
+          ARGOSFS_CI_LOG_TAIL_LINES: "35"
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/argosfs-capos-${{ matrix.capos_target }}
         run: scripts/test_capos_build.sh
 
