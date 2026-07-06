@@ -48,7 +48,7 @@ jobs:
             qemu_mem: "1536"
     steps:
       - name: Checkout ArgosFS
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         env:
@@ -289,7 +289,7 @@ jobs:
             job_timeout: 45
     steps:
       - name: Checkout ArgosFS
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install QEMU test dependencies
         env:
