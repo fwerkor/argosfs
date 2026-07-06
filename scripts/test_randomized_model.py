@@ -126,8 +126,12 @@ def random_payload(rng: random.Random, max_size: int) -> bytes:
     return bytes(rng.getrandbits(8) for _ in range(size))
 
 
-def chmod_mode(rng: random.Random) -> int:
-    return rng.choice([0o600, 0o640, 0o644, 0o664, 0o700, 0o755])
+def file_mode(rng: random.Random) -> int:
+    return rng.choice([0o600, 0o640, 0o644, 0o664])
+
+
+def dir_mode(rng: random.Random) -> int:
+    return rng.choice([0o700, 0o750, 0o755, 0o775])
 
 
 def compare_trees(reference: Path, exported: Path) -> None:
@@ -199,7 +203,7 @@ def apply_operation(
 
     if op == "mkdir":
         rel = unused_child(reference, rng, "dir")
-        mode = chmod_mode(rng)
+        mode = dir_mode(rng)
         run_cmd([str(argosfs), "mkdir", str(volume), rel_to_argos(rel), "--mode", format(mode, "o")], log)
         (reference / rel).mkdir()
         os.chmod(reference / rel, mode)
@@ -241,7 +245,7 @@ def apply_operation(
     elif op == "chmod" and (files or len(dirs) > 1):
         candidates = files + [d for d in dirs if d != "."]
         rel = rng.choice(candidates)
-        mode = chmod_mode(rng)
+        mode = dir_mode(rng) if (reference / rel).is_dir() else file_mode(rng)
         run_cmd([str(argosfs), "chmod", str(volume), rel_to_argos(rel), format(mode, "o")], log)
         os.chmod(reference / rel, mode)
         event.update({"path": rel, "mode": oct(mode)})
