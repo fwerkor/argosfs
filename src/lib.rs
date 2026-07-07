@@ -8,8 +8,8 @@ pub mod health;
 pub mod inode_ops;
 pub mod journal;
 pub mod metadata_store;
+pub mod model;
 pub mod storage;
-pub mod types;
 pub mod util;
 pub mod volume;
 
@@ -18,6 +18,7 @@ pub use data::{advanced_io, cache, compression, crypto, erasure};
 pub use error::{ArgosError, Result};
 pub use frontend::{fusefs, metrics, rootfs};
 pub use inode_ops::{DirEntry, NodeAttr, RenamePolicy};
+pub use model::types;
 pub use storage::raw::{allocator, format as raw_format, store as raw_store};
 pub use storage::{backend, scan};
 pub use types::{BackendKind, Compression, DiskStatus, StorageTier, VolumeConfig};
