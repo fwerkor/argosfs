@@ -1,10 +1,9 @@
 pub mod acl;
-pub mod autopilot;
 pub mod cli;
+pub mod control;
 pub mod data;
 pub mod error;
 pub mod frontend;
-pub mod health;
 pub mod inode_ops;
 pub mod journal;
 pub mod metadata_store;
@@ -13,7 +12,8 @@ pub mod storage;
 pub mod util;
 pub mod volume;
 
-pub use autopilot::AutopilotPolicy;
+pub use control::autopilot::AutopilotPolicy;
+pub use control::{autopilot, health};
 pub use data::{advanced_io, cache, compression, crypto, erasure};
 pub use error::{ArgosError, Result};
 pub use frontend::{fusefs, metrics, rootfs};
