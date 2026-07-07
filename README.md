@@ -31,7 +31,7 @@ See `docs/raw-backend.md`, `docs/capos-rootfs.md`, and
 ArgosFS is a Rust implementation of a self-driving, erasure-coded Linux
 filesystem. It provides a real FUSE mount frontend suitable for root filesystem
 experiments, plus a management CLI, health autopilot, repair tooling, and
-retained validation data workflows.
+artifact-generation workflows.
 
 ArgosFS is implemented in Rust for memory safety and future kernel-adjacent
 reuse. The data plane uses mature crates rather than hand-rolled primitives:

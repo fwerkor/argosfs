@@ -14,9 +14,9 @@ implemented as a Rust core with a real FUSE frontend.
 - Metadata service: JSON metadata committed with copy-on-write replacement,
   triple metadata copies, hash-chained journal records with full metadata
   snapshots, replay on open, audit log, and point-in-time metadata snapshots.
-- Inode-facing API types live in `inode_ops`, while `volume` owns the current
-  orchestration path. This is the first split toward smaller inode/data-plane
-  modules.
+- Inode-facing API types live in `metadata::inode_ops`, while `volume` owns the
+  current orchestration path. This is the first split toward smaller inode and
+  data-plane modules.
 - Data plane: block compression, optional authenticated encryption,
   Reed-Solomon erasure coding, weighted placement, shard checksum verification,
   hard capacity enforcement, repair, and migration.
@@ -28,6 +28,26 @@ implemented as a Rust core with a real FUSE frontend.
   scoring, persistent risk memory, confirmation/cooldown-gated failure
   response, disk draining, incremental scrub, budgeted rebalance, adaptive
   action scoring, latency feedback, and cache maintenance.
+
+## Source Layout
+
+- `src/volume/`: the public `ArgosFs` facade and current orchestration path.
+- `src/model/`: serializable domain models, configs, reports, and metadata
+  structs.
+- `src/metadata/`: inode-facing API types, metadata paging helpers, and journal
+  recovery/commit logic.
+- `src/storage/`: host, loop, and raw block storage backends, raw format
+  parsing, raw allocator state, and device scanning.
+- `src/data/`: compression, encryption, erasure coding, cache, and advanced I/O
+  helpers used by the data path.
+- `src/frontend/`: FUSE, metrics, and rootfs-facing integration surfaces.
+- `src/control/`: health probing and autopilot policy/planning logic.
+- `src/security/`: ACL parsing and permission evaluation.
+- `src/cli/`: command-line parsing and command dispatch.
+
+The crate root keeps compatibility re-exports such as `crate::raw_store` and
+`crate::fusefs` so this layout can evolve without forcing every internal caller
+to move at once.
 
 ## Data Path
 
