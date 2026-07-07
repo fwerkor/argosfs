@@ -2,7 +2,7 @@
 set -euo pipefail
 
 mode="quick"
-out="paper-data/runs/experiment-$(date +%Y%m%d-%H%M%S)"
+out="target/argosfs-artifacts/runs/experiment-$(date +%Y%m%d-%H%M%S)"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in

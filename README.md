@@ -93,7 +93,7 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
   policy-separated user intent, background I/O throttling, budgeted rebalance,
   and metadata-conflict protection.
 - Root filesystem integration assets for initramfs and systemd.
-- Comprehensive Rust tests and `paper-data/` validation output for later papers.
+- Comprehensive Rust tests and validation workflows for reproducible artifacts.
 
 ## Build
 
@@ -233,13 +233,13 @@ ArgosFS can be mounted as a Linux root filesystem through initramfs:
 
 See `docs/rootfs.md`, `docs/boot.md`, and `contrib/` for templates.
 
-## Validation Data
+## Validation Artifacts
 
-Run the retained validation workflow:
+Run the validation workflow:
 
 ```bash
-python3 scripts/run_full_validation.py --output paper-data/runs/manual
-scripts/experiments/run_all.sh --quick --output paper-data/runs/ae-quick
+python3 scripts/run_full_validation.py --output target/argosfs-artifacts/runs/manual
+scripts/experiments/run_all.sh --quick --output target/argosfs-artifacts/runs/ae-quick
 ```
 
 The run directory contains:

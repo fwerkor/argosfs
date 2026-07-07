@@ -16,7 +16,7 @@ research, but it is not the intended long-term scaling design.
 ## Benchmark Entry Point
 
 ```bash
-python3 scripts/experiments/run_metadata_scalability.py --mode quick --output paper-data/raw/metadata-scalability.csv
+python3 scripts/experiments/run_metadata_scalability.py --mode quick --output target/argosfs-artifacts/raw/metadata-scalability.csv
 ```
 
 The benchmark records metadata size pressure against file count. It is a

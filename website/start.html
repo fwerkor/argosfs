@@ -9,7 +9,7 @@
   <body data-page="start">
     <header class="site-header"><a class="brand" href="index.html"><span class="brand-mark"></span><span>ArgosFS</span></a><button class="nav-toggle" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button><nav class="site-nav" aria-label="Primary navigation"><a href="index.html" data-nav="home">Home</a><a href="technology.html" data-nav="technology">Technology</a><a href="research.html" data-nav="research">Research</a><a href="compatibility.html" data-nav="compatibility">Compatibility</a><a href="start.html" data-nav="start">Start</a><a class="github-link" href="https://github.com/fwerkor/argosfs">GitHub</a></nav></header>
     <main>
-      <section class="page-hero"><canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas><div><p class="eyebrow">Get started</p><h1>Build a local autonomous storage lab.</h1><p>ArgosFS is a Rust project with a management CLI, FUSE mount frontend, validation scripts, retained artifact data, and experiments for recovery, placement, compatibility, and rootfs behavior.</p></div></section>
+      <section class="page-hero"><canvas class="mesh-canvas" data-scene="page" aria-hidden="true"></canvas><div><p class="eyebrow">Get started</p><h1>Build a local autonomous storage lab.</h1><p>ArgosFS is a Rust project with a management CLI, FUSE mount frontend, validation scripts, and experiments for recovery, placement, compatibility, and rootfs behavior.</p></div></section>
       <section class="section steps"><article><span>01</span><h3>Install dependencies</h3><p>Use a Linux host or VM with FUSE 3 and SMART tooling. Some compatibility tests need elevated privileges.</p><pre><code>sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libfuse3-dev fuse3 smartmontools</code></pre></article><article><span>02</span><h3>Build and test</h3><p>Start with normal Rust checks before mounting a volume.</p><pre><code>cargo build --release
 cargo test
@@ -21,10 +21,10 @@ target/release/argosfs autopilot /var/lib/argosfs/root --dry-run --explain --jso
       <section class="section detail-split"><div><p class="eyebrow">Common commands</p><h2>Useful CLI surfaces.</h2><p>The CLI is meant for both operation and research. Most commands can be used manually, scripted in experiments, or captured as artifacts.</p></div><div class="detail-panel"><span>Command map</span><h3>What to inspect</h3><ul><li><code class="inline-code">health --json</code>: disk health, capacity, parser status, and risk signals.</li><li><code class="inline-code">autopilot --dry-run --explain --json</code>: planned maintenance without mutation.</li><li><code class="inline-code">fsck --repair</code>: metadata, orphan, and consistency repair checks.</li><li><code class="inline-code">verify-journal</code>: journal snapshot and hash-chain validation.</li><li><code class="inline-code">export</code> / <code class="inline-code">import</code>: rootfs and metadata roundtrip testing.</li><li><code class="inline-code">metrics</code>: Prometheus-oriented observability output for experiments.</li></ul></div></section>
       <section class="section code-band"><div><p class="eyebrow">Experiment mode</p><h2>Generate artifacts instead of screenshots.</h2><p>For paper-style evaluation, use the experiment scripts so results include raw records, summaries, and manifests.</p></div><pre><code>scripts/compat/run_fuse_smoke.sh
 scripts/compat/run_deep_roundtrip.sh /mnt/argos-root
-scripts/experiments/run_all.sh --quick --output paper-data/runs/ae-quick
+scripts/experiments/run_all.sh --quick --output target/argosfs-artifacts/runs/ae-quick
 python3 scripts/experiments/summarize_results.py \
-  paper-data/runs/ae-quick/raw \
-  paper-data/runs/ae-quick</code></pre></section>
+  target/argosfs-artifacts/runs/ae-quick/raw \
+  target/argosfs-artifacts/runs/ae-quick</code></pre></section>
       <section class="section callout"><div><p class="eyebrow">Repository</p><h2>Everything starts from the GitHub repo.</h2></div><a class="button primary" href="https://github.com/fwerkor/argosfs">Clone ArgosFS</a></section>
     </main>
     <footer class="site-footer"><span>ArgosFS</span><a href="https://github.com/fwerkor/argosfs">GitHub</a><a href="technology.html">Technology</a></footer><script src="app.js"></script>
