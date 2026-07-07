@@ -1,13 +1,9 @@
 pub mod acl;
-pub mod advanced_io;
 pub mod allocator;
 pub mod autopilot;
 pub mod backend;
-pub mod cache;
 pub mod cli;
-pub mod compression;
-pub mod crypto;
-pub mod erasure;
+pub mod data;
 pub mod error;
 pub mod fusefs;
 pub mod health;
@@ -24,6 +20,7 @@ pub mod util;
 pub mod volume;
 
 pub use autopilot::AutopilotPolicy;
+pub use data::{advanced_io, cache, compression, crypto, erasure};
 pub use error::{ArgosError, Result};
 pub use inode_ops::{DirEntry, NodeAttr, RenamePolicy};
 pub use types::{BackendKind, Compression, DiskStatus, StorageTier, VolumeConfig};
