@@ -4,6 +4,7 @@ pub mod allocator;
 pub mod autopilot;
 pub mod backend;
 pub mod cache;
+pub mod cli;
 pub mod compression;
 pub mod crypto;
 pub mod erasure;
