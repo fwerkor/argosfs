@@ -73,10 +73,14 @@ pub fn encrypt_with_key(
     aad: &[u8],
 ) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
     let nonce: [u8; NONCE_LEN] = rand::random();
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = XChaCha20Poly1305::new(
+        <&Key>::try_from(&key[..])
+            .map_err(|_| ArgosError::Invalid("invalid encryption key length".to_string()))?,
+    );
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            <&XNonce>::try_from(&nonce[..])
+                .map_err(|_| ArgosError::Invalid("invalid encryption nonce length".to_string()))?,
             chacha20poly1305::aead::Payload {
                 msg: plaintext,
                 aad,
@@ -97,10 +101,14 @@ pub fn decrypt_with_key(
             "invalid encryption nonce length".to_string(),
         ));
     }
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = XChaCha20Poly1305::new(
+        <&Key>::try_from(&key[..])
+            .map_err(|_| ArgosError::Invalid("invalid encryption key length".to_string()))?,
+    );
     cipher
         .decrypt(
-            XNonce::from_slice(nonce),
+            <&XNonce>::try_from(nonce)
+                .map_err(|_| ArgosError::Invalid("invalid encryption nonce length".to_string()))?,
             chacha20poly1305::aead::Payload {
                 msg: ciphertext,
                 aad,
