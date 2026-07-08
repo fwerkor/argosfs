@@ -32,10 +32,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: scripts/ci_install_deps.sh
+        run: scripts/ci/install-deps.sh
 
       - name: Install Rust toolchain
-        run: scripts/ci_install_rust.sh stable rustfmt clippy
+        run: scripts/ci/install-rust.sh stable rustfmt clippy
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -68,10 +68,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: scripts/ci_install_deps.sh
+        run: scripts/ci/install-deps.sh
 
       - name: Install Rust toolchain
-        run: scripts/ci_install_rust.sh stable
+        run: scripts/ci/install-rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -101,10 +101,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: scripts/ci_install_deps.sh
+        run: scripts/ci/install-deps.sh
 
       - name: Install Rust toolchain
-        run: scripts/ci_install_rust.sh stable
+        run: scripts/ci/install-rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -114,7 +114,7 @@ jobs:
       - name: Run host feature checks
         env:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/argosfs-cli-features-${{ matrix.arch }}
-        run: scripts/test_cli_features.sh
+        run: scripts/tests/host/cli_features.sh
 
       - name: Upload feature artifacts
         if: always()
@@ -141,10 +141,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: scripts/ci_install_deps.sh
+        run: scripts/ci/install-deps.sh
 
       - name: Install Rust toolchain
-        run: scripts/ci_install_rust.sh stable
+        run: scripts/ci/install-rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -154,7 +154,7 @@ jobs:
       - name: Run loop block lifecycle checks
         env:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/argosfs-block-lifecycle-${{ matrix.arch }}
-        run: scripts/test_block_lifecycle.sh
+        run: scripts/tests/host/block_lifecycle.sh
 
       - name: Upload block lifecycle artifacts
         if: always()
@@ -173,17 +173,17 @@ jobs:
       matrix:
         include:
           - suite: loop-backend
-            command: scripts/test_loop_backend.sh
+            command: scripts/tests/host/loop_backend.sh
           - suite: crash-consistency
-            command: scripts/test_crash_consistency.sh --unprivileged
+            command: scripts/tests/host/crash_consistency.sh --unprivileged
           - suite: initramfs-dry-run
-            command: scripts/test_initramfs_dry_run.sh
+            command: scripts/tests/host/initramfs_dry_run.sh
           - suite: rootfs-smoke
-            command: scripts/test_rootfs_smoke.sh
+            command: scripts/tests/host/rootfs_smoke.sh
           - suite: mounted-fuse
-            command: scripts/test_privileged_fuse.sh
+            command: scripts/tests/host/privileged_fuse.sh
           - suite: randomized-model
-            command: scripts/test_randomized_model.sh
+            command: scripts/tests/host/randomized_model.sh
           - suite: pjdfstest
             command: scripts/compat/run_pjdfstest.sh "$RUNNER_TEMP/pjdfstest.jsonl"
     steps:
@@ -191,10 +191,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: scripts/ci_install_deps.sh
+        run: scripts/ci/install-deps.sh
 
       - name: Install Rust toolchain
-        run: scripts/ci_install_rust.sh stable
+        run: scripts/ci/install-rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -225,10 +225,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: scripts/ci_install_deps.sh
+        run: scripts/ci/install-deps.sh
 
       - name: Install Rust toolchain
-        run: scripts/ci_install_rust.sh stable
+        run: scripts/ci/install-rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -236,15 +236,15 @@ jobs:
           key: retained-validation
 
       - name: Check validation script syntax
-        run: python3 -m py_compile scripts/run_full_validation.py scripts/compat/mounted_fuse_ops.py
+        run: python3 -m py_compile scripts/validation/run_full_validation.py scripts/compat/mounted_fuse_ops.py
 
       - name: Check shell syntax
         run: |
-          sh -n contrib/initramfs/argosfs-root.sh contrib/capos/initramfs/argosfs-root.sh contrib/capos/initramfs/hooks/argosfs
-          bash -n scripts/*.sh scripts/ci/*.sh scripts/compat/*.sh scripts/experiments/*.sh
+          sh -n integrations/generic/initramfs/argosfs-root.sh integrations/capos/initramfs/argosfs-root.sh integrations/capos/initramfs/hooks/argosfs
+          find scripts -name '*.sh' -print0 | xargs -0 bash -n
 
       - name: Run retained validation workflow
-        run: python3 scripts/run_full_validation.py --output "$RUNNER_TEMP/argosfs-validation"
+        run: python3 scripts/validation/run_full_validation.py --output "$RUNNER_TEMP/argosfs-validation"
 
       - name: Upload validation artifacts
         if: always()
@@ -269,10 +269,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: scripts/ci_install_deps.sh
+        run: scripts/ci/install-deps.sh
 
       - name: Check QEMU scripts
-        run: bash -n scripts/test_qemu_boot.sh scripts/test_qemu_ops.sh scripts/test_qemu_hotplug.sh
+        run: bash -n scripts/qemu/boot.sh scripts/qemu/ops.sh scripts/qemu/hotplug.sh
 
       - name: Probe QEMU binary
         env:
@@ -287,19 +287,19 @@ jobs:
         env:
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/argosfs-qemu-${{ matrix.arch }}
-        run: scripts/test_qemu_boot.sh
+        run: scripts/qemu/boot.sh
 
       - name: Run artifact-gated QEMU ops probe
         env:
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/argosfs-qemu-${{ matrix.arch }}
-        run: scripts/test_qemu_ops.sh
+        run: scripts/qemu/ops.sh
 
       - name: Run artifact-gated QEMU hotplug probe
         env:
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/argosfs-qemu-${{ matrix.arch }}
-        run: scripts/test_qemu_hotplug.sh
+        run: scripts/qemu/hotplug.sh
 
       - name: Upload QEMU artifacts
         if: always()
@@ -327,10 +327,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install CapOS package build prerequisites
-        run: scripts/ci_install_deps.sh
+        run: scripts/ci/install-deps.sh
 
       - name: Install Rust toolchain
-        run: scripts/ci_install_rust.sh stable
+        run: scripts/ci/install-rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -347,7 +347,7 @@ jobs:
           ARGOSFS_CI_LOG_INTERVAL_S: "120"
           ARGOSFS_CI_LOG_TAIL_LINES: "35"
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/argosfs-capos-${{ matrix.capos_target }}
-        run: scripts/test_capos_build.sh
+        run: scripts/qemu/capos_build.sh
 
       - name: Upload CapOS artifacts
         if: always()

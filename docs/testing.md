@@ -14,22 +14,22 @@ Raw/loop backend checks:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-scripts/test_cli_features.sh
-scripts/test_loop_backend.sh
-scripts/test_block_lifecycle.sh
-scripts/test_crash_consistency.sh --unprivileged
-scripts/test_initramfs_dry_run.sh
-scripts/test_rootfs_smoke.sh
+scripts/tests/host/cli_features.sh
+scripts/tests/host/loop_backend.sh
+scripts/tests/host/block_lifecycle.sh
+scripts/tests/host/crash_consistency.sh --unprivileged
+scripts/tests/host/initramfs_dry_run.sh
+scripts/tests/host/rootfs_smoke.sh
 ```
 
 Privileged checks are provided but skip unless the environment is ready:
 
 ```bash
-sudo ARGOSFS_RAW_TEST_DEVICES=/dev/...,/dev/... scripts/test_raw_backend.sh --force
-scripts/test_privileged_fuse.sh
-scripts/test_qemu_boot.sh
-scripts/test_qemu_ops.sh
-scripts/test_qemu_hotplug.sh
+sudo ARGOSFS_RAW_TEST_DEVICES=/dev/...,/dev/... scripts/tests/host/raw_backend.sh --force
+scripts/tests/host/privileged_fuse.sh
+scripts/qemu/boot.sh
+scripts/qemu/ops.sh
+scripts/qemu/hotplug.sh
 ```
 
 Loop/raw integration tests include raw superblock backup recovery, duplicate
@@ -38,19 +38,19 @@ raw extent corruption repair, and raw data-write crash injection before journal
 commit. The crash script runs only unprivileged crash/replay cases by default;
 raw block devices, FUSE mounts, and QEMU boot are explicit privileged/local
 checks and print a skip reason when unavailable.
-`scripts/test_qemu_ops.sh` extends the QEMU boot check by activating the serial
+`scripts/qemu/ops.sh` extends the QEMU boot check by activating the serial
 console and running rootfs operations: verify the ArgosFS `/` mount, verify the
 initramfs root marker under `/run`, read `/etc/openwrt_release`, exercise
 create/read/symlink/delete on `/tmp`, and call `sync`.
 
 
-`scripts/test_cli_features.sh` is the fast host-backed feature gate used by the
+`scripts/tests/host/cli_features.sh` is the fast host-backed feature gate used by the
 CI architecture matrix. It covers CLI create/read/write/stat/ls/cat/get, chmod,
 truncate, symlink, rename, snapshot, POSIX ACL, NFSv4 ACL, transparent
 compression, encryption with re-encryption, scrub, fsck, journal verification,
 and health output.
 
-`scripts/test_block_lifecycle.sh` is the non-destructive loop-block device
+`scripts/tests/host/block_lifecycle.sh` is the non-destructive loop-block device
 lifecycle gate. It creates a three-device pool, imports a dataset, adds a new
 device, drains and removes an old device, replaces another device, reshapes the
 pool, scrubs/fscks it, exports the dataset, and checks byte-for-byte equality.
