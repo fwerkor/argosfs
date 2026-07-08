@@ -166,7 +166,7 @@ def main() -> int:
     parser.add_argument("--keep-existing", action="store_true")
     args = parser.parse_args()
 
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     out = args.output.resolve()
     if out.exists() and not args.keep_existing:
         shutil.rmtree(out)
