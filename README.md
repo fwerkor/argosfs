@@ -25,9 +25,9 @@ target/debug/argosfs scan --backend loop --images disk0.img,disk1.img,disk2.img 
 target/debug/argosfs preflight-root --backend loop --images disk0.img,disk1.img,disk2.img --mode rw
 ```
 
-See `docs/raw-backend.md`, `docs/capos-rootfs.md`, `docs/limitations.md`,
-and `docs/repository-layout.md` for the raw layout, CapOS boot flow, current
-limits, and repository organization.
+See `docs/raw-backend.md`, `docs/capos-rootfs.md`, and
+`docs/repository-layout.md` for the raw layout, CapOS boot flow, and repository
+organization.
 
 ArgosFS is a Rust implementation of a self-driving, erasure-coded Linux
 filesystem. It provides a real FUSE mount frontend suitable for root filesystem
@@ -256,12 +256,3 @@ See `docs/artifact-evaluation.md`, `docs/compatibility-report.md`,
 `docs/self-driving-model.md`, `docs/safety-invariants.md`, and
 `docs/related-work.md` for paper-oriented reproduction and positioning. A
 static project website lives in `website/index.html`.
-
-## Limitations
-
-ArgosFS is a complete research filesystem project with a real FUSE frontend, but
-it is not yet a production-certified kernel filesystem. Raw checkpoints now use
-a page-indexed checksum tree, but the logical metadata model is still a
-serialized JSON object rather than a fully split inode/directory B-tree. That
-makes experiments transparent and auditable; `docs/metadata-scalability.md`
-tracks the remaining metadata scalability work and benchmark entry point.
