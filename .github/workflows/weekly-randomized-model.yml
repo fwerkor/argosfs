@@ -43,10 +43,10 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: scripts/ci_install_deps.sh
+        run: scripts/ci/install-deps.sh
 
       - name: Install Rust toolchain
-        run: scripts/ci_install_rust.sh stable
+        run: scripts/ci/install-rust.sh stable
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -64,7 +64,7 @@ jobs:
           ARGOSFS_RANDOM_MODEL_K: "4"
           ARGOSFS_RANDOM_MODEL_M: "2"
           ARGOSFS_RANDOM_MODEL_CHUNK_SIZE: "65536"
-        run: scripts/test_randomized_model.sh
+        run: scripts/tests/host/randomized_model.sh
 
       - name: Upload randomized model artifacts
         if: always()

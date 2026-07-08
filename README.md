@@ -25,8 +25,9 @@ target/debug/argosfs scan --backend loop --images disk0.img,disk1.img,disk2.img 
 target/debug/argosfs preflight-root --backend loop --images disk0.img,disk1.img,disk2.img --mode rw
 ```
 
-See `docs/raw-backend.md`, `docs/capos-rootfs.md`, and
-`docs/limitations.md` for the raw layout, CapOS boot flow, and current limits.
+See `docs/raw-backend.md`, `docs/capos-rootfs.md`, `docs/limitations.md`,
+and `docs/repository-layout.md` for the raw layout, CapOS boot flow, current
+limits, and repository organization.
 
 ArgosFS is a Rust implementation of a self-driving, erasure-coded Linux
 filesystem. It provides a real FUSE mount frontend suitable for root filesystem
@@ -231,14 +232,14 @@ ArgosFS can be mounted as a Linux root filesystem through initramfs:
 4. Mount with `argosfs mount ROOT /newroot --foreground`.
 5. `switch_root /newroot /sbin/init`.
 
-See `docs/rootfs.md`, `docs/boot.md`, and `contrib/` for templates.
+See `docs/rootfs.md`, `docs/boot.md`, and `integrations/` for templates.
 
 ## Validation Artifacts
 
 Run the validation workflow:
 
 ```bash
-python3 scripts/run_full_validation.py --output target/argosfs-artifacts/runs/manual
+python3 scripts/validation/run_full_validation.py --output target/argosfs-artifacts/runs/manual
 scripts/experiments/run_all.sh --quick --output target/argosfs-artifacts/runs/ae-quick
 ```
 

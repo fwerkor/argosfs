@@ -41,7 +41,7 @@ argosfs reshape --backend loop --images disk0.img,disk1.img --k 1 --m 1
 
 ## initramfs Flow
 
-`contrib/capos/initramfs/argosfs-root.sh`:
+`integrations/capos/initramfs/argosfs-root.sh`:
 
 1. mounts `/proc`, `/sys`, `/dev`, and `/run`;
 2. loads `fuse`;
@@ -61,7 +61,7 @@ argosfs reshape --backend loop --images disk0.img,disk1.img --k 1 --m 1
 CI can validate the logic without privileges:
 
 ```bash
-scripts/test_initramfs_dry_run.sh
+scripts/tests/host/initramfs_dry_run.sh
 ```
 
 ## Kernel Command Line
@@ -77,7 +77,7 @@ For real block devices use `argosfs.devices=/dev/disk/by-id/...`.
 ## Recovery and Watchdog Assets
 
 The repository provides CapOS-targeted systemd assets under
-`contrib/capos/systemd/`:
+`integrations/capos/systemd/`:
 
 - `argosfs-root.service` verifies the opened root pool after switch-root.
 - `argosfs-health.service` runs a readonly fsck health check.
