@@ -16,8 +16,8 @@ cargo test
 ## Quick Reproduction
 
 ```bash
-scripts/experiments/run_all.sh --quick --output paper-data/runs/ae-quick
-python3 scripts/experiments/summarize_results.py paper-data/runs/ae-quick/raw paper-data/runs/ae-quick
+scripts/experiments/run_all.sh --quick --output target/argosfs-artifacts/runs/ae-quick
+python3 scripts/experiments/summarize_results.py target/argosfs-artifacts/runs/ae-quick/raw target/argosfs-artifacts/runs/ae-quick
 ```
 
 Expected runtime is a few minutes on a laptop. Quick mode records deterministic
@@ -30,10 +30,10 @@ ext4 loop baseline when the runner permits loop mounts.
 ## Full Reproduction
 
 ```bash
-scripts/experiments/run_all.sh --full --output paper-data/runs/ae-full
+scripts/experiments/run_all.sh --full --output target/argosfs-artifacts/runs/ae-full
 scripts/compat/run_fuse_smoke.sh
 scripts/compat/run_mounted_fuse_compat.sh
-scripts/compat/run_pjdfstest.sh paper-data/compat/pjdfstest.jsonl
+scripts/compat/run_pjdfstest.sh target/argosfs-artifacts/compat/pjdfstest.jsonl
 ```
 
 Full mode is environment-sensitive. QEMU rootfs runs require a prepared root

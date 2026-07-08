@@ -13,8 +13,8 @@ def read_jsonl(path):
 
 
 def main():
-    raw = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "paper-data/raw")
-    out = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else "paper-data")
+    raw = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "target/argosfs-artifacts/raw")
+    out = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else "target/argosfs-artifacts")
     processed = out / "processed"
     figures = out / "figures"
     tables = out / "tables"

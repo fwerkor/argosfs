@@ -2,7 +2,7 @@
 set -euo pipefail
 
 mode="quick"
-out="paper-data/raw/qemu-rootfs.jsonl"
+out="target/argosfs-artifacts/raw/qemu-rootfs.jsonl"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --mode) shift; mode="$1" ;;

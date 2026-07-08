@@ -131,7 +131,6 @@ clone_capos_repo() {
 rsync -a --delete \
 	--exclude /.git \
 	--exclude /target \
-	--exclude /paper-data/runs \
 	"$repo"/ "$artifacts/argosfs-src"/
 if [ -n "$capos_local_source" ]; then
 	rsync -a --delete \
