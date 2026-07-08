@@ -334,7 +334,7 @@ def run_ext4_loop(out: Path, mode: str, work: Path, file_mib: int, small_files: 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["quick", "full"], default="quick")
-    parser.add_argument("--output", type=Path, default=Path("paper-data/raw/rootfs-perf.jsonl"))
+    parser.add_argument("--output", type=Path, default=Path("target/argosfs-artifacts/raw/rootfs-perf.jsonl"))
     parser.add_argument("--workdir", type=Path)
     parser.add_argument("--keep-workdir", action="store_true")
     parser.add_argument(

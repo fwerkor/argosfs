@@ -106,13 +106,13 @@ I/O and metadata.
 Run the default pjdfstest subset on a temporary ArgosFS mount with:
 
 ```bash
-scripts/compat/run_pjdfstest.sh paper-data/compat/pjdfstest.jsonl
+scripts/compat/run_pjdfstest.sh target/argosfs-artifacts/compat/pjdfstest.jsonl
 ```
 
 Or run against an existing ArgosFS mount:
 
 ```bash
-scripts/compat/run_pjdfstest.sh --mounted /mnt/argosfs paper-data/compat/pjdfstest.jsonl
+scripts/compat/run_pjdfstest.sh --mounted /mnt/argosfs target/argosfs-artifacts/compat/pjdfstest.jsonl
 ```
 
 The wrapper refuses to run unless `mountpoint(1)` confirms the target is an

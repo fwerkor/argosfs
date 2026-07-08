@@ -109,7 +109,7 @@ def corrupt_first_shard(volume: Path) -> Path:
             if not disk_path.is_absolute():
                 disk_path = volume / disk_path
             shard_path = disk_path / shard["relpath"]
-            shard_path.write_bytes(b"paper-data-corruption")
+            shard_path.write_bytes(b"validation-corruption")
             return shard_path
     raise RuntimeError("no shard found to corrupt")
 
@@ -162,7 +162,7 @@ def capture_prometheus(binary: Path, volume: Path, metrics: Path, env: dict[str,
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=Path("paper-data/runs/manual"))
+    parser.add_argument("--output", type=Path, default=Path("target/argosfs-artifacts/runs/manual"))
     parser.add_argument("--keep-existing", action="store_true")
     args = parser.parse_args()
 

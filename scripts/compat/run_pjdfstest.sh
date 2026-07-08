@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-out="${ARGOSFS_PJDFSTEST_OUT:-paper-data/compat/pjdfstest.jsonl}"
+out="${ARGOSFS_PJDFSTEST_OUT:-target/argosfs-artifacts/compat/pjdfstest.jsonl}"
 
 json_escape() {
   local value="$1"

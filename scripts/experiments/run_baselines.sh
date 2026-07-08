@@ -2,7 +2,7 @@
 set -euo pipefail
 
 mode="quick"
-out="paper-data/raw/baselines.jsonl"
+out="target/argosfs-artifacts/raw/baselines.jsonl"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --mode) shift; mode="$1" ;;

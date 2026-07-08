@@ -1,7 +1,0 @@
-scenario,runs,passed,failed
-confirmed-risk-drain,1,1,0
-cooldown-after-drain,1,1,0
-critical-drain,1,1,0
-insufficient-redundancy-observe,1,1,0
-rebalance-empty-device,1,1,0
-scrub-repair-corruption,1,1,0
