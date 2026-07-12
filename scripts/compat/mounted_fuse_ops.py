@@ -22,6 +22,64 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+def require_cross_user():
+    return os.environ.get("ARGOSFS_REQUIRE_CROSS_USER", "0") == "1"
+
+
+def nobody_identity():
+    try:
+        entry = pwd.getpwnam("nobody")
+    except KeyError as exc:
+        if require_cross_user():
+            raise AssertionError("nobody user unavailable for mandatory cross-user checks") from exc
+        return None
+    return entry.pw_uid, entry.pw_gid
+
+
+def run_as_identity(uid, gid, action):
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_fd)
+        try:
+            os.setgroups([])
+            os.setgid(gid)
+            os.setuid(uid)
+            action()
+        except BaseException as exc:
+            os.write(write_fd, repr(exc).encode("utf-8", "backslashreplace")[:4096])
+            os._exit(1)
+        os._exit(0)
+    os.close(write_fd)
+    message = b""
+    while True:
+        chunk = os.read(read_fd, 4096)
+        if not chunk:
+            break
+        message += chunk
+    os.close(read_fd)
+    _, status_code = os.waitpid(child, 0)
+    return status_code, message.decode("utf-8", "replace")
+
+
+def require_identity_action(uid, gid, action, description):
+    status_code, message = run_as_identity(uid, gid, action)
+    require(
+        os.WIFEXITED(status_code) and os.WEXITSTATUS(status_code) == 0,
+        f"{description} failed for uid={uid} gid={gid}: {message}",
+    )
+
+
+def expect_permission_denied(action):
+    try:
+        action()
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            return
+        raise AssertionError(f"unexpected denial errno={exc.errno}") from exc
+    raise AssertionError("operation unexpectedly succeeded")
+
+
 def path(root, *parts):
     return os.path.join(root, *parts)
 
@@ -156,6 +214,106 @@ def check_rename(root):
     log("passed", "rename-overwrite")
 
 
+def check_permission_enforcement(root):
+    if os.geteuid() != 0:
+        if require_cross_user():
+            raise AssertionError("mandatory permission checks must run as root")
+        log("skipped", "cross-user-permissions", "requires root to switch uid and gid")
+        return
+    identity = nobody_identity()
+    if identity is None:
+        log("skipped", "cross-user-permissions", "nobody user unavailable")
+        return
+    nobody_uid, nobody_gid = identity
+
+    private = path(root, b"private-root.txt")
+    with open(private, "wb") as f:
+        f.write(b"private")
+    os.chown(private, 0, 0)
+    os.chmod(private, 0o600)
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        lambda: expect_permission_denied(lambda: open(private, "rb").close()),
+        "other-user read denial on mode 0600",
+    )
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        lambda: expect_permission_denied(lambda: open(private, "ab").close()),
+        "other-user write denial on mode 0600",
+    )
+
+    os.chmod(private, 0o644)
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        lambda: require(open(private, "rb").read() == b"private", "public read content mismatch"),
+        "other-user read on mode 0644",
+    )
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        lambda: expect_permission_denied(lambda: open(private, "ab").close()),
+        "other-user write denial on mode 0644",
+    )
+
+    os.chmod(private, 0o666)
+    def append_public():
+        with open(private, "ab") as f:
+            f.write(b"-other")
+    require_identity_action(nobody_uid, nobody_gid, append_public, "other-user write on mode 0666")
+    require(open(private, "rb").read() == b"private-other", "cross-user append was not persisted")
+
+    locked = path(root, b"locked-dir")
+    os.mkdir(locked, 0o700)
+    locked_file = path(locked, b"inside.txt")
+    with open(locked_file, "wb") as f:
+        f.write(b"inside")
+    os.chmod(locked_file, 0o644)
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        lambda: expect_permission_denied(lambda: open(locked_file, "rb").close()),
+        "directory search denial",
+    )
+    os.chmod(locked, 0o711)
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        lambda: require(open(locked_file, "rb").read() == b"inside", "search-enabled read mismatch"),
+        "directory search permission",
+    )
+
+    inherited = path(root, b"setgid-dir")
+    os.mkdir(inherited, 0o755)
+    os.chown(inherited, 0, nobody_gid)
+    os.chmod(inherited, 0o2777)
+    inherited_file = path(inherited, b"child.txt")
+    def create_in_setgid_dir():
+        fd = os.open(inherited_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o664)
+        os.write(fd, b"setgid")
+        os.close(fd)
+    require_identity_action(nobody_uid, nobody_gid, create_in_setgid_dir, "setgid directory create")
+    inherited_stat = os.stat(inherited_file)
+    require(inherited_stat.st_uid == nobody_uid, "created file owner did not match request uid")
+    require(inherited_stat.st_gid == nobody_gid, "setgid directory group was not inherited")
+
+    owned = path(root, b"owned-by-nobody.txt")
+    with open(owned, "wb") as f:
+        f.write(b"owned")
+    os.chown(owned, nobody_uid, nobody_gid)
+    os.chmod(owned, 0o600)
+    def owner_update():
+        with open(owned, "r+b") as f:
+            require(f.read() == b"owned", "chowned file read mismatch")
+            f.seek(0, os.SEEK_END)
+            f.write(b"-updated")
+    require_identity_action(nobody_uid, nobody_gid, owner_update, "chowned owner access")
+    require(open(owned, "rb").read() == b"owned-updated", "chowned owner update was not persisted")
+    log("passed", "cross-user-permissions")
+
+
 def check_sticky(root):
     sticky = path(root, b"sticky")
     os.mkdir(sticky, 0o777)
@@ -163,32 +321,27 @@ def check_sticky(root):
     require(stat.S_IMODE(os.stat(sticky).st_mode) == 0o1777, "sticky directory mode mismatch")
 
     if os.geteuid() != 0:
+        if require_cross_user():
+            raise AssertionError("mandatory sticky-directory check must run as root")
         log("skipped", "sticky-cross-user", "requires root to switch uid safely")
         return
-    try:
-        nobody = pwd.getpwnam("nobody").pw_uid
-    except KeyError:
+    identity = nobody_identity()
+    if identity is None:
         log("skipped", "sticky-cross-user", "nobody user unavailable")
         return
+    nobody_uid, nobody_gid = identity
 
     victim = path(sticky, b"victim")
     with open(victim, "wb") as f:
         f.write(b"victim")
-    os.chown(victim, 0, os.getgid())
-
-    child = os.fork()
-    if child == 0:
-        try:
-            os.setuid(nobody)
-            try:
-                os.unlink(victim)
-            except PermissionError:
-                os._exit(0)
-            os._exit(2)
-        except BaseException:
-            os._exit(3)
-    _, status_code = os.waitpid(child, 0)
-    require(os.WIFEXITED(status_code) and os.WEXITSTATUS(status_code) == 0, "sticky cross-user unlink was not denied")
+    os.chown(victim, 0, 0)
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        lambda: expect_permission_denied(lambda: os.unlink(victim)),
+        "sticky cross-user unlink denial",
+    )
+    require(os.path.exists(victim), "sticky-directory victim disappeared after denied unlink")
     log("passed", "sticky-cross-user")
 
 
@@ -242,6 +395,7 @@ def main():
         check_links,
         check_non_utf8,
         check_rename,
+        check_permission_enforcement,
         check_sticky,
         check_concurrency,
     ]

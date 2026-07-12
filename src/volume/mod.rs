@@ -939,6 +939,7 @@ impl ArgosFs {
             meta.inodes.remove(&child);
         } else if let Some(live) = meta.inodes.get_mut(&child) {
             live.nlink = live.nlink.saturating_sub(1);
+            live.ctime = now_f64();
             if live.nlink == 0 && !preserve_unlinked {
                 blocks_to_delete = live.blocks.clone();
                 meta.inodes.remove(&child);

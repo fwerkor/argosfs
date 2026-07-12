@@ -1,4 +1,4 @@
-name: Weekly randomized model stress
+name: Weekly high-intensity chaos CI
 
 on:
   schedule:
@@ -9,10 +9,14 @@ on:
         description: Number of randomized operations per seed
         required: false
         default: "1200"
-      seeds:
-        description: Comma-separated deterministic seeds
+      seed_count:
+        description: Number of fresh random seeds when replay seeds are not supplied
         required: false
-        default: "0xA2605F5,0xC0FFEE,0x5EED2026"
+        default: "12"
+      seeds:
+        description: Optional comma-separated replay seeds; leave empty for fresh random seeds
+        required: false
+        default: ""
       max_file_size:
         description: Maximum generated file size in bytes
         required: false
@@ -31,38 +35,42 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       seeds: ${{ steps.seeds.outputs.seeds }}
+      seed_source: ${{ steps.seeds.outputs.source }}
+      seed_count: ${{ steps.seeds.outputs.count }}
     steps:
-      - name: Validate and serialize seeds
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Generate and record seed matrix
         id: seeds
         env:
-          REQUESTED_SEEDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seeds || '0xA2605F5,0xC0FFEE,0x5EED2026' }}
+          REQUESTED_SEEDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seeds || '' }}
+          REQUESTED_SEED_COUNT: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_count || '12' }}
+          SEED_MANIFEST: ${{ runner.temp }}/weekly-random-seeds.json
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import re
+          python3 scripts/ci/generate-random-seeds.py \
+            --count "$REQUESTED_SEED_COUNT" \
+            --seeds "$REQUESTED_SEEDS" \
+            --manifest "$SEED_MANIFEST" \
+            --github-output "$GITHUB_OUTPUT"
+          cat "$SEED_MANIFEST"
 
-          raw = os.environ["REQUESTED_SEEDS"]
-          seeds = []
-          for value in raw.split(","):
-              seed = value.strip()
-              if not seed:
-                  continue
-              if not re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", seed):
-                  raise SystemExit(f"invalid seed: {seed!r}")
-              if seed not in seeds:
-                  seeds.append(seed)
+      - name: Summarize seed matrix
+        run: |
+          {
+            echo "### Weekly randomized seed matrix"
+            echo
+            echo "- Source: ${{ steps.seeds.outputs.source }}"
+            echo "- Count: ${{ steps.seeds.outputs.count }}"
+            echo "- Manifest artifact: weekly-random-seed-manifest"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          if not seeds:
-              raise SystemExit("at least one randomized-model seed is required")
-          if len(seeds) > 16:
-              raise SystemExit("at most 16 randomized-model seeds are supported")
-
-          serialized = json.dumps(seeds, separators=(",", ":"))
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"seeds={serialized}\n")
-          print(f"Randomized-model seed matrix: {serialized}")
-          PY
+      - name: Upload seed manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-random-seed-manifest
+          path: ${{ runner.temp }}/weekly-random-seeds.json
+          if-no-files-found: error
 
   randomized-model-stress:
     name: Randomized model stress (${{ matrix.arch }}, ${{ matrix.seed }})
@@ -117,12 +125,102 @@ jobs:
           path: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}-${{ matrix.seed }}
           if-no-files-found: ignore
 
+  mounted-posix-compat:
+    name: Mounted multi-user POSIX compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - name: Checkout ArgosFS
+        uses: actions/checkout@v7
+
+      - name: Checkout pjdfstest
+        uses: actions/checkout@v7
+        with:
+          repository: pjd/pjdfstest
+          ref: ededbeb2b44929972898afb87474b0937f78a877
+          path: external/pjdfstest
+
+      - name: Install system dependencies
+        run: scripts/ci/install-deps.sh
+
+      - name: Install Rust toolchain
+        run: scripts/ci/install-rust.sh stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: weekly-mounted-posix
+
+      - name: Run mandatory cross-user permission checks
+        env:
+          ARGOSFS_COMPAT_WORKDIR: ${{ runner.temp }}/weekly-mounted-permissions
+          ARGOSFS_COMPAT_KEEP_WORKDIR: "1"
+        run: scripts/tests/host/permission_compat.sh
+
+      - name: Run mandatory pjdfstest subset
+        env:
+          PJDFSTEST_ROOT: ${{ github.workspace }}/external/pjdfstest
+          ARGOSFS_COMPAT_WORKDIR: ${{ runner.temp }}/weekly-pjdfstest
+          ARGOSFS_COMPAT_KEEP_WORKDIR: "1"
+          ARGOSFS_PJDFSTEST_OUT: ${{ runner.temp }}/weekly-pjdfstest.jsonl
+        run: scripts/tests/host/pjdfstest_compat.sh "$RUNNER_TEMP/weekly-pjdfstest.jsonl"
+
+      - name: Upload mounted POSIX artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-mounted-posix-compat
+          path: |
+            ${{ runner.temp }}/weekly-mounted-permissions
+            ${{ runner.temp }}/weekly-pjdfstest
+            ${{ runner.temp }}/weekly-pjdfstest.jsonl
+            ${{ runner.temp }}/weekly-pjdfstest.log
+            ${{ runner.temp }}/weekly-pjdfstest.build.log
+          if-no-files-found: error
+
+  block-fault-injection:
+    name: Raw block EIO and corruption injection
+    needs: prepare-matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: scripts/ci/install-deps.sh
+
+      - name: Install Rust toolchain
+        run: scripts/ci/install-rust.sh stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: weekly-block-fault-injection
+
+      - name: Inject block EIO and raw corruption
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-block-fault-injection
+          ARGOSFS_REQUIRE_BLOCK_FAULTS: "1"
+          ARGOSFS_BLOCK_FAULT_SEED: ${{ fromJSON(needs.prepare-matrix.outputs.seeds)[0] }}
+        run: scripts/tests/host/block_fault_injection.sh
+
+      - name: Upload block fault artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-block-fault-injection
+          path: ${{ runner.temp }}/weekly-block-fault-injection
+          if-no-files-found: error
+
   open-issue-on-failure:
     name: Open issue on weekly failure
     needs:
       - prepare-matrix
       - randomized-model-stress
-    if: ${{ always() && github.event_name == 'schedule' && (needs.prepare-matrix.result != 'success' || needs.randomized-model-stress.result != 'success') }}
+      - mounted-posix-compat
+      - block-fault-injection
+    if: ${{ always() && github.event_name == 'schedule' && (needs.prepare-matrix.result != 'success' || needs.randomized-model-stress.result != 'success' || needs.mounted-posix-compat.result != 'success' || needs.block-fault-injection.result != 'success') }}
     runs-on: ubuntu-24.04
     steps:
       - name: Open or update failure issue
@@ -131,19 +229,19 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HEAD_SHA: ${{ github.sha }}
-          TITLE: Weekly randomized model CI failure
+          TITLE: Weekly high-intensity chaos CI failure
         run: |
           set -euo pipefail
           existing="$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
           body="$(cat <<EOF
-          Weekly randomized model stress failed or was cancelled.
+          Weekly high-intensity chaos CI failed or was cancelled.
 
           - Run: $RUN_URL
           - Commit: $HEAD_SHA
           - Workflow: $GITHUB_WORKFLOW
           - Run ID: $GITHUB_RUN_ID
 
-          Each architecture/seed pair runs as an independent shard. The uploaded shard artifacts contain operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in logs/metadata.json.
+          The workflow includes fresh randomized-model shards on x86_64 and arm64, mandatory mounted multi-user POSIX checks, real pjdfstest execution, and raw block EIO/corruption injection. Download the weekly-random-seed-manifest artifact for the complete generated seed set. Each randomized shard artifact contains operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in logs/metadata.json.
           EOF
           )"
           if [ -n "$existing" ]; then

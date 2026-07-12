@@ -406,15 +406,34 @@ impl Filesystem for ArgosFuse {
         }
         let result = (|| -> Result<NodeAttr> {
             let current = self.volume.attr_inode(ino.0)?;
-            if mode.is_some() && req.uid() != 0 && req.uid() != current.uid {
+            let groups = request_groups(req);
+            let kernel_killpriv = mode.is_some_and(|requested_mode| {
+                req.uid() != 0
+                    && req.uid() != current.uid
+                    && is_setid_clear_only(current.mode, requested_mode)
+            });
+            if mode.is_some() && req.uid() != 0 && req.uid() != current.uid && !kernel_killpriv {
                 return Err(ArgosError::PermissionDenied(
                     "chmod requires file ownership or root".to_string(),
                 ));
             }
             if (uid.is_some() || gid.is_some()) && req.uid() != 0 {
-                return Err(ArgosError::PermissionDenied(
-                    "chown requires root".to_string(),
-                ));
+                if req.uid() != current.uid {
+                    return Err(ArgosError::PermissionDenied(
+                        "chown requires file ownership or root".to_string(),
+                    ));
+                }
+                if uid.is_some_and(|requested_uid| requested_uid != current.uid) {
+                    return Err(ArgosError::PermissionDenied(
+                        "non-root chown cannot change file owner".to_string(),
+                    ));
+                }
+                if gid.is_some_and(|requested_gid| !groups.contains(&requested_gid)) {
+                    return Err(ArgosError::PermissionDenied(
+                        "non-root chown requires the requested group to be supplementary"
+                            .to_string(),
+                    ));
+                }
             }
             if size.is_some() {
                 self.require_access(req, ino, libc::W_OK)?;
@@ -433,11 +452,16 @@ impl Filesystem for ArgosFuse {
             let ino = ino.0;
             let mut attr = current;
             if let Some(mode) = mode {
-                let groups = request_groups(req);
-                attr = self.volume.chmod_inode_as(ino, mode, req.uid(), &groups)?;
+                attr = if kernel_killpriv {
+                    self.volume.chmod_inode(ino, mode)?
+                } else {
+                    self.volume.chmod_inode_as(ino, mode, req.uid(), &groups)?
+                };
             }
             if uid.is_some() || gid.is_some() {
-                attr = self.volume.chown_inode(ino, uid, gid)?;
+                attr = self
+                    .volume
+                    .chown_inode_as(ino, uid, gid, req.uid(), &groups)?;
             }
             if let Some(size) = size {
                 self.volume.truncate_inode_as(ino, size)?;
@@ -1395,22 +1419,26 @@ fn file_type_from_attr(attr: &NodeAttr) -> FileType {
 
 fn f64_to_system_time(value: f64) -> SystemTime {
     if value <= 0.0 {
-        UNIX_EPOCH
-    } else {
-        UNIX_EPOCH + Duration::from_secs_f64(value)
+        return UNIX_EPOCH;
     }
+    let mut seconds = value.floor() as u64;
+    let mut micros = ((value - seconds as f64) * 1_000_000.0).round() as u64;
+    if micros >= 1_000_000 {
+        seconds = seconds.saturating_add(1);
+        micros -= 1_000_000;
+    }
+    UNIX_EPOCH + Duration::new(seconds, (micros * 1_000) as u32)
+}
+
+fn system_time_to_f64(time: SystemTime) -> f64 {
+    let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    duration.as_secs() as f64 + f64::from(duration.subsec_micros()) / 1_000_000.0
 }
 
 fn time_or_now(value: TimeOrNow) -> f64 {
     match value {
-        TimeOrNow::SpecificTime(time) => time
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64(),
-        TimeOrNow::Now => SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64(),
+        TimeOrNow::SpecificTime(time) => system_time_to_f64(time),
+        TimeOrNow::Now => system_time_to_f64(SystemTime::now()),
     }
 }
 
@@ -1478,6 +1506,13 @@ fn is_specific_time(value: &Option<TimeOrNow>) -> bool {
     matches!(value, Some(TimeOrNow::SpecificTime(_)))
 }
 
+fn is_setid_clear_only(current_mode: u32, requested_mode: u32) -> bool {
+    let current = current_mode & 0o7777;
+    let requested = requested_mode & 0o7777;
+    let cleared = current & !(libc::S_ISUID | libc::S_ISGID);
+    requested == cleared && requested != current
+}
+
 fn open_mask(flags: OpenFlags) -> i32 {
     let mut mask = match flags.0 & libc::O_ACCMODE {
         libc::O_RDONLY => libc::R_OK,
@@ -1500,6 +1535,33 @@ fn xattr_name(name: &OsStr) -> Result<&str> {
 mod tests {
     use super::*;
     use crate::types::VolumeConfig;
+
+    #[test]
+    fn kernel_killpriv_only_clears_setid_bits() {
+        assert!(is_setid_clear_only(0o104777, 0o100777));
+        assert!(is_setid_clear_only(0o102777, 0o100777));
+        assert!(is_setid_clear_only(0o106777, 0o100777));
+        assert!(!is_setid_clear_only(0o100777, 0o100777));
+        assert!(!is_setid_clear_only(0o104777, 0o100755));
+        assert!(!is_setid_clear_only(0o104777, 0o104755));
+    }
+
+    #[test]
+    fn explicit_subsecond_timestamps_round_trip_at_microsecond_precision() {
+        for (seconds, nanos) in [
+            (100_000_000, 100_000_000),
+            (200_000_000, 200_000_000),
+            (1_700_000_000, 999_999_000),
+        ] {
+            let time = UNIX_EPOCH + Duration::new(seconds, nanos);
+            let encoded = system_time_to_f64(time);
+            let decoded = f64_to_system_time(encoded)
+                .duration_since(UNIX_EPOCH)
+                .unwrap();
+            assert_eq!(decoded.as_secs(), seconds);
+            assert_eq!(decoded.subsec_nanos(), nanos);
+        }
+    }
 
     #[test]
     fn allow_other_sets_fuser_session_acl() {

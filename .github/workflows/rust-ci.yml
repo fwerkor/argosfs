@@ -182,13 +182,24 @@ jobs:
             command: scripts/tests/host/rootfs_smoke.sh
           - suite: mounted-fuse
             command: scripts/tests/host/privileged_fuse.sh
+          - suite: mounted-permissions
+            command: scripts/tests/host/permission_compat.sh
           - suite: randomized-model
             command: scripts/tests/host/randomized_model.sh
           - suite: pjdfstest
-            command: scripts/compat/run_pjdfstest.sh "$RUNNER_TEMP/pjdfstest.jsonl"
+            command: scripts/tests/host/pjdfstest_compat.sh "$RUNNER_TEMP/pjdfstest.jsonl"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+
+      - name: Checkout pjdfstest
+        if: matrix.suite == 'pjdfstest'
+        uses: actions/checkout@v7
+        with:
+          repository: pjd/pjdfstest
+          ref: ededbeb2b44929972898afb87474b0937f78a877
+          path: external/pjdfstest
 
       - name: Install system dependencies
         run: scripts/ci/install-deps.sh
@@ -202,6 +213,8 @@ jobs:
           key: compat-${{ matrix.suite }}
 
       - name: Run compatibility suite
+        env:
+          PJDFSTEST_ROOT: ${{ github.workspace }}/external/pjdfstest
         run: ${{ matrix.command }}
 
       - name: Upload compatibility artifacts
@@ -212,6 +225,7 @@ jobs:
           path: |
             ${{ runner.temp }}/pjdfstest.jsonl
             ${{ runner.temp }}/pjdfstest.log
+            ${{ runner.temp }}/pjdfstest.build.log
             target/argosfs-test-artifacts
           if-no-files-found: ignore
 
@@ -272,7 +286,7 @@ jobs:
         run: scripts/ci/install-deps.sh
 
       - name: Check QEMU scripts
-        run: bash -n scripts/qemu/boot.sh scripts/qemu/ops.sh scripts/qemu/hotplug.sh
+        run: find scripts/qemu -name '*.sh' -print0 | xargs -0 bash -n
 
       - name: Probe QEMU binary
         env:

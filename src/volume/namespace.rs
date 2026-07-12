@@ -1044,12 +1044,60 @@ impl ArgosFs {
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Result<NodeAttr> {
+        self.chown_inode_checked(ino, uid, gid, None)
+    }
+
+    pub fn chown_inode_as(
+        &self,
+        ino: InodeId,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        caller_uid: u32,
+        caller_gids: &[u32],
+    ) -> Result<NodeAttr> {
+        self.chown_inode_checked(ino, uid, gid, Some((caller_uid, caller_gids)))
+    }
+
+    fn chown_inode_checked(
+        &self,
+        ino: InodeId,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        caller: Option<(u32, &[u32])>,
+    ) -> Result<NodeAttr> {
         let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
+        let chunk_size = meta.config.chunk_size;
         let inode = meta
             .inodes
             .get_mut(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+
+        if uid.is_none() && gid.is_none() {
+            return Ok(Self::attr_from_inode(inode, chunk_size));
+        }
+
+        if let Some((caller_uid, caller_gids)) = caller {
+            if caller_uid != 0 {
+                if caller_uid != inode.uid {
+                    return Err(ArgosError::PermissionDenied(
+                        "chown requires file ownership or root".to_string(),
+                    ));
+                }
+                if uid.is_some_and(|requested_uid| requested_uid != inode.uid) {
+                    return Err(ArgosError::PermissionDenied(
+                        "non-root chown cannot change file owner".to_string(),
+                    ));
+                }
+                if gid.is_some_and(|requested_gid| !caller_gids.contains(&requested_gid)) {
+                    return Err(ArgosError::PermissionDenied(
+                        "non-root chown requires the requested group to be supplementary"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
         if let Some(uid) = uid {
             inode.uid = uid;
         }
@@ -1400,6 +1448,12 @@ pub(super) fn validate_entry_name(name: &str) -> Result<()> {
 }
 
 pub(super) fn validate_entry_name_bytes(name: &[u8]) -> Result<()> {
+    if name.len() > 255 {
+        return Err(ArgosError::NameTooLong(format!(
+            "entry name is {} bytes; maximum is 255",
+            name.len()
+        )));
+    }
     if name.is_empty() || name == b"." || name == b".." {
         return Err(ArgosError::Invalid("invalid entry name bytes".to_string()));
     }
