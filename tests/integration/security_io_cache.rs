@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn importable_special_metadata_matches_unix_expectations() {
@@ -453,6 +454,50 @@ fn import_tree_canonicalizes_dotdot_destination_components() {
 }
 
 #[test]
+fn host_storage_internals_use_private_permissions_and_are_hardened_on_open() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 1, false).unwrap();
+    fs.write_file("/private", &vec![b'x'; 2048], 0o600).unwrap();
+    let meta = fs.metadata_snapshot();
+    let ino = fs.resolve_path("/private", false).unwrap();
+    let shard = &meta.inodes[&ino].blocks[0].shards[0];
+    let disk_root = tmp.path().join(&meta.disks[&shard.disk_id].path);
+    let shard_path = shard_abs(&fs, &shard.disk_id, &shard.relpath);
+    let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    assert_eq!(mode(&tmp.path().join(".argosfs")), 0o700);
+    assert_eq!(mode(&disk_root), 0o700);
+    assert_eq!(mode(&disk_root.join("shards")), 0o700);
+    assert_eq!(mode(&tmp.path().join(".argosfs/meta.primary.json")), 0o600);
+    assert_eq!(mode(&tmp.path().join(".argosfs/journal.jsonl")), 0o600);
+    assert_eq!(mode(&shard_path), 0o600);
+
+    fs::set_permissions(
+        tmp.path().join(".argosfs"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::set_permissions(
+        tmp.path().join(".argosfs/meta.primary.json"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    fs::set_permissions(&disk_root, fs::Permissions::from_mode(0o755)).unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(mode(&tmp.path().join(".argosfs")), 0o700);
+    assert_eq!(mode(&disk_root), 0o700);
+    assert_eq!(mode(&tmp.path().join(".argosfs/meta.primary.json")), 0o600);
+    assert_eq!(
+        reopened.read_file("/private", false).unwrap(),
+        vec![b'x'; 2048]
+    );
+}
+
+#[test]
 fn matching_posix_acl_group_does_not_fall_through_to_other() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
@@ -567,6 +612,44 @@ fn content_and_owner_changes_clear_setid_bits() {
     fs.chmod_inode(attr.ino, 0o6755).unwrap();
     fs.chown_inode(attr.ino, Some(1234), Some(1234)).unwrap();
     assert_eq!(fs.attr_inode(attr.ino).unwrap().mode & 0o6000, 0);
+}
+
+#[test]
+fn copy_and_fallocate_content_changes_clear_setid_bits() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let src = fs
+        .create_file_at_with_owner(1, OsStr::new("copy-source"), 0o644, 1000, 1000)
+        .unwrap();
+    let dst = fs
+        .create_file_at_with_owner(1, OsStr::new("copy-target"), 0o6755, 0, 0)
+        .unwrap();
+    fs.write_inode_range(src.ino, 0, b"controlled-content")
+        .unwrap();
+
+    fs.copy_inode_range_as(src.ino, 0, dst.ino, 0, 18).unwrap();
+    assert_eq!(fs.attr_inode(dst.ino).unwrap().mode & 0o6000, 0);
+
+    fs.chmod_inode(dst.ino, 0o6755).unwrap();
+    fs.fallocate_inode_as(dst.ino, 0, 4096, 0).unwrap();
+    assert_eq!(fs.attr_inode(dst.ino).unwrap().mode & 0o6000, 0);
+}
+
+#[test]
+fn nonmember_owner_cannot_set_setgid_bit() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let file = fs
+        .create_file_at_with_owner(1, OsStr::new("group-owned"), 0o755, 1000, 42)
+        .unwrap();
+
+    let stripped = fs.chmod_inode_as(file.ino, 0o2755, 1000, &[1000]).unwrap();
+    assert_eq!(stripped.mode & libc::S_ISGID, 0);
+
+    let retained = fs
+        .chmod_inode_as(file.ino, 0o2755, 1000, &[1000, 42])
+        .unwrap();
+    assert_ne!(retained.mode & libc::S_ISGID, 0);
 }
 
 #[test]

@@ -34,6 +34,8 @@ pub enum ArgosError {
     UnrecoverableStripe { stripe_id: String, reason: String },
     #[error("invalid argument: {0}")]
     Invalid(String),
+    #[error("file or operation is too large: {0}")]
+    FileTooLarge(String),
     #[error("permission denied: {0}")]
     PermissionDenied(String),
     #[error("metadata conflict: {0}")]
@@ -73,6 +75,7 @@ impl ArgosError {
             ArgosError::DiskFull { .. } => libc::ENOSPC,
             ArgosError::UnrecoverableStripe { .. } => libc::EIO,
             ArgosError::Invalid(_) => libc::EINVAL,
+            ArgosError::FileTooLarge(_) => libc::EFBIG,
             ArgosError::PermissionDenied(_) => libc::EACCES,
             ArgosError::Conflict(_) => libc::EAGAIN,
             ArgosError::InjectedCrash(_) => libc::EIO,

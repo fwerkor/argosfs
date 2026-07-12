@@ -1,7 +1,43 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 
 pub(super) fn canonical_or_self(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub(super) fn harden_host_storage_permissions(root: &Path, meta: &Metadata) -> Result<()> {
+    let system = root.join(".argosfs");
+    ensure_private_dir(&system)?;
+    for directory in ["devices", "snapshots", "cache"] {
+        let path = system.join(directory);
+        if path.exists() {
+            ensure_private_dir(&path)?;
+        }
+    }
+    for file in [
+        "journal.jsonl",
+        "meta.primary.json",
+        "meta.secondary.json",
+        "meta.json",
+        "tx.lock",
+        "autopilot.jsonl",
+    ] {
+        let path = system.join(file);
+        if path.exists() {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    for disk in meta.disks.values() {
+        let disk_root = relative_or_absolute(root, &disk.path);
+        if disk_root.exists() {
+            ensure_private_dir(&disk_root)?;
+            let shards = disk_root.join("shards");
+            if shards.exists() {
+                ensure_private_dir(&shards)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn prepare_loop_images(paths: &[PathBuf], image_size: u64, force: bool) -> Result<()> {
@@ -238,7 +274,26 @@ pub(super) fn layout_stripe_raw_size(layout: &LayoutConfig) -> Result<usize> {
             "stripe size must be positive".to_string(),
         ));
     }
+    if stripe_raw_size > MAX_IN_MEMORY_IO_BYTES {
+        return Err(ArgosError::FileTooLarge(format!(
+            "stripe size {stripe_raw_size} exceeds the in-memory safety limit {MAX_IN_MEMORY_IO_BYTES}"
+        )));
+    }
     Ok(stripe_raw_size)
+}
+
+pub(super) fn zeroed_io_buffer(length: usize, context: &str) -> Result<Vec<u8>> {
+    if length > MAX_IN_MEMORY_IO_BYTES {
+        return Err(ArgosError::FileTooLarge(format!(
+            "{context} requires {length} bytes, limit is {MAX_IN_MEMORY_IO_BYTES}"
+        )));
+    }
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(length)
+        .map_err(|_| ArgosError::Io(std::io::Error::from_raw_os_error(libc::ENOMEM)))?;
+    buffer.resize(length, 0);
+    Ok(buffer)
 }
 
 pub(super) fn shard_accounted_size(shard: &Shard) -> u64 {

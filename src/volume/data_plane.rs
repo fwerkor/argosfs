@@ -72,7 +72,7 @@ impl ArgosFs {
             inode.mtime = now;
         }
         inode.ctime = now;
-        self.account_blocks_locked(meta, &old_blocks, false);
+        self.stage_block_reclamation_locked(meta, &old_blocks);
         if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
         {
             if !Self::transaction_error_is_committed(&err) {
@@ -89,7 +89,7 @@ impl ArgosFs {
             }
             return Err(err);
         }
-        self.delete_blocks_locked(meta, &old_blocks);
+        self.finish_block_reclamation_locked(meta, &old_blocks);
         Ok(())
     }
 
@@ -135,7 +135,7 @@ impl ArgosFs {
             ));
         }
         if let Some(inline) = decode_inline_data(&inode)? {
-            let mut out = vec![0u8; end - start];
+            let mut out = zeroed_io_buffer(end - start, "inline read window")?;
             let copy_end = end.min(inline.len());
             if copy_end > start {
                 out[..copy_end - start].copy_from_slice(&inline[start..copy_end]);
@@ -166,7 +166,7 @@ impl ArgosFs {
             }
             return Ok((inline[start..end].to_vec(), Vec::new()));
         }
-        let mut out = vec![0u8; end - start];
+        let mut out = zeroed_io_buffer(end - start, "inode read window")?;
         let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
             Some(self.encryption_key_locked(meta)?)
         } else {
@@ -293,7 +293,7 @@ impl ArgosFs {
             inode.mode &= !(libc::S_ISUID | libc::S_ISGID);
         }
 
-        self.account_blocks_locked(meta, &replaced, false);
+        self.stage_block_reclamation_locked(meta, &replaced);
         if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
         {
             if !Self::transaction_error_is_committed(&err) {
@@ -310,7 +310,7 @@ impl ArgosFs {
             }
             return Err(err);
         }
-        self.delete_blocks_locked(meta, &replaced);
+        self.finish_block_reclamation_locked(meta, &replaced);
         Ok(())
     }
 
@@ -330,7 +330,7 @@ impl ArgosFs {
             }
             return Ok((inline, Vec::new()));
         }
-        let mut out = vec![0u8; logical_size];
+        let mut out = zeroed_io_buffer(logical_size, "full inode decode")?;
         let mut damaged = Vec::new();
         let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
             Some(self.encryption_key_locked(meta)?)
@@ -653,6 +653,39 @@ impl ArgosFs {
         boot_critical: bool,
         exclude_disks: &BTreeSet<String>,
     ) -> Result<Vec<FileBlock>> {
+        let rollback = meta.clone();
+        let mut created_shards = Vec::new();
+        match self.encode_data_locked_inner(
+            meta,
+            data,
+            base_offset,
+            storage_class,
+            boot_critical,
+            exclude_disks,
+            &mut created_shards,
+        ) {
+            Ok(blocks) => Ok(blocks),
+            Err(err) => {
+                for shard in &created_shards {
+                    let _ = self.delete_shard_locked(meta, shard);
+                }
+                *meta = rollback;
+                Err(err)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_data_locked_inner(
+        &self,
+        meta: &mut Metadata,
+        data: &[u8],
+        base_offset: u64,
+        storage_class: StorageTier,
+        boot_critical: bool,
+        exclude_disks: &BTreeSet<String>,
+        created_shards: &mut Vec<Shard>,
+    ) -> Result<Vec<FileBlock>> {
         let mut blocks = Vec::new();
         let layout = current_write_layout(meta)?;
         let stripe_raw_size = layout_stripe_raw_size(&layout)?;
@@ -701,6 +734,7 @@ impl ArgosFs {
                     raw,
                     Some(&integrity),
                 )?;
+                created_shards.push(shard.clone());
                 let raw_offset = index
                     .checked_mul(stripe_raw_size)
                     .and_then(|offset| u64::try_from(offset).ok())
@@ -780,28 +814,16 @@ impl ArgosFs {
                 } else {
                     None
                 };
-                match self.write_shard_locked(
+                let shard = self.write_shard_locked(
                     meta,
                     &placements[slot],
                     &stripe_id,
                     slot,
                     shard_data,
                     integrity,
-                ) {
-                    Ok(shard) => shards.push(shard),
-                    Err(err) => {
-                        for shard in &shards {
-                            let _ = self.delete_shard_locked(meta, shard);
-                        }
-                        for shard in &shards {
-                            if let Some(disk) = meta.disks.get_mut(&shard.disk_id) {
-                                disk.used_bytes =
-                                    disk.used_bytes.saturating_sub(shard_accounted_size(shard));
-                            }
-                        }
-                        return Err(err);
-                    }
-                }
+                )?;
+                created_shards.push(shard.clone());
+                shards.push(shard);
             }
             let raw_offset = index
                 .checked_mul(stripe_raw_size)
@@ -898,11 +920,14 @@ impl ArgosFs {
         let relpath = PathBuf::from(format!("shards/{subdir}/{stripe_id}.{slot:03}.blk"));
         let path = self.shard_path_locked(meta, disk_id, &relpath);
         if let Some(parent) = path.parent() {
-            ensure_dir(parent)?;
+            ensure_private_dir(parent)?;
         }
         self.ensure_disk_capacity_locked(meta, disk_id, data.len() as u64)?;
         let start = std::time::Instant::now();
-        advanced_io::write_all(&path, data, meta.config.io_mode)?;
+        if let Err(err) = advanced_io::write_all(&path, data, meta.config.io_mode) {
+            let _ = fs::remove_file(&path);
+            return Err(err);
+        }
         self.mark_host_shard_dirty(path.clone());
         if let Some(parent) = path.parent() {
             sync_directory(parent);
@@ -1187,6 +1212,23 @@ impl ArgosFs {
         }
     }
 
+    pub(super) fn stage_block_reclamation_locked(&self, meta: &mut Metadata, blocks: &[FileBlock]) {
+        self.account_blocks_locked(meta, blocks, false);
+        if meta.backend != BackendKind::Host {
+            self.delete_blocks_locked(meta, blocks);
+        }
+    }
+
+    pub(super) fn finish_block_reclamation_locked(
+        &self,
+        meta: &mut Metadata,
+        blocks: &[FileBlock],
+    ) {
+        if meta.backend == BackendKind::Host {
+            self.delete_blocks_locked(meta, blocks);
+        }
+    }
+
     pub(super) fn delete_blocks_locked(&self, meta: &mut Metadata, blocks: &[FileBlock]) {
         for block in blocks {
             self.cache.remove(&format!(
@@ -1202,7 +1244,7 @@ impl ArgosFs {
     pub(super) fn read_shard_locked(&self, meta: &Metadata, shard: &Shard) -> Result<Vec<u8>> {
         match shard.location.as_ref() {
             Some(ShardLocation::RawExtent(extent)) => {
-                let mut data = vec![0u8; shard.size];
+                let mut data = zeroed_io_buffer(shard.size, "raw shard read")?;
                 self.backend_read_at_locked(meta, &extent.disk_id, extent.offset, &mut data)?;
                 Ok(data)
             }
@@ -1237,7 +1279,7 @@ impl ArgosFs {
                 shard.size
             )));
         }
-        let mut data = vec![0u8; len];
+        let mut data = zeroed_io_buffer(len, "shard range read")?;
         match shard.location.as_ref() {
             Some(ShardLocation::RawExtent(extent)) => {
                 let absolute = extent

@@ -1,6 +1,6 @@
 use crate::error::{ArgosError, Result};
 use crate::types::IoMode;
-use crate::util::{ensure_dir, read_to_vec};
+use crate::util::{ensure_private_dir, read_to_vec};
 use io_uring::{opcode, types, IoUring};
 use memmap2::MmapOptions;
 use std::fs::{self, File, OpenOptions};
@@ -10,10 +10,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 const ALIGN: usize = 4096;
+const MAX_SHARD_IO_BYTES: usize = 256 * 1024 * 1024;
 
 pub fn write_all(path: &Path, data: &[u8], mode: IoMode) -> Result<()> {
     if let Some(parent) = path.parent() {
-        ensure_dir(parent)?;
+        ensure_private_dir(parent)?;
     }
     match mode {
         IoMode::Buffered => write_buffered(path, data),
@@ -63,13 +64,26 @@ pub fn current_numa_node() -> Option<i32> {
 }
 
 fn write_buffered(path: &Path, data: &[u8]) -> Result<()> {
-    let mut file = File::create(path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
     file.write_all(data)?;
     file.sync_all()?;
     Ok(())
 }
 
 fn read_mmap_or_buffered(path: &Path, zero_copy: bool) -> Result<Vec<u8>> {
+    let file_size = usize::try_from(fs::metadata(path)?.len())
+        .map_err(|_| ArgosError::FileTooLarge(path.display().to_string()))?;
+    if file_size > MAX_SHARD_IO_BYTES {
+        return Err(ArgosError::FileTooLarge(format!(
+            "shard {} is {file_size} bytes, limit is {MAX_SHARD_IO_BYTES}",
+            path.display()
+        )));
+    }
     if zero_copy {
         let file = File::open(path)?;
         let len = file.metadata()?.len();
@@ -131,7 +145,15 @@ fn read_iouring(path: &Path, expected_size: usize) -> Result<Vec<u8>> {
     let file_size = usize::try_from(file.metadata()?.len())
         .map_err(|_| ArgosError::Invalid("file is too large to read".to_string()))?;
     let size = expected_size.max(file_size);
-    let mut data = vec![0u8; size];
+    if size > MAX_SHARD_IO_BYTES {
+        return Err(ArgosError::FileTooLarge(format!(
+            "io_uring shard read requires {size} bytes, limit is {MAX_SHARD_IO_BYTES}"
+        )));
+    }
+    let mut data = Vec::new();
+    data.try_reserve_exact(size)
+        .map_err(|_| ArgosError::Io(std::io::Error::from_raw_os_error(libc::ENOMEM)))?;
+    data.resize(size, 0);
     if size == 0 {
         return Ok(data);
     }
@@ -218,6 +240,11 @@ fn read_direct(path: &Path, expected_size: usize) -> Result<Vec<u8>> {
     let file_size = usize::try_from(file.metadata()?.len())
         .map_err(|_| ArgosError::Invalid("file is too large to read".to_string()))?;
     let read_size = expected_size.max(file_size);
+    if read_size > MAX_SHARD_IO_BYTES {
+        return Err(ArgosError::FileTooLarge(format!(
+            "direct shard read requires {read_size} bytes, limit is {MAX_SHARD_IO_BYTES}"
+        )));
+    }
     if read_size == 0 || !read_size.is_multiple_of(ALIGN) {
         return Err(ArgosError::Unsupported(
             "O_DIRECT requires aligned length".to_string(),

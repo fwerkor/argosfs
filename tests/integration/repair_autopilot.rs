@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::Arc;
+use std::thread;
 
 #[test]
 fn tolerates_two_disk_failures_and_repairs_after_replacement() {
@@ -313,4 +315,37 @@ fn stale_metadata_commits_are_rejected_instead_of_overwriting_newer_state() {
         reopened.read_file("/stale", true).unwrap_err(),
         ArgosError::NotFound(_)
     ));
+}
+
+#[test]
+fn rebalance_does_not_overwrite_a_concurrent_committed_write() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.chunk_size = 1024 * 1024;
+    cfg.compression = Compression::None;
+    let fs = Arc::new(ArgosFs::create(tmp.path(), cfg, 1, false).unwrap());
+    fs.write_file("/large", &vec![b'A'; 8 * 1024 * 1024], 0o666)
+        .unwrap();
+    let ino = fs.resolve_path("/large", false).unwrap();
+    fs.add_disk(
+        Some(tmp.path().join("second")),
+        Some(StorageTier::Warm),
+        Some(1.0),
+        Some(64 * 1024 * 1024),
+        false,
+    )
+    .unwrap();
+
+    std::env::set_var("ARGOSFS_TEST_MAINTENANCE_AFTER_READ_DELAY_MS", "250");
+    let rebalance_fs = Arc::clone(&fs);
+    let rebalance = thread::spawn(move || rebalance_fs.rebalance());
+    thread::sleep(std::time::Duration::from_millis(50));
+    let writer_fs = Arc::clone(&fs);
+    let writer = thread::spawn(move || writer_fs.write_inode_range(ino, 0, b"Z"));
+
+    assert_eq!(rebalance.join().unwrap().unwrap(), 1);
+    assert_eq!(writer.join().unwrap().unwrap(), 1);
+    std::env::remove_var("ARGOSFS_TEST_MAINTENANCE_AFTER_READ_DELAY_MS");
+    assert_eq!(fs.read_inode(ino, 0, 1, false).unwrap(), b"Z");
 }

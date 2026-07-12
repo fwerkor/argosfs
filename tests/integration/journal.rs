@@ -327,6 +327,26 @@ fn before_journal_write_failure_rolls_back_live_metadata() {
 }
 
 #[test]
+fn host_transaction_lock_failure_does_not_leak_failed_mutation() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let lock = tmp.path().join(".argosfs/tx.lock");
+    let _ = fs::remove_file(&lock);
+    fs::create_dir(&lock).unwrap();
+
+    assert!(fs.mkdir("/must-not-exist", 0o755).is_err());
+    assert!(fs.resolve_path("/must-not-exist", false).is_err());
+
+    fs::remove_dir(&lock).unwrap();
+    fs.mkdir("/later-success", 0o755).unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open(tmp.path()).unwrap();
+    assert!(reopened.resolve_path("/must-not-exist", false).is_err());
+    assert!(reopened.resolve_path("/later-success", false).is_ok());
+}
+
+#[test]
 fn metadata_copy_crash_points_recover_committed_transaction() {
     for point in [
         "after-primary-metadata",

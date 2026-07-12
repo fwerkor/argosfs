@@ -68,7 +68,8 @@ impl ArgosFs {
         let id = format!("disk-{next:04}");
         let stored = path.unwrap_or_else(|| PathBuf::from(format!(".argosfs/devices/{id}")));
         let disk_root = relative_or_absolute(&self.root, &stored);
-        ensure_dir(&disk_root.join("shards"))?;
+        ensure_private_dir(&disk_root)?;
+        ensure_private_dir(&disk_root.join("shards"))?;
         let disk_root_canonical = canonical_or_self(&disk_root);
         if meta.disks.values().any(|disk| {
             canonical_or_self(&relative_or_absolute(&self.root, &disk.path)) == disk_root_canonical
@@ -440,7 +441,10 @@ impl ArgosFs {
         let mut exclude = BTreeSet::new();
         exclude.insert(disk_id.to_string());
         for ino in targets {
+            let inode_lock = self.inode_lock(ino);
+            let _inode_guard = inode_lock.lock();
             let data = self.read_inode(ino, 0, u64::MAX as usize, false)?;
+            maintenance_after_read_delay();
             let mut meta = self.meta.write();
             self.replace_inode_data_locked(
                 &mut meta,
@@ -559,7 +563,10 @@ impl ArgosFs {
             let Some(ino) = self.next_reshape_inode(&target_layout) else {
                 break;
             };
+            let inode_lock = self.inode_lock(ino);
+            let _inode_guard = inode_lock.lock();
             let data = self.read_inode(ino, 0, u64::MAX as usize, true)?;
+            maintenance_after_read_delay();
             let mut meta = self.meta.write();
             self.replace_inode_data_locked(
                 &mut meta,
@@ -679,7 +686,10 @@ impl ArgosFs {
         let mut rewritten = 0;
         let mut next_cursor = cursor;
         for ino in targets {
+            let inode_lock = self.inode_lock(ino);
+            let _inode_guard = inode_lock.lock();
             let data = self.read_inode(ino, 0, u64::MAX as usize, true)?;
+            maintenance_after_read_delay();
             let mut meta = self.meta.write();
             if let Some(inode) = meta.inodes.get_mut(&ino) {
                 classify_inode(inode);
@@ -716,6 +726,8 @@ impl ArgosFs {
         }
         let mut next_cursor = cursor;
         for (ino, _) in self.file_window(cursor, max_files) {
+            let inode_lock = self.inode_lock(ino);
+            let _inode_guard = inode_lock.lock();
             report.files_checked += 1;
             match self.read_inode_with_damage_report(ino, 0, u64::MAX as usize, true) {
                 Ok((_, damaged, repaired)) => {
@@ -801,6 +813,8 @@ impl ArgosFs {
                     }
                 }
                 NodeKind::File => {
+                    let inode_lock = self.inode_lock(ino);
+                    let _inode_guard = inode_lock.lock();
                     report.files_checked += 1;
                     let mut damaged = false;
                     for block in &inode.blocks {
@@ -825,11 +839,16 @@ impl ArgosFs {
                             if damaged {
                                 report.damaged_files += 1;
                                 if repair {
-                                    self.replace_inode_data(
+                                    maintenance_after_read_delay();
+                                    let mut meta = self.meta.write();
+                                    self.replace_inode_data_locked(
+                                        &mut meta,
                                         ino,
                                         &data,
                                         "fsck-repair",
                                         json!({"inode": ino}),
+                                        false,
+                                        &BTreeSet::new(),
                                     )?;
                                     report.repaired_files += 1;
                                 }
@@ -920,5 +939,16 @@ impl ArgosFs {
 
     pub fn scrub(&self) -> Result<FsckReport> {
         self.fsck(true, true)
+    }
+}
+
+fn maintenance_after_read_delay() {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("ARGOSFS_TEST_MAINTENANCE_AFTER_READ_DELAY_MS") {
+        if let Ok(milliseconds) = value.parse::<u64>() {
+            if milliseconds > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(milliseconds));
+            }
+        }
     }
 }
