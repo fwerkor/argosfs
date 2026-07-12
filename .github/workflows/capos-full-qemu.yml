@@ -27,7 +27,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  ARGOSFS_CAPOS_REF: 9e636b9b45941e9d9219af97054b4c661d416294
+  ARGOSFS_CAPOS_REF: 168f01fc44f627ab07f23dd9590453f0ba5fe7fc
 
 jobs:
   capos-full-build:
