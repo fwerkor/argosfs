@@ -97,23 +97,24 @@ echo ARGOSFS_WAIT_CHAOS_UNPLUG
 for i in \$(seq 1 90); do [ ! -b /dev/vdc ] && break; sleep 1; done
 test ! -b /dev/vdc
 echo ARGOSFS_CHAOS_DEVICE_LOSS_OBSERVED
-partial=/dev/vdb,/dev/vdd,/dev/vde,/dev/vdf
+survivors=/dev/vdb,/dev/vdd,/dev/vde,/dev/vdf
+minimum=/dev/vdb,/dev/vdd,/dev/vdf
 full=/dev/vdb,/dev/vdc,/dev/vdd,/dev/vde,/dev/vdf
 argosfs list-devices --backend raw --devices "\$full" >/tmp/argosfs-chaos-devices-degraded.json
 if argosfs preflight-root --backend raw --devices "\$full" --mode rw >/tmp/argosfs-chaos-preflight-rw.log 2>&1; then
   echo unexpected degraded read-write preflight success >&2
   exit 1
 fi
-argosfs preflight-root --backend raw --devices "\$full" --mode degraded-ro >/tmp/argosfs-chaos-preflight-ro.json
+argosfs preflight-root --backend raw --devices "\$minimum" --mode degraded-ro >/tmp/argosfs-chaos-preflight-ro.json
 degraded=/tmp/argosfs-chaos-degraded
 rm -rf "\$degraded"
-argosfs export-tree --backend raw --devices "\$full" "\$degraded"
+argosfs export-tree --backend raw --devices "\$minimum" "\$degraded"
 cmp "\$src/sentinel.txt" "\$degraded/sentinel.txt"
 cmp "\$src/data/meta-83.txt" "\$degraded/data/meta-83.txt"
 cmp "\$src/data/blob-149.bin" "\$degraded/data/blob-149.bin"
 echo ARGOSFS_CHAOS_DEGRADED_READ_OK
-argosfs replace-device --backend raw --devices "\$partial" --old disk-0001 --new /dev/vdg --image-size "$disk_size_bytes" --force >/tmp/argosfs-chaos-replace.json
-repaired="\$partial,/dev/vdg"
+argosfs replace-device --backend raw --devices "\$survivors" --old disk-0001 --new /dev/vdg --image-size "$disk_size_bytes" --force >/tmp/argosfs-chaos-replace.json
+repaired="\$survivors,/dev/vdg"
 argosfs fsck --backend raw --devices "\$repaired" --repair --remove-orphans >/tmp/argosfs-chaos-fsck.json
 argosfs scrub --backend raw --devices "\$repaired" >/tmp/argosfs-chaos-scrub.json
 recovered=/tmp/argosfs-chaos-recovered
