@@ -116,9 +116,12 @@ scripts/compat/run_pjdfstest.sh --mounted /mnt/argosfs target/argosfs-artifacts/
 ```
 
 The wrapper refuses to run unless `mountpoint(1)` confirms the target is an
-actual mounted filesystem. If `prove` or a pjdfstest checkout is missing, it
-emits a structured skipped record and exits successfully. Clone pjdfstest at
-`./pjdfstest` or set `PJDFSTEST_ROOT=/path/to/pjdfstest`.
+actual mounted filesystem. The general-purpose wrapper emits a structured skip
+when `prove` or a pjdfstest checkout is absent. Required CI uses
+`scripts/tests/host/pjdfstest_compat.sh`, checks out pjdfstest explicitly, mounts
+with `allow_other,default_permissions`, runs the subset as root, and treats any
+missing prerequisite as a failure. Clone pjdfstest at `./pjdfstest` or set
+`PJDFSTEST_ROOT=/path/to/pjdfstest` for local runs.
 
 The default subset is:
 
@@ -163,16 +166,46 @@ The default GitHub Actions workflow splits validation into parallel jobs:
 - Rust unit/integration tests on x86_64 and arm64 GitHub-hosted Linux runners.
 - Host CLI feature tests on x86_64 and arm64.
 - Loop-block lifecycle tests on x86_64 and arm64.
-- Compatibility/rootfs smoke suites split by test family.
+- Compatibility/rootfs suites split by test family, including mandatory
+  cross-user FUSE permission enforcement and a real pjdfstest checkout.
 - Artifact-gated QEMU boot, guest operation, and hotplug harnesses for x86_64
   and arm64.
 - CapOS target compile smoke jobs for `x86_64` and `armsr_armv8`.
 
 
+## Weekly High-Intensity Chaos CI
+
+`Weekly high-intensity chaos CI` runs on Saturday and can also be dispatched
+manually. It contains three independent gates so a failure in one family does
+not hide results from the others:
+
+- The randomized reference-model matrix generates 12 fresh cryptographic
+  64-bit seeds by default for each run. Every seed runs independently on
+  x86_64 and arm64 with 1,200 operations against a 4+2 volume. The generated
+  seed set, commit, run ID, parameters, operation stream, and exported-tree
+  checkpoints are retained for exact replay. Manual dispatch accepts explicit
+  comma-separated seeds for reproducing a prior failure.
+- The mounted POSIX gate uses a real FUSE mount with
+  `allow_other,default_permissions`. It switches UID and GID to verify owner,
+  group, and other access; directory search permission; setgid inheritance;
+  chown behavior; sticky-directory enforcement; and the configured pjdfstest
+  subset. Missing FUSE or pjdfstest prerequisites fail this gate rather than
+  producing a successful skip.
+- The raw block fault gate creates loop-backed device-mapper devices, injects a
+  real `EIO` target into one member, verifies read-write root preflight failure,
+  performs concurrent degraded exports, restores the device, corrupts a raw
+  data extent, requires scrub reconstruction, and finishes with fsck, journal,
+  and byte-for-byte export checks.
+
+A scheduled failure opens or updates an issue. The seed manifest and per-shard
+artifacts provide the exact values needed to replay randomized and block-fault
+runs.
+
+
 ## Full CapOS QEMU CI
 
-The heavy `Full CapOS QEMU CI` workflow is separate from the default PR matrix.
-It runs on `workflow_dispatch` and on the weekly schedule. The workflow builds
+The heavy `Full CapOS QEMU CI` workflow runs for pull requests, pushes to
+`main`, manual dispatches, and its weekly schedule. The workflow builds
 full CapOS images with ArgosFS as the root filesystem, discovers bootable QEMU
 artifacts, then runs real guest tests instead of artifact-gated skips.
 
@@ -193,17 +226,23 @@ The full guest test covers:
   re-encryption, scrub, fsck, journal verification, and health output;
 - virtio block hot-add and hot-remove, including an ArgosFS raw-backend mkfs,
   import, readback, fsck, and scrub cycle on the hot-added disk;
-- rebooting the guest and verifying rootfs persistence across journal replay.
+- rebooting the guest and verifying rootfs persistence across journal replay;
+- a mixed chaos scenario that keeps concurrent rootfs mutations active while a
+  3+2 raw-pool member is physically hot-removed, verifies reads using exactly
+  the minimum three members, replaces and scrubs the failed member, hard-kills
+  QEMU during dirty root writes, and validates both rootfs and raw-pool recovery
+  after reboot.
 
 The workflow uploads the CapOS build logs, target configs, discovered QEMU
 artifact manifest, serial logs, QEMU command files, and `bin/targets` outputs.
 
-Known skipped cases:
+Known limits:
 
-- `chown` is skipped when the current user lacks permission.
-- Cross-user sticky-directory enforcement is skipped unless the test process can
-  switch uid.
-- `RENAME_NOREPLACE` is skipped on kernels or architectures without
+- The quick unprivileged mounted smoke suite may still skip `chown` or
+  cross-user sticky checks, but the required mounted-permissions job covers
+  those operations under a privileged UID-switching harness.
+- `RENAME_NOREPLACE` is skipped only on kernels or architectures without
   `renameat2`.
-- Full xfstests is local-run only until the project has a privileged, stable
-  runner with scratch-device support.
+- The complete xfstests generic suite remains local-run only; required CI uses
+  the mounted compatibility and pjdfstest subsets plus dedicated block and QEMU
+  fault scenarios.
