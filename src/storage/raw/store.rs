@@ -349,7 +349,20 @@ pub fn write_superblock_clean_state(
     clean: bool,
 ) -> Result<()> {
     for sb in superblocks {
-        let mut copy = sb.clone();
+        let mut encoded_current = vec![0u8; SUPERBLOCK_SIZE];
+        let mut copy = if backend
+            .read_at(&sb.disk_id, PRIMARY_SUPERBLOCK_OFFSET, &mut encoded_current)
+            .is_ok()
+        {
+            RawSuperblock::decode(&encoded_current)
+                .ok()
+                .filter(|current| {
+                    current.pool_uuid == sb.pool_uuid && current.device_uuid == sb.device_uuid
+                })
+                .unwrap_or_else(|| sb.clone())
+        } else {
+            sb.clone()
+        };
         copy.clean = clean;
         copy.generation = copy.generation.saturating_add(1);
         let now = now_f64().max(0.0) as u64;

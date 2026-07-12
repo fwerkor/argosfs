@@ -320,20 +320,48 @@ fn loop_block_scan_inspect_and_repair_corrupt_extent() {
 }
 
 #[test]
-fn clean_state_updates_device_label_generation() {
+fn clean_state_tracks_mount_lifetime_and_generation() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
     let fs =
         ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    let (mounted, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(!mounted.clean);
+
     fs.write_file("/payload", b"label-generation", 0o644)
         .unwrap();
     fs.sync().unwrap();
+    let (after_sync, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(!after_sync.clean);
+    assert_eq!(after_sync.generation, mounted.generation);
     drop(fs);
 
-    let (superblock, label) =
+    let (clean, clean_label) =
         argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
-    assert_eq!(superblock.generation, label.generation);
-    assert_eq!(superblock.disk_id, label.disk_id);
+    assert!(clean.clean);
+    assert!(clean.generation > after_sync.generation);
+    assert_eq!(clean.generation, clean_label.generation);
+
+    let reopened = ArgosFs::open_loop(&images, true).unwrap();
+    let (remounted, remounted_label) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(!remounted.clean);
+    assert!(remounted.generation > clean.generation);
+    assert_eq!(remounted.generation, remounted_label.generation);
+    reopened.sync().unwrap();
+    let (after_second_sync, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(!after_second_sync.clean);
+    assert_eq!(after_second_sync.generation, remounted.generation);
+    drop(reopened);
+
+    let (final_clean, final_label) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(final_clean.clean);
+    assert!(final_clean.generation > remounted.generation);
+    assert_eq!(final_clean.generation, final_label.generation);
 }
 
 #[test]

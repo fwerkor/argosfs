@@ -63,6 +63,17 @@ pub struct ArgosFs {
     cache: Arc<BlockCache>,
 }
 
+impl Drop for ArgosFs {
+    fn drop(&mut self) {
+        if !self.backend_writable || Arc::strong_count(&self.meta) != 1 {
+            return;
+        }
+        if self.meta.read().backend != BackendKind::Host {
+            let _ = self.mark_clean_unmount();
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PlacementRequest<'a> {
     key: &'a str,
@@ -404,6 +415,7 @@ impl ArgosFs {
         journal::prepare_metadata_integrity_for_external_store(&mut meta)?;
         let backend: Arc<dyn StorageBackend> = Arc::new(backend_file);
         raw_store::initialize_pool(backend.clone(), &superblocks, &mut meta, force)?;
+        raw_store::write_superblock_clean_state(&*backend, &superblocks, false)?;
         Self::from_block_parts(paths, backend, true, superblocks, meta)
     }
 
@@ -479,7 +491,6 @@ impl ArgosFs {
             let superblocks = self.active_superblocks_locked(&meta)?;
             let backend = self.active_block_backend_locked(&meta, true)?;
             raw_store::write_metadata_copies(&backend, &superblocks, &meta)?;
-            raw_store::write_superblock_clean_state(&backend, &superblocks, true)?;
             backend.flush_all()?;
             return Ok(());
         }
@@ -503,6 +514,19 @@ impl ArgosFs {
             sync_directory(&disk_root.join("shards"));
         }
         Ok(())
+    }
+
+    pub fn mark_clean_unmount(&self) -> Result<()> {
+        self.sync()?;
+        let meta = self.meta.read();
+        if meta.backend == BackendKind::Host {
+            return Ok(());
+        }
+        self.ensure_block_backend_writable_locked(&meta)?;
+        let superblocks = self.active_superblocks_locked(&meta)?;
+        let backend = self.active_block_backend_locked(&meta, true)?;
+        raw_store::write_superblock_clean_state(&backend, &superblocks, true)?;
+        backend.flush_all()
     }
 
     fn sync_dirty_host_shards(&self) -> Result<()> {
