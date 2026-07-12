@@ -431,7 +431,8 @@ impl Filesystem for ArgosFuse {
             let ino = ino.0;
             let mut attr = current;
             if let Some(mode) = mode {
-                attr = self.volume.chmod_inode(ino, mode)?;
+                let groups = request_groups(req);
+                attr = self.volume.chmod_inode_as(ino, mode, req.uid(), &groups)?;
             }
             if uid.is_some() || gid.is_some() {
                 attr = self.volume.chown_inode(ino, uid, gid)?;
@@ -841,7 +842,7 @@ impl Filesystem for ArgosFuse {
         let result = self
             .require_access(req, ino, libc::W_OK)
             .and_then(|()| self.flush_inode_writeback(ino.0))
-            .and_then(|()| self.volume.fallocate_inode(ino.0, offset, length, mode));
+            .and_then(|()| self.volume.fallocate_inode_as(ino.0, offset, length, mode));
         match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
@@ -875,7 +876,7 @@ impl Filesystem for ArgosFuse {
                     self.flush_inode_writeback(ino_out.0)?;
                 }
                 self.volume
-                    .copy_inode_range(ino_in.0, offset_in, ino_out.0, offset_out, len)
+                    .copy_inode_range_as(ino_in.0, offset_in, ino_out.0, offset_out, len)
             });
         match result {
             Ok(copied) => reply.written(copied as u32),

@@ -570,6 +570,44 @@ fn content_and_owner_changes_clear_setid_bits() {
 }
 
 #[test]
+fn copy_and_fallocate_content_changes_clear_setid_bits() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let src = fs
+        .create_file_at_with_owner(1, OsStr::new("copy-source"), 0o644, 1000, 1000)
+        .unwrap();
+    let dst = fs
+        .create_file_at_with_owner(1, OsStr::new("copy-target"), 0o6755, 0, 0)
+        .unwrap();
+    fs.write_inode_range(src.ino, 0, b"controlled-content")
+        .unwrap();
+
+    fs.copy_inode_range_as(src.ino, 0, dst.ino, 0, 18).unwrap();
+    assert_eq!(fs.attr_inode(dst.ino).unwrap().mode & 0o6000, 0);
+
+    fs.chmod_inode(dst.ino, 0o6755).unwrap();
+    fs.fallocate_inode_as(dst.ino, 0, 4096, 0).unwrap();
+    assert_eq!(fs.attr_inode(dst.ino).unwrap().mode & 0o6000, 0);
+}
+
+#[test]
+fn nonmember_owner_cannot_set_setgid_bit() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let file = fs
+        .create_file_at_with_owner(1, OsStr::new("group-owned"), 0o755, 1000, 42)
+        .unwrap();
+
+    let stripped = fs.chmod_inode_as(file.ino, 0o2755, 1000, &[1000]).unwrap();
+    assert_eq!(stripped.mode & libc::S_ISGID, 0);
+
+    let retained = fs
+        .chmod_inode_as(file.ino, 0o2755, 1000, &[1000, 42])
+        .unwrap();
+    assert_ne!(retained.mode & libc::S_ISGID, 0);
+}
+
+#[test]
 fn supplementary_groups_are_used_for_mode_and_acl_checks() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
