@@ -166,14 +166,16 @@ pub fn nfs4_to_json(acl: &Nfs4Acl) -> Result<String> {
 }
 
 pub fn evaluate_access(inode: &Inode, uid: u32, gid: u32, mask: i32) -> bool {
-    if uid == 0 {
-        return true;
-    }
     let requested = (((mask & libc::R_OK) != 0) as u16 * ACL_READ)
         | (((mask & libc::W_OK) != 0) as u16 * ACL_WRITE)
         | (((mask & libc::X_OK) != 0) as u16 * ACL_EXECUTE);
     if requested == 0 {
         return true;
+    }
+    if uid == 0 {
+        return requested & ACL_EXECUTE == 0
+            || inode.kind == NodeKind::Directory
+            || inode.mode & 0o111 != 0;
     }
     if let Some(nfs4) = &inode.nfs4_acl {
         if let Some(allowed) = evaluate_nfs4(nfs4, uid, gid, requested) {
@@ -217,22 +219,27 @@ fn evaluate_posix(acl: &PosixAcl, inode: &Inode, uid: u32, gid: u32, requested: 
     {
         return (entry.perms & mask) & requested == requested;
     }
+    let mut group_matched = false;
+    let mut group_perms = 0u16;
     if gid == inode.gid {
-        let perms = acl
+        group_matched = true;
+        group_perms |= acl
             .entries
             .iter()
             .find(|entry| entry.tag == PosixAclTag::GroupObj)
             .map(|entry| entry.perms)
             .unwrap_or(((inode.mode >> 3) & 0o7) as u16);
-        return (perms & mask) & requested == requested;
     }
-    if acl
+    for entry in acl
         .entries
         .iter()
         .filter(|entry| entry.tag == PosixAclTag::Group && entry.id == Some(gid))
-        .any(|entry| (entry.perms & mask) & requested == requested)
     {
-        return true;
+        group_matched = true;
+        group_perms |= entry.perms;
+    }
+    if group_matched {
+        return (group_perms & mask) & requested == requested;
     }
     let other = acl
         .entries

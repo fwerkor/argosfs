@@ -451,3 +451,43 @@ fn import_tree_canonicalizes_dotdot_destination_components() {
     );
     assert!(fs.resolve_path("/nested", false).is_err());
 }
+
+#[test]
+fn matching_posix_acl_group_does_not_fall_through_to_other() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let attr = fs
+        .create_file_at_with_owner(1, OsStr::new("group-acl"), 0o604, 0, 0)
+        .unwrap();
+    fs.set_posix_acl_path(
+        "/group-acl",
+        false,
+        acl::parse_posix_acl("user::rw-,group::---,group:1000:---,mask::rwx,other::r--").unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs.check_access_inode(attr.ino, 2000, 1000, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+}
+
+#[test]
+fn root_execute_check_requires_an_execute_bit_for_regular_files() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let file = fs
+        .create_file_at_with_owner(1, OsStr::new("not-executable"), 0o600, 1000, 1000)
+        .unwrap();
+    assert_eq!(
+        fs.check_access_inode(file.ino, 0, 0, libc::X_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+    fs.mkdir("/searchable-by-root", 0o000).unwrap();
+    let dir = fs.resolve_path("/searchable-by-root", false).unwrap();
+    fs.check_access_inode(dir, 0, 0, libc::X_OK).unwrap();
+}
