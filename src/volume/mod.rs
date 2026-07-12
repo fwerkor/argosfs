@@ -855,8 +855,12 @@ impl ArgosFs {
             "mknod",
             json!({"parent": parent, "name": name, "inode": ino, "mode": mode, "rdev": rdev}),
         ) {
-            if let Some(rollback) = rollback {
-                *meta = rollback;
+            if !Self::transaction_error_is_committed(&err)
+                && !matches!(err, ArgosError::Conflict(_))
+            {
+                if let Some(rollback) = rollback {
+                    *meta = rollback;
+                }
             }
             return Err(err);
         }
@@ -1310,6 +1314,22 @@ impl ArgosFs {
         Ok(())
     }
 
+    fn transaction_error_is_committed(err: &ArgosError) -> bool {
+        matches!(
+            err,
+            ArgosError::InjectedCrash(point)
+                if matches!(
+                    point.as_str(),
+                    "after-journal"
+                        | "after-primary-metadata"
+                        | "after-secondary-metadata"
+                        | "after-compatible-metadata"
+                        | "after-journal-commit-before-metadata-commit"
+                        | "after-metadata-commit-before-superblock-update"
+                )
+        )
+    }
+
     fn commit_locked(
         &self,
         meta: &mut Metadata,
@@ -1385,7 +1405,10 @@ impl ArgosFs {
                 }
             };
             if let Err(commit_err) = result {
-                if previous_metadata.is_none() {
+                let should_restore = !Self::transaction_error_is_committed(&commit_err)
+                    && (previous_metadata.is_none()
+                        || matches!(commit_err, ArgosError::Conflict(_)));
+                if should_restore {
                     if let Err(recovery_err) = self.restore_raw_metadata_locked(meta, &superblocks)
                     {
                         return Err(ArgosError::CorruptedMetadata(format!(

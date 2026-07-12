@@ -477,7 +477,7 @@ fn rootfs_preflight_rejects_dirty_raw_pool_for_rw() {
     drop(fs);
 
     let dirty = ArgosFs::open_loop(&images, true).unwrap();
-    drop(dirty);
+    std::mem::forget(dirty);
 
     let reopened = ArgosFs::open_loop(&images, false).unwrap();
     let report =

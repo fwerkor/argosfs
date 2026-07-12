@@ -520,9 +520,17 @@ impl ArgosFs {
             "write-range",
             json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "aligned-eof-append"}),
         ) {
-            self.delete_blocks_locked(meta, &written_blocks);
-            if let Some(rollback) = rollback {
-                *meta = rollback;
+            if !Self::transaction_error_is_committed(&err) {
+                if matches!(err, ArgosError::Conflict(_)) {
+                    if meta.backend == BackendKind::Host {
+                        self.delete_blocks_locked(meta, &written_blocks);
+                    }
+                } else {
+                    self.delete_blocks_locked(meta, &written_blocks);
+                    if let Some(rollback) = rollback {
+                        *meta = rollback;
+                    }
+                }
             }
             return Err(err);
         }
