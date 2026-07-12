@@ -284,7 +284,7 @@ jobs:
         run: scripts/ci/install-deps.sh
 
       - name: Check QEMU scripts
-        run: bash -n scripts/qemu/boot.sh scripts/qemu/ops.sh scripts/qemu/hotplug.sh
+        run: find scripts/qemu -name '*.sh' -print0 | xargs -0 bash -n
 
       - name: Probe QEMU binary
         env:
