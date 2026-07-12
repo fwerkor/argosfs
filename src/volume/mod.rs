@@ -1392,9 +1392,17 @@ impl ArgosFs {
                 return Ok(());
             }
             let superblocks = self.active_superblocks_locked(meta)?;
+            let replay_previous = match previous_metadata {
+                Some(previous)
+                    if journal::canonical_metadata_hash(previous)? == previous_meta_hash =>
+                {
+                    Some(previous)
+                }
+                _ => None,
+            };
             let details = json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details});
             let result = if self.open_backend_covers_superblocks(&superblocks) {
-                match previous_metadata {
+                match replay_previous {
                     Some(previous) => raw_store::append_transaction_with_previous(
                         &*self.backend,
                         &superblocks,
@@ -1413,7 +1421,7 @@ impl ArgosFs {
                 }
             } else {
                 let backend = self.active_block_backend_locked(meta, true)?;
-                match previous_metadata {
+                match replay_previous {
                     Some(previous) => raw_store::append_transaction_with_previous(
                         &backend,
                         &superblocks,
