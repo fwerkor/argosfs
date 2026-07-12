@@ -26,18 +26,61 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare-matrix:
+    name: Prepare randomized seed matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      seeds: ${{ steps.seeds.outputs.seeds }}
+    steps:
+      - name: Validate and serialize seeds
+        id: seeds
+        env:
+          REQUESTED_SEEDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seeds || '0xA2605F5,0xC0FFEE,0x5EED2026' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          raw = os.environ["REQUESTED_SEEDS"]
+          seeds = []
+          for value in raw.split(","):
+              seed = value.strip()
+              if not seed:
+                  continue
+              if not re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", seed):
+                  raise SystemExit(f"invalid seed: {seed!r}")
+              if seed not in seeds:
+                  seeds.append(seed)
+
+          if not seeds:
+              raise SystemExit("at least one randomized-model seed is required")
+          if len(seeds) > 16:
+              raise SystemExit("at most 16 randomized-model seeds are supported")
+
+          serialized = json.dumps(seeds, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"seeds={serialized}\n")
+          print(f"Randomized-model seed matrix: {serialized}")
+          PY
+
   randomized-model-stress:
-    name: Randomized model stress (${{ matrix.arch }})
+    name: Randomized model stress (${{ matrix.arch }}, ${{ matrix.seed }})
+    needs: prepare-matrix
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
+    timeout-minutes: 210
     strategy:
       fail-fast: false
       matrix:
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+        seed: ${{ fromJSON(needs.prepare-matrix.outputs.seeds) }}
         include:
-          - arch: x86_64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -55,11 +98,11 @@ jobs:
 
       - name: Run high-intensity randomized model stress
         env:
-          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}-${{ matrix.seed }}
           ARGOSFS_RANDOM_MODEL_OPS: ${{ github.event_name == 'workflow_dispatch' && inputs.ops || '1200' }}
           ARGOSFS_RANDOM_MODEL_CHECK_INTERVAL: "100"
           ARGOSFS_RANDOM_MODEL_MAX_FILE_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.max_file_size || '131072' }}
-          ARGOSFS_RANDOM_MODEL_SEEDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seeds || '0xA2605F5,0xC0FFEE,0x5EED2026' }}
+          ARGOSFS_RANDOM_MODEL_SEEDS: ${{ matrix.seed }}
           ARGOSFS_RANDOM_MODEL_DISKS: "6"
           ARGOSFS_RANDOM_MODEL_K: "4"
           ARGOSFS_RANDOM_MODEL_M: "2"
@@ -70,14 +113,16 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: weekly-randomized-model-${{ matrix.arch }}
-          path: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}
+          name: weekly-randomized-model-${{ matrix.arch }}-${{ matrix.seed }}
+          path: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}-${{ matrix.seed }}
           if-no-files-found: ignore
 
   open-issue-on-failure:
     name: Open issue on weekly failure
-    needs: randomized-model-stress
-    if: ${{ failure() && github.event_name == 'schedule' }}
+    needs:
+      - prepare-matrix
+      - randomized-model-stress
+    if: ${{ always() && github.event_name == 'schedule' && (needs.prepare-matrix.result != 'success' || needs.randomized-model-stress.result != 'success') }}
     runs-on: ubuntu-24.04
     steps:
       - name: Open or update failure issue
@@ -91,14 +136,14 @@ jobs:
           set -euo pipefail
           existing="$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
           body="$(cat <<EOF
-          Weekly randomized model stress failed.
+          Weekly randomized model stress failed or was cancelled.
 
           - Run: $RUN_URL
           - Commit: $HEAD_SHA
           - Workflow: $GITHUB_WORKFLOW
           - Run ID: $GITHUB_RUN_ID
 
-          The uploaded artifacts contain per-seed operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in logs/metadata.json.
+          Each architecture/seed pair runs as an independent shard. The uploaded shard artifacts contain operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in logs/metadata.json.
           EOF
           )"
           if [ -n "$existing" ]; then
