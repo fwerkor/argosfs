@@ -142,6 +142,9 @@ fn reshape_single_to_redundant_resume_keeps_multilayout_readable() {
     drop(fs);
 
     let resumed = ArgosFs::open_loop(&images, true).unwrap();
+    let recovery = resumed.transaction_report().unwrap();
+    assert_eq!(recovery.invalid_entries, 0, "{:#?}", recovery.errors);
+    assert!(recovery.errors.is_empty(), "{:#?}", recovery.errors);
     let done = resumed.reshape_layout(1, 1, None).unwrap();
     assert!(done.complete);
     assert_eq!(done.remaining_files, 0);
