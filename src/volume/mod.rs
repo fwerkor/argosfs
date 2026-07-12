@@ -1451,13 +1451,13 @@ impl ArgosFs {
             json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details}),
         );
 
-        let should_reload = match &result {
-            Err(ArgosError::Conflict(_)) => true,
-            Err(ArgosError::InjectedCrash(point)) if point == "before-journal" => true,
-            _ => false,
-        };
-        if should_reload {
-            if let Ok(recovered) = journal::load_or_recover(&self.root) {
+        if let Err(commit_err) = &result {
+            if !Self::transaction_error_is_committed(commit_err) {
+                let recovered = journal::load_or_recover(&self.root).map_err(|recovery_err| {
+                    ArgosError::CorruptedMetadata(format!(
+                        "host transaction failed ({commit_err}) and metadata rollback failed ({recovery_err})"
+                    ))
+                })?;
                 *meta = recovered.metadata;
                 recompute_disk_usage_from_metadata(meta);
             }
