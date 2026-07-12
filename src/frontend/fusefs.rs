@@ -889,53 +889,8 @@ impl Filesystem for ArgosFuse {
             return;
         }
         let meta = self.volume.metadata_snapshot();
-        let block = meta.config.chunk_size as u64;
-        let (explicit_capacity, grouped_capacity) = meta
-            .disks
-            .values()
-            .filter(|disk| disk.status == DiskStatus::Online)
-            .fold(
-                (0u64, std::collections::BTreeMap::<String, u64>::new()),
-                |mut acc, disk| {
-                    if disk.capacity_source == CapacitySource::UserOverride {
-                        acc.0 = acc.0.saturating_add(disk.capacity_bytes);
-                    } else if let Some(fs_id) = disk.backing_fs_id.as_ref() {
-                        let entry = acc.1.entry(fs_id.clone()).or_default();
-                        *entry = (*entry).max(disk.capacity_bytes);
-                    } else {
-                        acc.0 = acc.0.saturating_add(disk.capacity_bytes);
-                    }
-                    acc
-                },
-            );
-        let raw_capacity = explicit_capacity.saturating_add(grouped_capacity.values().sum::<u64>());
-        let logical_used: u64 = meta
-            .inodes
-            .values()
-            .filter(|inode| inode.kind == NodeKind::File)
-            .map(|inode| inode.size)
-            .sum();
-        let (raw_capacity, raw_free) = if raw_capacity > 0 {
-            (raw_capacity, 0)
-        } else {
-            fallback_statfs_capacity(
-                self.volume.root(),
-                meta.disks.values().map(|disk| {
-                    if disk.path.is_absolute() {
-                        disk.path.clone()
-                    } else {
-                        self.volume.root().join(&disk.path)
-                    }
-                }),
-            )
-        };
-        let usable = raw_capacity.saturating_mul(meta.config.k as u64)
-            / (meta.config.k + meta.config.m) as u64;
-        let free = if raw_free > 0 {
-            raw_free.saturating_mul(meta.config.k as u64) / (meta.config.k + meta.config.m) as u64
-        } else {
-            usable.saturating_sub(logical_used)
-        };
+        let block = (meta.config.chunk_size as u64).max(4096);
+        let (usable, free) = statfs_bytes(&meta, self.volume.root());
         reply.statfs(
             usable / block,
             free / block,
@@ -1254,6 +1209,108 @@ fn is_owner_managed_xattr(name: &str) -> bool {
     )
 }
 
+fn statfs_bytes(meta: &crate::types::Metadata, root: &Path) -> (u64, u64) {
+    if meta.backend != crate::types::BackendKind::Host && !meta.raw_pool.allocators.is_empty() {
+        let width = meta.config.k.saturating_add(meta.config.m);
+        if meta.config.k == 0 || width == 0 {
+            return (0, 0);
+        }
+        let mut capacities = Vec::new();
+        let mut free = Vec::new();
+        for (disk_id, allocator) in &meta.raw_pool.allocators {
+            let Some(disk) = meta.disks.get(disk_id) else {
+                continue;
+            };
+            if !matches!(
+                disk.status,
+                DiskStatus::Online | DiskStatus::Degraded | DiskStatus::Draining
+            ) {
+                continue;
+            }
+            capacities.push(allocator.data_end.saturating_sub(allocator.data_start));
+            free.push(raw_allocator_free_bytes(allocator));
+        }
+        let usable = max_stripe_units(&capacities, width).saturating_mul(meta.config.k as u64);
+        let available = max_stripe_units(&free, width).saturating_mul(meta.config.k as u64);
+        return (usable, available.min(usable));
+    }
+
+    let (explicit_capacity, grouped_capacity) = meta
+        .disks
+        .values()
+        .filter(|disk| disk.status == DiskStatus::Online)
+        .fold((0u64, BTreeMap::<String, u64>::new()), |mut acc, disk| {
+            if disk.capacity_source == CapacitySource::UserOverride {
+                acc.0 = acc.0.saturating_add(disk.capacity_bytes);
+            } else if let Some(fs_id) = disk.backing_fs_id.as_ref() {
+                let entry = acc.1.entry(fs_id.clone()).or_default();
+                *entry = (*entry).max(disk.capacity_bytes);
+            } else {
+                acc.0 = acc.0.saturating_add(disk.capacity_bytes);
+            }
+            acc
+        });
+    let configured_capacity =
+        explicit_capacity.saturating_add(grouped_capacity.values().sum::<u64>());
+    let (capacity, free) = if configured_capacity > 0 {
+        let logical_used = meta
+            .inodes
+            .values()
+            .filter(|inode| inode.kind == NodeKind::File)
+            .map(|inode| inode.size)
+            .sum::<u64>();
+        (
+            configured_capacity,
+            configured_capacity.saturating_sub(logical_used),
+        )
+    } else {
+        fallback_statfs_capacity(
+            root,
+            meta.disks.values().map(|disk| {
+                if disk.path.is_absolute() {
+                    disk.path.clone()
+                } else {
+                    root.join(&disk.path)
+                }
+            }),
+        )
+    };
+    let width = meta.config.k.saturating_add(meta.config.m).max(1) as u64;
+    (
+        capacity.saturating_mul(meta.config.k as u64) / width,
+        free.saturating_mul(meta.config.k as u64) / width,
+    )
+}
+
+fn raw_allocator_free_bytes(allocator: &crate::types::RawAllocatorState) -> u64 {
+    let block = allocator.block_size.max(4096);
+    let tail = allocator.data_end.saturating_sub(allocator.next_offset) / block * block;
+    allocator.free_extents.iter().fold(tail, |total, extent| {
+        total.saturating_add(extent.length / block * block)
+    })
+}
+
+fn max_stripe_units(per_disk: &[u64], width: usize) -> u64 {
+    if width == 0 || per_disk.len() < width {
+        return 0;
+    }
+    let mut low = 0u64;
+    let mut high = per_disk.iter().copied().sum::<u64>() / width as u64;
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let support = per_disk
+            .iter()
+            .map(|value| (*value).min(mid) as u128)
+            .sum::<u128>();
+        if support >= mid as u128 * width as u128 {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    low
+}
+
 fn fallback_statfs_capacity(root: &Path, paths: impl IntoIterator<Item = PathBuf>) -> (u64, u64) {
     let mut capacity = 0u64;
     let mut free = 0u64;
@@ -1478,6 +1535,44 @@ mod tests {
         assert!(!dirty.try_merge(14, b"efgh", 6, 1000, 1000));
         assert_eq!(dirty.offset, 10);
         assert_eq!(dirty.data, b"abcd");
+    }
+
+    #[test]
+    fn stripe_capacity_respects_distinct_device_constraints() {
+        assert_eq!(max_stripe_units(&[100, 100, 100], 3), 100);
+        assert_eq!(max_stripe_units(&[300, 10, 10], 3), 10);
+        assert_eq!(max_stripe_units(&[100, 100, 100, 100, 100, 100], 3), 200);
+        assert_eq!(max_stripe_units(&[100, 100], 3), 0);
+    }
+
+    #[test]
+    fn raw_statfs_uses_allocator_regions_and_free_extents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let images = (0..3)
+            .map(|index| tmp.path().join(format!("disk-{index}.img")))
+            .collect::<Vec<_>>();
+        let volume = ArgosFs::create_loop(
+            &images,
+            VolumeConfig {
+                k: 2,
+                m: 1,
+                chunk_size: 4096,
+                ..VolumeConfig::default()
+            },
+            32 * 1024 * 1024,
+            "statfs",
+            false,
+        )
+        .unwrap();
+        let before = statfs_bytes(&volume.metadata_snapshot(), volume.root());
+        volume
+            .write_file("/payload", &vec![7u8; 64 * 1024], 0o644)
+            .unwrap();
+        let after = statfs_bytes(&volume.metadata_snapshot(), volume.root());
+        assert!(before.0 > 0);
+        assert!(before.0 < 3 * 32 * 1024 * 1024);
+        assert!(after.1 < before.1);
+        assert!(after.1 <= after.0);
     }
 
     #[test]
