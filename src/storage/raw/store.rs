@@ -401,7 +401,7 @@ fn preflight_empty(
                 sb.disk_id
             )));
         }
-        let probe_len = sb.data.offset.min(4 * 1024 * 1024).max(128 * 1024) as usize;
+        let probe_len = sb.data.offset.clamp(128 * 1024, 4 * 1024 * 1024) as usize;
         let mut head = vec![0u8; probe_len];
         backend.read_at(&sb.disk_id, 0, &mut head)?;
         let capacity = backend.capacity(&sb.disk_id)?;
