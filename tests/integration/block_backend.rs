@@ -990,3 +990,55 @@ fn raw_recovery_ignores_unquorumed_metadata_and_journal_tail() {
     assert_eq!(reopened.metadata_snapshot().raw_pool.pool_name, "quorum");
     assert_eq!(reopened.read_file("/value", true).unwrap(), b"committed");
 }
+
+#[test]
+fn raw_partial_fanout_crash_helper() {
+    let Some(root) = std::env::var_os("ARGOSFS_TEST_PARTIAL_FANOUT_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let images = (0..3)
+        .map(|index| root.join(format!("disk{index}.img")))
+        .collect::<Vec<_>>();
+    let fs = ArgosFs::open_loop(&images, true).unwrap();
+    std::env::set_var(
+        "ARGOSFS_CRASH_POINT",
+        argosfs::types::FaultPoint::AfterPartialJournalFanout.as_str(),
+    );
+    std::env::set_var("ARGOSFS_CRASH_ABORT", "1");
+    let _ = fs.write_file("/quorum-value", b"uncommitted-single-member", 0o644);
+    panic!("partial journal fanout crash point did not abort");
+}
+
+#[test]
+fn raw_recovery_ignores_journal_head_without_membership_quorum() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/quorum-value", b"committed-majority", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("block_backend::raw_partial_fanout_crash_helper")
+        .arg("--nocapture")
+        .env("ARGOSFS_TEST_PARTIAL_FANOUT_ROOT", tmp.path())
+        .status()
+        .unwrap();
+    assert!(!status.success());
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/quorum-value", false).unwrap(),
+        b"committed-majority"
+    );
+    assert_eq!(reopened.metadata_snapshot().txid, 2);
+    assert_eq!(
+        reopened.transaction_report().unwrap().raw_journal_quorum,
+        Some(true)
+    );
+}

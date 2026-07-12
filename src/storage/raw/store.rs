@@ -767,8 +767,8 @@ fn read_latest_journal_metadata(
     report: &mut TransactionReport,
     base_metadata: Option<&Metadata>,
 ) -> Result<Option<Metadata>> {
-    let required = superblocks.len() / 2 + 1;
-    let mut candidates = BTreeMap::<(u64, u64, String), (usize, Metadata)>::new();
+    let mut supported =
+        BTreeMap::<(u64, u64, String), (Metadata, std::collections::BTreeSet<String>)>::new();
     let mut members = Vec::new();
     for sb in superblocks {
         let valid_before = report.valid_entries;
@@ -778,6 +778,7 @@ fn read_latest_journal_metadata(
             ..RawJournalMemberReport::default()
         };
         let mut latest = base_metadata.cloned();
+        let mut member_candidates = BTreeMap::<(u64, u64, String), Metadata>::new();
         let mut header = vec![0u8; RAW_HEADER_SIZE];
         if let Err(err) = backend.read_at(&sb.disk_id, sb.journal.offset, &mut header) {
             member.error = Some(err.to_string());
@@ -824,7 +825,6 @@ fn read_latest_journal_metadata(
                         break;
                     }
                     report.valid_entries += 1;
-                    let record_key = (record.txid, record.generation, record.record_hash.clone());
                     report.last_valid_txid = report.last_valid_txid.max(record.txid);
                     report.last_valid_generation =
                         report.last_valid_generation.max(record.generation);
@@ -937,10 +937,15 @@ fn read_latest_journal_metadata(
                         cursor += 36 + len as u64;
                         continue;
                     }
-                    let entry = candidates
-                        .entry(record_key)
-                        .or_insert_with(|| (0, candidate.clone()));
-                    entry.0 += 1;
+                    let candidate_hash = metadata_hash_for_replay(&candidate)?;
+                    member_candidates.insert(
+                        (
+                            candidate.txid,
+                            candidate.integrity.generation,
+                            candidate_hash,
+                        ),
+                        candidate.clone(),
+                    );
                     latest = Some(candidate);
                 }
                 Err(err) => {
@@ -956,15 +961,31 @@ fn read_latest_journal_metadata(
         }
         member.valid_entries = report.valid_entries.saturating_sub(valid_before);
         member.invalid_entries = report.invalid_entries.saturating_sub(invalid_before);
+        if member.invalid_entries == 0 {
+            for (key, metadata) in member_candidates {
+                supported
+                    .entry(key)
+                    .or_insert_with(|| (metadata, std::collections::BTreeSet::new()))
+                    .1
+                    .insert(sb.disk_id.clone());
+            }
+        }
         members.push(member);
     }
-    report.raw_journal_quorum = Some(raw_journal_quorum(&members, superblocks.len()));
-    report.raw_journal_members = members;
-    Ok(candidates
+    let best = supported
         .into_iter()
-        .filter(|(_, (count, _))| *count >= required)
-        .max_by(|(left, _), (right, _)| left.cmp(right))
-        .map(|(_, (_, metadata))| metadata))
+        .filter(|(_, (metadata, member_ids))| {
+            member_ids.len() >= metadata_quorum_requirement(metadata)
+        })
+        .max_by_key(|((txid, generation, _), _)| (*txid, *generation))
+        .map(|(_, (metadata, _))| metadata);
+    let total_members = base_metadata
+        .map(|metadata| metadata.disks.len())
+        .unwrap_or(superblocks.len())
+        .max(superblocks.len());
+    report.raw_journal_quorum = Some(raw_journal_quorum(&members, total_members) || best.is_some());
+    report.raw_journal_members = members;
+    Ok(best)
 }
 
 fn raw_journal_quorum(members: &[RawJournalMemberReport], total_members: usize) -> bool {
