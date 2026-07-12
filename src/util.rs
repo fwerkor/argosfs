@@ -82,9 +82,8 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     }
     fs::rename(&tmp, path)?;
     if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        let dir = File::open(parent)?;
+        dir.sync_all()?;
     }
     Ok(())
 }
