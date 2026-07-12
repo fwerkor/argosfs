@@ -401,10 +401,20 @@ fn preflight_empty(
                 sb.disk_id
             )));
         }
-        let mut sig = vec![0u8; 128 * 1024];
-        if backend.read_at(&sb.disk_id, 0, &mut sig).is_ok() && has_known_signature(&sig) {
+        let probe_len = sb.data.offset.min(4 * 1024 * 1024).max(128 * 1024) as usize;
+        let mut head = vec![0u8; probe_len];
+        backend.read_at(&sb.disk_id, 0, &mut head)?;
+        let capacity = backend.capacity(&sb.disk_id)?;
+        let tail_len = probe_len.min(capacity as usize);
+        let mut tail = vec![0u8; tail_len];
+        backend.read_at(
+            &sb.disk_id,
+            capacity.saturating_sub(tail_len as u64),
+            &mut tail,
+        )?;
+        if has_known_signature(&head, &tail) || head.iter().chain(&tail).any(|byte| *byte != 0) {
             return Err(ArgosError::UnsafeMount(format!(
-                "{} appears to contain an existing filesystem or partition table; pass --force to overwrite",
+                "{} contains an existing signature or non-zero data in protected probe regions; pass --force to overwrite",
                 sb.disk_id
             )));
         }
@@ -412,14 +422,33 @@ fn preflight_empty(
     Ok(())
 }
 
-fn has_known_signature(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"hsqs")
-        || bytes.get(0x438..0x43a) == Some(&[0x53, 0xef])
-        || bytes.get(510..512) == Some(&[0x55, 0xaa])
-        || bytes.starts_with(b"XFSB")
-        || bytes
+fn has_known_signature(head: &[u8], tail: &[u8]) -> bool {
+    head.starts_with(b"hsqs")
+        || head.starts_with(b"XFSB")
+        || head.starts_with(b"LUKS\xba\xbe")
+        || head.get(3..11) == Some(b"NTFS    ")
+        || head.get(3..11) == Some(b"EXFAT   ")
+        || head.get(512..520) == Some(b"EFI PART")
+        || head.get(512..520) == Some(b"LABELONE")
+        || head.get(0x438..0x43a) == Some(&[0x53, 0xef])
+        || head.get(1024..1028) == Some(&0xF2F5_2010u32.to_le_bytes())
+        || head.get(4096..4100) == Some(&0xA92B_4EFCu32.to_le_bytes())
+        || head
             .get(0x10040..0x10048)
             .is_some_and(|sig| sig == b"_BHRfS_M")
+        || contains_swap_signature(head)
+        || contains_swap_signature(tail)
+        || tail.windows(8).any(|window| window == b"EFI PART")
+        || tail
+            .windows(4)
+            .any(|window| window == 0xA92B_4EFCu32.to_le_bytes())
+}
+
+fn contains_swap_signature(bytes: &[u8]) -> bool {
+    [4096usize, 8192, 16384, 32768, 65536]
+        .into_iter()
+        .filter_map(|page_size| page_size.checked_sub(10))
+        .any(|offset| bytes.get(offset..offset + 10) == Some(b"SWAPSPACE2"))
 }
 
 fn initialize_journal_region(

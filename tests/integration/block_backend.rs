@@ -1097,3 +1097,45 @@ fn failed_raw_commit_restores_in_memory_metadata_before_returning() {
     let reopened = ArgosFs::open_loop(&images, false).unwrap();
     assert_eq!(reopened.read_file("/atomic-value", false).unwrap(), b"old");
 }
+
+#[test]
+fn raw_mkfs_rejects_luks_and_unknown_nonzero_data_without_force() {
+    let tmp = TempDir::new().unwrap();
+    let luks = tmp.path().join("luks.img");
+    let unknown = tmp.path().join("unknown.img");
+    for path in [&luks, &unknown] {
+        let file = fs::File::create(path).unwrap();
+        file.set_len(32 * 1024 * 1024).unwrap();
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&luks)
+        .unwrap()
+        .write_at(b"LUKS\xba\xbe", 0)
+        .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&unknown)
+        .unwrap()
+        .write_at(b"old-data", 1024 * 1024)
+        .unwrap();
+
+    for path in [&luks, &unknown] {
+        let err =
+            match ArgosFs::create_raw(std::slice::from_ref(path), config(1, 0), "safe-mkfs", false)
+            {
+                Ok(_) => panic!("raw mkfs unexpectedly overwrote {}", path.display()),
+                Err(err) => err,
+            };
+        assert!(matches!(err, ArgosError::UnsafeMount(_)));
+    }
+
+    let forced = ArgosFs::create_raw(
+        std::slice::from_ref(&luks),
+        config(1, 0),
+        "forced-mkfs",
+        true,
+    )
+    .unwrap();
+    drop(forced);
+}
