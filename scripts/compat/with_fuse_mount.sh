@@ -91,8 +91,20 @@ rm -rf "$root" "$mountpoint"
 mkdir -p "$mountpoint"
 "$bin" mkfs "$root" --disks "${ARGOSFS_COMPAT_DISKS:-4}" --k "${ARGOSFS_COMPAT_K:-2}" --m "${ARGOSFS_COMPAT_M:-2}" --force >/dev/null
 
-log info mount "$mountpoint"
-"$bin" mount "$root" "$mountpoint" --foreground &
+mount_options="${ARGOSFS_COMPAT_MOUNT_OPTIONS:-}"
+mount_args=("$bin" mount "$root" "$mountpoint" --foreground)
+IFS=',' read -r -a requested_mount_options <<<"$mount_options"
+for option in "${requested_mount_options[@]}"; do
+  option="$(printf '%s' "$option" | xargs)"
+  [ -n "$option" ] || continue
+  mount_args+=(-o "$option")
+done
+if [[ ",$mount_options," == *,allow_other,* ]]; then
+  chmod 0755 "$work" "$mountpoint"
+fi
+
+log info mount "$mountpoint options=${mount_options:-default}"
+"${mount_args[@]}" &
 pid=$!
 
 for _ in $(seq 1 "${ARGOSFS_COMPAT_MOUNT_ATTEMPTS:-100}"); do

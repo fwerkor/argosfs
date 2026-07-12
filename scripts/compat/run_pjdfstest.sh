@@ -3,6 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 out="${ARGOSFS_PJDFSTEST_OUT:-target/argosfs-artifacts/compat/pjdfstest.jsonl}"
+required="${ARGOSFS_PJDFSTEST_REQUIRE:-0}"
+run_as_root="${ARGOSFS_PJDFSTEST_RUN_AS_ROOT:-0}"
 
 json_escape() {
   local value="$1"
@@ -47,14 +49,26 @@ run_on_mount() {
   local log="${out%.jsonl}.log"
 
   if ! command -v python3 >/dev/null 2>&1; then
+    if [ "$required" = "1" ]; then
+      record failed "python3 unavailable" "$mountpoint"
+      return 1
+    fi
     record skipped "python3 unavailable" "$mountpoint"
     return 0
   fi
   if ! command -v prove >/dev/null 2>&1; then
+    if [ "$required" = "1" ]; then
+      record failed "prove unavailable" "$mountpoint"
+      return 1
+    fi
     record skipped "prove unavailable" "$mountpoint"
     return 0
   fi
   if [ ! -d "$tests_dir" ]; then
+    if [ "$required" = "1" ]; then
+      record failed "pjdfstest checkout unavailable; set PJDFSTEST_ROOT or clone pjdfstest at repo root" "$mountpoint"
+      return 1
+    fi
     record skipped "pjdfstest checkout unavailable; set PJDFSTEST_ROOT or clone pjdfstest at repo root" "$mountpoint"
     return 0
   fi
@@ -78,10 +92,17 @@ run_on_mount() {
   fi
 
   mkdir -p "$(dirname "$out")"
-  (
-    cd "$mountpoint"
-    prove -r "${selected[@]}"
-  ) > "$log" 2>&1 || status="failed"
+  if [ "$run_as_root" = "1" ]; then
+    (
+      cd "$mountpoint"
+      sudo prove -r "${selected[@]}"
+    ) > "$log" 2>&1 || status="failed"
+  else
+    (
+      cd "$mountpoint"
+      prove -r "${selected[@]}"
+    ) > "$log" 2>&1 || status="failed"
+  fi
 
   record "$status" "subset: $requested" "$mountpoint" "$log"
   [ "$status" = "passed" ]
