@@ -9,6 +9,7 @@ argosfs_qemu_select_arch
 argosfs_qemu_require_binary
 
 monitor="$artifacts/qemu-monitor.sock"
+monitor_log="$artifacts/qemu-monitor.log"
 log="$artifacts/qemu-degraded-rootfs-$arch.log"
 commands="$artifacts/qemu-degraded-rootfs.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault|I/O error}"
@@ -32,8 +33,10 @@ awk '$2=="/"{print "ARGOSFS_ROOT_MOUNT " $1 " " $3 " " $4; exit}' /proc/mounts
 test -e /run/argosfs-root-active && echo ARGOSFS_ROOT_MARKER_OK
 echo ARGOSFS_WAIT_DEGRADED_HOTPLUG
 for dev in /dev/vdb /dev/vdc /dev/vdd; do
-  for i in $(seq 1 60); do [ -b "$dev" ] && break; sleep 1; done
+  name="${dev##*/}"
+  for i in $(seq 1 60); do [ -b "$dev" ] && [ -e "/sys/class/block/$name" ] && break; sleep 1; done
   test -b "$dev"
+  test -e "/sys/class/block/$name"
 done
 src=/tmp/argosfs-degraded-src
 mnt=/mnt/argosfs-degraded-root
@@ -70,19 +73,25 @@ poweroff -f || reboot -f || halt -f
 CMDS
 
 argosfs_qemu_build_args
+argosfs_qemu_add_hotplug_ports 3 deg
 qemu_args+=(-monitor "unix:$monitor,server,nowait")
+: >"$monitor_log"
 
 qemu_device_add() {
   local idx="$1" path="$2"
-  printf 'drive_add 0 if=none,file=%s,format=raw,id=deg%s\n' "$path" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  if [ "$arch" = "arm64" ]; then
-    printf 'device_add virtio-blk-pci,drive=deg%s,id=degdisk%s,romfile=\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  else
-    printf 'device_add virtio-blk-pci,drive=deg%s,id=degdisk%s\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  fi
+  local bus_arg rom_arg
+  argosfs_qemu_monitor_command "$monitor" \
+    "drive_add 0 if=none,file=$path,format=raw,id=deg$idx" "$monitor_log"
+  bus_arg="$(argosfs_qemu_hotplug_bus_arg deg "$idx")"
+  rom_arg=""
+  [ "$arch" != "arm64" ] || rom_arg=",romfile="
+  argosfs_qemu_monitor_command "$monitor" \
+    "device_add virtio-blk-pci,drive=deg$idx,id=degdisk$idx${bus_arg}${rom_arg}" "$monitor_log"
 }
 
 set +e
+# QEMU output is intentionally polled while this pipeline appends to the log.
+# shellcheck disable=SC2094
 (
   sleep "$login_delay_s"
   printf '\r'
@@ -91,6 +100,7 @@ set +e
     printf '%s\r' "$line"
     sleep "$command_delay_s"
     if [ "$line" = "echo ARGOSFS_WAIT_DEGRADED_HOTPLUG" ]; then
+      argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_DEGRADED_HOTPLUG 180
       for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
       idx=0
       for disk in "${disks[@]}"; do qemu_device_add "$idx" "$disk"; idx=$((idx + 1)); done

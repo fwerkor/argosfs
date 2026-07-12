@@ -9,6 +9,7 @@ argosfs_qemu_select_arch
 argosfs_qemu_require_binary
 
 monitor="$artifacts/qemu-monitor.sock"
+monitor_log="$artifacts/qemu-monitor.log"
 log="$artifacts/qemu-block-lifecycle-stress-$arch.log"
 commands="$artifacts/qemu-block-lifecycle-stress.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault|I/O error}"
@@ -32,8 +33,10 @@ awk '$2=="/"{print "ARGOSFS_ROOT_MOUNT " $1 " " $3 " " $4; exit}' /proc/mounts
 test -e /run/argosfs-root-active && echo ARGOSFS_ROOT_MARKER_OK
 echo ARGOSFS_WAIT_LIFECYCLE_HOTPLUG
 for dev in /dev/vdb /dev/vdc /dev/vdd /dev/vde /dev/vdf; do
-  for i in $(seq 1 60); do [ -b "$dev" ] && break; sleep 1; done
+  name="${dev##*/}"
+  for i in $(seq 1 60); do [ -b "$dev" ] && [ -e "/sys/class/block/$name" ] && break; sleep 1; done
   test -b "$dev"
+  test -e "/sys/class/block/$name"
 done
 echo ARGOSFS_LIFECYCLE_BLOCK_DEVICES_OK
 src=/tmp/argosfs-lifecycle-src
@@ -63,28 +66,37 @@ all="$all,/dev/vdf"
 argosfs fsck --backend raw --devices "$all" --repair --remove-orphans >/tmp/argosfs-lifecycle-fsck-final.json
 argosfs scrub --backend raw --devices "$all" >/tmp/argosfs-lifecycle-scrub-final.json
 argosfs export-tree --backend raw --devices "$all" "$out"
-cmp "$src/data/meta-37.txt" "$out/data/meta-37.txt"
-cmp "$src/data/blob-111.bin" "$out/data/blob-111.bin"
-echo ARGOSFS_BLOCK_LIFECYCLE_CONTENT_OK
+if cmp "$src/data/meta-37.txt" "$out/data/meta-37.txt" &&
+   cmp "$src/data/blob-111.bin" "$out/data/blob-111.bin"; then
+  echo ARGOSFS_BLOCK_LIFECYCLE_CONTENT_OK
+else
+  echo ARGOSFS_BLOCK_LIFECYCLE_CONTENT_FAILED
+fi
 sync
 echo ARGOSFS_QEMU_BLOCK_LIFECYCLE_STRESS_DONE
 poweroff -f || reboot -f || halt -f
 CMDS
 
 argosfs_qemu_build_args
+argosfs_qemu_add_hotplug_ports 5 life
 qemu_args+=(-monitor "unix:$monitor,server,nowait")
+: >"$monitor_log"
 
 qemu_device_add() {
   local idx="$1" path="$2"
-  printf 'drive_add 0 if=none,file=%s,format=raw,id=life%s\n' "$path" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  if [ "$arch" = "arm64" ]; then
-    printf 'device_add virtio-blk-pci,drive=life%s,id=lifedisk%s,romfile=\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  else
-    printf 'device_add virtio-blk-pci,drive=life%s,id=lifedisk%s\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  fi
+  local bus_arg rom_arg
+  argosfs_qemu_monitor_command "$monitor" \
+    "drive_add 0 if=none,file=$path,format=raw,id=life$idx" "$monitor_log"
+  bus_arg="$(argosfs_qemu_hotplug_bus_arg life "$idx")"
+  rom_arg=""
+  [ "$arch" != "arm64" ] || rom_arg=",romfile="
+  argosfs_qemu_monitor_command "$monitor" \
+    "device_add virtio-blk-pci,drive=life$idx,id=lifedisk$idx${bus_arg}${rom_arg}" "$monitor_log"
 }
 
 set +e
+# QEMU output is intentionally polled while this pipeline appends to the log.
+# shellcheck disable=SC2094
 (
   sleep "$login_delay_s"
   printf '\r'
@@ -93,6 +105,7 @@ set +e
     printf '%s\r' "$line"
     sleep "$command_delay_s"
     if [ "$line" = "echo ARGOSFS_WAIT_LIFECYCLE_HOTPLUG" ]; then
+      argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_LIFECYCLE_HOTPLUG 180
       for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
       idx=0
       for disk in "${disks[@]}"; do qemu_device_add "$idx" "$disk"; idx=$((idx + 1)); done
