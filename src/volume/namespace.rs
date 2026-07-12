@@ -1218,16 +1218,26 @@ impl ArgosFs {
     }
 
     pub fn check_access_inode(&self, ino: InodeId, uid: u32, gid: u32, mask: i32) -> Result<()> {
+        self.check_access_inode_with_groups(ino, uid, &[gid], mask)
+    }
+
+    pub fn check_access_inode_with_groups(
+        &self,
+        ino: InodeId,
+        uid: u32,
+        gids: &[u32],
+        mask: i32,
+    ) -> Result<()> {
         let meta = self.meta.read();
         let inode = meta
             .inodes
             .get(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
-        if acl::evaluate_access(inode, uid, gid, mask) {
+        if acl::evaluate_access_with_groups(inode, uid, gids, mask) {
             Ok(())
         } else {
             Err(ArgosError::PermissionDenied(format!(
-                "uid {uid} gid {gid} mask {mask:o} inode {ino}"
+                "uid {uid} gids {gids:?} mask {mask:o} inode {ino}"
             )))
         }
     }

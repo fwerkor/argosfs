@@ -166,6 +166,10 @@ pub fn nfs4_to_json(acl: &Nfs4Acl) -> Result<String> {
 }
 
 pub fn evaluate_access(inode: &Inode, uid: u32, gid: u32, mask: i32) -> bool {
+    evaluate_access_with_groups(inode, uid, &[gid], mask)
+}
+
+pub fn evaluate_access_with_groups(inode: &Inode, uid: u32, gids: &[u32], mask: i32) -> bool {
     let requested = (((mask & libc::R_OK) != 0) as u16 * ACL_READ)
         | (((mask & libc::W_OK) != 0) as u16 * ACL_WRITE)
         | (((mask & libc::X_OK) != 0) as u16 * ACL_EXECUTE);
@@ -178,14 +182,14 @@ pub fn evaluate_access(inode: &Inode, uid: u32, gid: u32, mask: i32) -> bool {
             || inode.mode & 0o111 != 0;
     }
     if let Some(nfs4) = &inode.nfs4_acl {
-        if let Some(allowed) = evaluate_nfs4(nfs4, uid, gid, requested) {
+        if let Some(allowed) = evaluate_nfs4(nfs4, uid, gids, requested) {
             return allowed;
         }
     }
     if let Some(acl) = &inode.posix_acl_access {
-        return evaluate_posix(acl, inode, uid, gid, requested);
+        return evaluate_posix(acl, inode, uid, gids, requested);
     }
-    evaluate_mode(inode, uid, gid, requested)
+    evaluate_mode(inode, uid, gids, requested)
 }
 
 pub fn inherited_directory_acl(parent: &Inode) -> Option<PosixAcl> {
@@ -248,7 +252,7 @@ pub fn mode_from_access_acl(acl: &PosixAcl, current_mode: u32) -> u32 {
     (current_mode & !0o777) | (owner << 6) | (group << 3) | other
 }
 
-fn evaluate_posix(acl: &PosixAcl, inode: &Inode, uid: u32, gid: u32, requested: u16) -> bool {
+fn evaluate_posix(acl: &PosixAcl, inode: &Inode, uid: u32, gids: &[u32], requested: u16) -> bool {
     let mask = acl
         .entries
         .iter()
@@ -273,7 +277,7 @@ fn evaluate_posix(acl: &PosixAcl, inode: &Inode, uid: u32, gid: u32, requested: 
     }
     let mut group_matched = false;
     let mut group_perms = 0u16;
-    if gid == inode.gid {
+    if gids.contains(&inode.gid) {
         group_matched = true;
         group_perms |= acl
             .entries
@@ -282,11 +286,9 @@ fn evaluate_posix(acl: &PosixAcl, inode: &Inode, uid: u32, gid: u32, requested: 
             .map(|entry| entry.perms)
             .unwrap_or(((inode.mode >> 3) & 0o7) as u16);
     }
-    for entry in acl
-        .entries
-        .iter()
-        .filter(|entry| entry.tag == PosixAclTag::Group && entry.id == Some(gid))
-    {
+    for entry in acl.entries.iter().filter(|entry| {
+        entry.tag == PosixAclTag::Group && entry.id.is_some_and(|group| gids.contains(&group))
+    }) {
         group_matched = true;
         group_perms |= entry.perms;
     }
@@ -302,10 +304,10 @@ fn evaluate_posix(acl: &PosixAcl, inode: &Inode, uid: u32, gid: u32, requested: 
     other & requested == requested
 }
 
-fn evaluate_mode(inode: &Inode, uid: u32, gid: u32, requested: u16) -> bool {
+fn evaluate_mode(inode: &Inode, uid: u32, gids: &[u32], requested: u16) -> bool {
     let shift = if uid == inode.uid {
         6
-    } else if gid == inode.gid {
+    } else if gids.contains(&inode.gid) {
         3
     } else {
         0
@@ -314,13 +316,13 @@ fn evaluate_mode(inode: &Inode, uid: u32, gid: u32, requested: u16) -> bool {
     perms & requested == requested
 }
 
-fn evaluate_nfs4(acl: &Nfs4Acl, uid: u32, gid: u32, requested: u16) -> Option<bool> {
+fn evaluate_nfs4(acl: &Nfs4Acl, uid: u32, gids: &[u32], requested: u16) -> Option<bool> {
     if acl.entries.is_empty() {
         return None;
     }
     let mut allowed = 0u16;
     for ace in &acl.entries {
-        if !nfs4_principal_matches(ace, uid, gid) {
+        if !nfs4_principal_matches(ace, uid, gids) {
             continue;
         }
         let perms = nfs4_perm_bits(ace);
@@ -335,9 +337,11 @@ fn evaluate_nfs4(acl: &Nfs4Acl, uid: u32, gid: u32, requested: u16) -> Option<bo
     Some(allowed & requested == requested)
 }
 
-fn nfs4_principal_matches(ace: &Nfs4Ace, uid: u32, gid: u32) -> bool {
-    let p = ace.principal.as_str();
-    p == "EVERYONE@" || p == format!("uid:{uid}") || p == format!("gid:{gid}")
+fn nfs4_principal_matches(ace: &Nfs4Ace, uid: u32, gids: &[u32]) -> bool {
+    let principal = ace.principal.as_str();
+    principal == "EVERYONE@"
+        || principal == format!("uid:{uid}")
+        || gids.iter().any(|gid| principal == format!("gid:{gid}"))
 }
 
 fn nfs4_perm_bits(ace: &Nfs4Ace) -> u16 {

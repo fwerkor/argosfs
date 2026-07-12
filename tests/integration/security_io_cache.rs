@@ -568,3 +568,26 @@ fn content_and_owner_changes_clear_setid_bits() {
     fs.chown_inode(attr.ino, Some(1234), Some(1234)).unwrap();
     assert_eq!(fs.attr_inode(attr.ino).unwrap().mode & 0o6000, 0);
 }
+
+#[test]
+fn supplementary_groups_are_used_for_mode_and_acl_checks() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let mode_file = fs
+        .create_file_at_with_owner(1, OsStr::new("mode-group"), 0o640, 1000, 2000)
+        .unwrap();
+    fs.check_access_inode_with_groups(mode_file.ino, 3000, &[3000, 2000], libc::R_OK)
+        .unwrap();
+
+    let acl_file = fs
+        .create_file_at_with_owner(1, OsStr::new("acl-group"), 0o600, 1000, 1000)
+        .unwrap();
+    fs.set_posix_acl_path(
+        "/acl-group",
+        false,
+        acl::parse_posix_acl("user::rw-,group::---,group:2000:r--,mask::r--,other::---").unwrap(),
+    )
+    .unwrap();
+    fs.check_access_inode_with_groups(acl_file.ino, 3000, &[3000, 2000], libc::R_OK)
+        .unwrap();
+}

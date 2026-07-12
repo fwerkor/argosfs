@@ -144,8 +144,9 @@ impl ArgosFuse {
     }
 
     fn require_access(&self, req: &Request, ino: INodeNo, mask: i32) -> Result<()> {
+        let groups = request_groups(req);
         self.volume
-            .check_access_inode(ino.0, req.uid(), req.gid(), mask)
+            .check_access_inode_with_groups(ino.0, req.uid(), &groups, mask)
     }
 
     fn open_reply_flags(&self, write_open: bool) -> FopenFlags {
@@ -1353,6 +1354,29 @@ fn time_or_now(value: TimeOrNow) -> f64 {
     }
 }
 
+fn request_groups(req: &Request) -> Vec<u32> {
+    let mut groups = std::fs::read_to_string(format!("/proc/{}/status", req.pid()))
+        .ok()
+        .map(|status| parse_status_groups(&status))
+        .unwrap_or_default();
+    if !groups.contains(&req.gid()) {
+        groups.push(req.gid());
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+fn parse_status_groups(status: &str) -> Vec<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Groups:"))
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .filter_map(|value| value.parse::<u32>().ok())
+        .collect()
+}
+
 fn is_specific_time(value: &Option<TimeOrNow>) -> bool {
     matches!(value, Some(TimeOrNow::SpecificTime(_)))
 }
@@ -1406,6 +1430,12 @@ mod tests {
         ]);
 
         assert_eq!(config.acl, SessionACL::All);
+    }
+
+    #[test]
+    fn proc_status_group_parser_reads_supplementary_groups() {
+        let groups = parse_status_groups("Name:\ttest\nGroups:\t10 20 30 \n");
+        assert_eq!(groups, vec![10, 20, 30]);
     }
 
     #[test]
