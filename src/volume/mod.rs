@@ -64,6 +64,7 @@ const BOOT_CRITICAL_XATTR: &str = "system.argosfs.boot_critical";
 const DEFAULT_LAYOUT_ID: &str = "layout-0000";
 const SHARD_CHECKSUM_BLOCK_SIZE: usize = 256 * 1024;
 const INLINE_DATA_MAX: usize = 512;
+const MAX_IN_MEMORY_IO_BYTES: usize = 256 * 1024 * 1024;
 
 mod autopilot;
 mod data_plane;

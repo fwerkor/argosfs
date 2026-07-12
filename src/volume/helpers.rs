@@ -238,7 +238,26 @@ pub(super) fn layout_stripe_raw_size(layout: &LayoutConfig) -> Result<usize> {
             "stripe size must be positive".to_string(),
         ));
     }
+    if stripe_raw_size > MAX_IN_MEMORY_IO_BYTES {
+        return Err(ArgosError::FileTooLarge(format!(
+            "stripe size {stripe_raw_size} exceeds the in-memory safety limit {MAX_IN_MEMORY_IO_BYTES}"
+        )));
+    }
     Ok(stripe_raw_size)
+}
+
+pub(super) fn zeroed_io_buffer(length: usize, context: &str) -> Result<Vec<u8>> {
+    if length > MAX_IN_MEMORY_IO_BYTES {
+        return Err(ArgosError::FileTooLarge(format!(
+            "{context} requires {length} bytes, limit is {MAX_IN_MEMORY_IO_BYTES}"
+        )));
+    }
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(length)
+        .map_err(|_| ArgosError::Io(std::io::Error::from_raw_os_error(libc::ENOMEM)))?;
+    buffer.resize(length, 0);
+    Ok(buffer)
 }
 
 pub(super) fn shard_accounted_size(shard: &Shard) -> u64 {

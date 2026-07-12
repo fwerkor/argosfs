@@ -54,6 +54,18 @@ fn range_write_rewrites_only_affected_stripe_window() {
         .map(|block| block.stripe_id.clone())
         .collect::<Vec<_>>();
     assert_eq!(unchanged_prefix, after_prefix);
+    let unchanged_suffix = before_blocks
+        .iter()
+        .filter(|block| block.raw_offset >= 16)
+        .map(|block| block.stripe_id.clone())
+        .collect::<Vec<_>>();
+    let after_suffix = after_blocks
+        .iter()
+        .filter(|block| block.raw_offset >= 16)
+        .map(|block| block.stripe_id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(unchanged_suffix, after_suffix);
+    assert_eq!(after.next_stripe - before.next_stripe, 1);
 
     let mut expected = original.to_vec();
     expected[10..12].copy_from_slice(b"XX");
@@ -266,6 +278,29 @@ fn fallocate_extends_regular_file_with_zeroes() {
             .unwrap_err()
             .errno(),
         libc::ENOTSUP
+    );
+}
+
+#[test]
+fn sparse_extension_does_not_materialize_the_hole_or_exhaust_memory() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 1, false).unwrap();
+    fs.write_file("/sparse", b"abc", 0o644).unwrap();
+    let ino = fs.resolve_path("/sparse", true).unwrap();
+    let size = 512 * 1024 * 1024u64;
+
+    fs.truncate_inode(ino, size).unwrap();
+
+    let inode = fs.metadata_snapshot().inodes[&ino].clone();
+    assert_eq!(inode.size, size);
+    assert_eq!(inode.blocks.len(), 1);
+    assert_eq!(fs.read_inode(ino, 0, 3, false).unwrap(), b"abc");
+    assert_eq!(fs.read_inode(ino, size - 1, 1, false).unwrap(), b"\0");
+    assert_eq!(
+        fs.read_file("/sparse", false).unwrap_err().errno(),
+        libc::EFBIG
     );
 }
 

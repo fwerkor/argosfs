@@ -135,7 +135,7 @@ impl ArgosFs {
             ));
         }
         if let Some(inline) = decode_inline_data(&inode)? {
-            let mut out = vec![0u8; end - start];
+            let mut out = zeroed_io_buffer(end - start, "inline read window")?;
             let copy_end = end.min(inline.len());
             if copy_end > start {
                 out[..copy_end - start].copy_from_slice(&inline[start..copy_end]);
@@ -166,7 +166,7 @@ impl ArgosFs {
             }
             return Ok((inline[start..end].to_vec(), Vec::new()));
         }
-        let mut out = vec![0u8; end - start];
+        let mut out = zeroed_io_buffer(end - start, "inode read window")?;
         let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
             Some(self.encryption_key_locked(meta)?)
         } else {
@@ -330,7 +330,7 @@ impl ArgosFs {
             }
             return Ok((inline, Vec::new()));
         }
-        let mut out = vec![0u8; logical_size];
+        let mut out = zeroed_io_buffer(logical_size, "full inode decode")?;
         let mut damaged = Vec::new();
         let decrypt_key = if inode.blocks.iter().any(|block| block.encrypted) {
             Some(self.encryption_key_locked(meta)?)
@@ -1244,7 +1244,7 @@ impl ArgosFs {
     pub(super) fn read_shard_locked(&self, meta: &Metadata, shard: &Shard) -> Result<Vec<u8>> {
         match shard.location.as_ref() {
             Some(ShardLocation::RawExtent(extent)) => {
-                let mut data = vec![0u8; shard.size];
+                let mut data = zeroed_io_buffer(shard.size, "raw shard read")?;
                 self.backend_read_at_locked(meta, &extent.disk_id, extent.offset, &mut data)?;
                 Ok(data)
             }
@@ -1279,7 +1279,7 @@ impl ArgosFs {
                 shard.size
             )));
         }
-        let mut data = vec![0u8; len];
+        let mut data = zeroed_io_buffer(len, "shard range read")?;
         match shard.location.as_ref() {
             Some(ShardLocation::RawExtent(extent)) => {
                 let absolute = extent
