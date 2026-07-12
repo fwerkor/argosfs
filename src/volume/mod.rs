@@ -940,13 +940,13 @@ impl ArgosFs {
                 meta.inodes.remove(&child);
             }
         }
-        self.account_blocks_locked(meta, &blocks_to_delete, false);
+        self.stage_block_reclamation_locked(meta, &blocks_to_delete);
         self.commit_locked(
             meta,
             if dir { "rmdir" } else { "unlink" },
             json!({"parent": parent, "name": name, "inode": child}),
         )?;
-        self.delete_blocks_locked(meta, &blocks_to_delete);
+        self.finish_block_reclamation_locked(meta, &blocks_to_delete);
         Ok(())
     }
 
@@ -961,9 +961,9 @@ impl ArgosFs {
         }
         let blocks = inode.blocks.clone();
         meta.inodes.remove(&ino);
-        self.account_blocks_locked(&mut meta, &blocks, false);
+        self.stage_block_reclamation_locked(&mut meta, &blocks);
         self.commit_locked(&mut meta, "orphan-reap", json!({"inode": ino}))?;
-        self.delete_blocks_locked(&mut meta, &blocks);
+        self.finish_block_reclamation_locked(&mut meta, &blocks);
         Ok(())
     }
 
@@ -1109,7 +1109,7 @@ impl ArgosFs {
                 }
             }
         }
-        self.account_blocks_locked(meta, &blocks_to_delete, false);
+        self.stage_block_reclamation_locked(meta, &blocks_to_delete);
         self.dir_inode_mut_locked(meta, old_parent)?
             .entries
             .remove(old_name);
@@ -1132,7 +1132,7 @@ impl ArgosFs {
             "rename",
             json!({"old_parent": old_parent, "old_name": old_name, "new_parent": new_parent, "new_name": new_name, "inode": child}),
         )?;
-        self.delete_blocks_locked(meta, &blocks_to_delete);
+        self.finish_block_reclamation_locked(meta, &blocks_to_delete);
         Ok(())
     }
 

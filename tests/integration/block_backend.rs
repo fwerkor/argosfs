@@ -798,6 +798,39 @@ fn raw_hot_file_transactions_use_metadata_deltas() {
 }
 
 #[test]
+fn failed_multistripe_raw_write_rolls_back_allocator_state() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.chunk_size = 8 * 1024 * 1024;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "rollback", false).unwrap();
+    let ino = fs.create_file_path("/victim", 0o600).unwrap();
+    let before = fs.metadata_snapshot();
+    let disk_id = before.disks.keys().next().unwrap().clone();
+    let allocator_before = before.raw_pool.allocators[&disk_id].clone();
+
+    assert!(fs
+        .write_inode_range(ino, 0, &vec![b'x'; 16 * 1024 * 1024])
+        .is_err());
+
+    let after = fs.metadata_snapshot();
+    assert_eq!(after.inodes[&ino].size, 0);
+    assert_eq!(
+        after.raw_pool.allocators[&disk_id].next_offset,
+        allocator_before.next_offset
+    );
+    assert_eq!(
+        after.raw_pool.allocators[&disk_id].free_extents,
+        allocator_before.free_extents
+    );
+    assert_eq!(
+        after.disks[&disk_id].used_bytes,
+        before.disks[&disk_id].used_bytes
+    );
+}
+
+#[test]
 fn raw_allocator_inconsistency_is_reported_by_fsck() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
@@ -1062,6 +1095,51 @@ fn raw_recovery_ignores_journal_head_without_membership_quorum() {
         reopened.transaction_report().unwrap().raw_journal_quorum,
         Some(true)
     );
+}
+
+#[test]
+fn committed_raw_replacement_persists_old_extent_reclamation() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "reclaim", false).unwrap();
+    fs.write_file("/value", &vec![b'a'; 1024], 0o600).unwrap();
+    fs.sync().unwrap();
+    let before = fs.metadata_snapshot();
+    let ino = fs.resolve_path("/value", false).unwrap();
+    let old_extent = match before.inodes[&ino].blocks[0].shards[0]
+        .location
+        .as_ref()
+        .unwrap()
+    {
+        ShardLocation::RawExtent(extent) => extent.clone(),
+        _ => panic!("expected raw extent"),
+    };
+
+    let _crash = journal::thread_crash_point(
+        argosfs::types::FaultPoint::AfterJournalCommitBeforeMetadataCommit.as_str(),
+    );
+    assert!(matches!(
+        fs.write_file("/value", &vec![b'b'; 1024], 0o600)
+            .unwrap_err(),
+        ArgosError::InjectedCrash(_)
+    ));
+    drop(_crash);
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/value", false).unwrap(),
+        vec![b'b'; 1024]
+    );
+    let allocator = &reopened.metadata_snapshot().raw_pool.allocators[&old_extent.disk_id];
+    assert!(allocator.free_extents.iter().any(|free| {
+        free.offset <= old_extent.offset
+            && free.offset.saturating_add(free.length)
+                >= old_extent.offset.saturating_add(old_extent.length)
+    }));
 }
 
 #[test]

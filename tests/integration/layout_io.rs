@@ -61,6 +61,42 @@ fn range_write_rewrites_only_affected_stripe_window() {
 }
 
 #[test]
+fn failed_multistripe_host_write_rolls_back_all_provisional_shards() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.chunk_size = 1024;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 1, false).unwrap();
+    let ino = fs.create_file_path("/victim", 0o600).unwrap();
+    let before = fs.metadata_snapshot();
+    let next = before.next_stripe;
+    let failing = format!("s{:016x}", next + 1);
+    let blocker = tmp
+        .path()
+        .join(".argosfs/devices/disk-0000/shards")
+        .join(&failing[failing.len() - 2..])
+        .join(format!("{failing}.000.blk"));
+    fs::create_dir_all(&blocker).unwrap();
+
+    assert!(fs.write_inode_range(ino, 0, &vec![b'x'; 3 * 1024]).is_err());
+
+    let after = fs.metadata_snapshot();
+    assert_eq!(after.next_stripe, before.next_stripe);
+    assert_eq!(
+        after.disks["disk-0000"].used_bytes,
+        before.disks["disk-0000"].used_bytes
+    );
+    assert_eq!(after.inodes[&ino].size, 0);
+    let first = format!("s{next:016x}");
+    let first_path = tmp
+        .path()
+        .join(".argosfs/devices/disk-0000/shards")
+        .join(&first[first.len() - 2..])
+        .join(format!("{first}.000.blk"));
+    assert!(!first_path.exists());
+}
+
+#[test]
 fn legacy_sha256_data_checksums_remain_readable() {
     let tmp = TempDir::new().unwrap();
     let mut cfg = config(1, 0);
