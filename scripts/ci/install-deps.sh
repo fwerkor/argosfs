@@ -5,6 +5,8 @@ sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
 	acl \
 	attr \
+	autoconf \
+	automake \
 	bison \
 	build-essential \
 	clang \

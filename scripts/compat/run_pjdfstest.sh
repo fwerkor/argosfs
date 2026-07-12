@@ -95,12 +95,12 @@ run_on_mount() {
   if [ "$run_as_root" = "1" ]; then
     (
       cd "$mountpoint"
-      sudo prove -r "${selected[@]}"
+      sudo prove -rv "${selected[@]}"
     ) > "$log" 2>&1 || status="failed"
   else
     (
       cd "$mountpoint"
-      prove -r "${selected[@]}"
+      prove -rv "${selected[@]}"
     ) > "$log" 2>&1 || status="failed"
   fi
 

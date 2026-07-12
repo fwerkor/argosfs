@@ -137,6 +137,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: pjd/pjdfstest
+          ref: ededbeb2b44929972898afb87474b0937f78a877
           path: external/pjdfstest
 
       - name: Install system dependencies
@@ -174,6 +175,7 @@ jobs:
             ${{ runner.temp }}/weekly-pjdfstest
             ${{ runner.temp }}/weekly-pjdfstest.jsonl
             ${{ runner.temp }}/weekly-pjdfstest.log
+            ${{ runner.temp }}/weekly-pjdfstest.build.log
           if-no-files-found: error
 
   block-fault-injection:

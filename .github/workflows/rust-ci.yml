@@ -198,6 +198,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: pjd/pjdfstest
+          ref: ededbeb2b44929972898afb87474b0937f78a877
           path: external/pjdfstest
 
       - name: Install system dependencies
@@ -224,6 +225,7 @@ jobs:
           path: |
             ${{ runner.temp }}/pjdfstest.jsonl
             ${{ runner.temp }}/pjdfstest.log
+            ${{ runner.temp }}/pjdfstest.build.log
             target/argosfs-test-artifacts
           if-no-files-found: ignore
 
