@@ -378,7 +378,7 @@ impl ArgosFs {
             return Ok(0);
         }
         if start == old_size && start % stripe_raw_size == 0 {
-            self.append_inode_data_locked(&mut meta, ino, start, data)?;
+            self.append_inode_data_locked(&mut meta, ino, start, data, access.is_some())?;
             return Ok(data.len());
         }
         let new_size = old_size.max(end);
@@ -417,6 +417,7 @@ impl ArgosFs {
             new_size,
             &window,
             data.len() as u64,
+            access.is_some(),
             "write-range",
             json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "stripe-window-local"}),
         )?;
@@ -429,6 +430,7 @@ impl ArgosFs {
         ino: InodeId,
         offset: usize,
         data: &[u8],
+        clear_setid: bool,
     ) -> Result<()> {
         let rollback = commit_previous_snapshot(meta);
         let (storage_class, boot_critical, existing_inline, had_blocks) = {
@@ -508,6 +510,9 @@ impl ArgosFs {
         inode.workload_score = inode.workload_score * 0.90 + 2.0;
         inode.mtime = now;
         inode.ctime = now;
+        if clear_setid {
+            inode.mode &= !(libc::S_ISUID | libc::S_ISGID);
+        }
 
         if let Err(err) = self.commit_locked_with_previous(
             meta,
@@ -515,13 +520,17 @@ impl ArgosFs {
             "write-range",
             json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "aligned-eof-append"}),
         ) {
-            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                if let Some(rollback) = rollback {
-                    *meta = rollback;
+            if !Self::transaction_error_is_committed(&err) {
+                if matches!(err, ArgosError::Conflict(_)) {
+                    if meta.backend == BackendKind::Host {
+                        self.delete_blocks_locked(meta, &written_blocks);
+                    }
+                } else {
+                    self.delete_blocks_locked(meta, &written_blocks);
+                    if let Some(rollback) = rollback {
+                        *meta = rollback;
+                    }
                 }
-                self.delete_blocks_locked(meta, &written_blocks);
-            } else if matches!(&err, ArgosError::Conflict(_)) {
-                self.delete_blocks_locked(meta, &written_blocks);
             }
             return Err(err);
         }
@@ -534,6 +543,14 @@ impl ArgosFs {
     }
 
     pub fn truncate_inode(&self, ino: InodeId, size: u64) -> Result<()> {
+        self.truncate_inode_checked(ino, size, false)
+    }
+
+    pub fn truncate_inode_as(&self, ino: InodeId, size: u64) -> Result<()> {
+        self.truncate_inode_checked(ino, size, true)
+    }
+
+    fn truncate_inode_checked(&self, ino: InodeId, size: u64, clear_setid: bool) -> Result<()> {
         let requested_size = size;
         let new_size = usize::try_from(requested_size)
             .map_err(|_| ArgosError::Invalid("truncate size is too large".to_string()))?;
@@ -576,6 +593,7 @@ impl ArgosFs {
             new_size,
             &window,
             0,
+            clear_setid,
             "truncate",
             json!({"inode": ino, "size": requested_size, "rewrite": "stripe-window-local"}),
         )
@@ -615,7 +633,14 @@ impl ArgosFs {
         let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.write();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
-        self.unlink_locked(&mut meta, parent_ino, &name, false, Some(current_uid()))
+        self.unlink_locked(
+            &mut meta,
+            parent_ino,
+            &name,
+            false,
+            Some(current_uid()),
+            false,
+        )
     }
 
     pub fn unlink_at(&self, parent: InodeId, name: &OsStr) -> Result<()> {
@@ -625,7 +650,18 @@ impl ArgosFs {
     pub fn unlink_at_as(&self, parent: InodeId, name: &OsStr, uid: u32) -> Result<()> {
         let name = entry_name_from_os(name)?;
         let mut meta = self.meta.write();
-        self.unlink_locked(&mut meta, parent, &name, false, Some(uid))
+        self.unlink_locked(&mut meta, parent, &name, false, Some(uid), false)
+    }
+
+    pub fn unlink_at_as_preserving_open(
+        &self,
+        parent: InodeId,
+        name: &OsStr,
+        uid: u32,
+    ) -> Result<()> {
+        let name = entry_name_from_os(name)?;
+        let mut meta = self.meta.write();
+        self.unlink_locked(&mut meta, parent, &name, false, Some(uid), true)
     }
 
     pub fn rmdir_path(&self, path: &str) -> Result<()> {
@@ -633,7 +669,14 @@ impl ArgosFs {
         let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.write();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
-        self.unlink_locked(&mut meta, parent_ino, &name, true, Some(current_uid()))
+        self.unlink_locked(
+            &mut meta,
+            parent_ino,
+            &name,
+            true,
+            Some(current_uid()),
+            false,
+        )
     }
 
     pub fn rmdir_at(&self, parent: InodeId, name: &OsStr) -> Result<()> {
@@ -643,7 +686,7 @@ impl ArgosFs {
     pub fn rmdir_at_as(&self, parent: InodeId, name: &OsStr, uid: u32) -> Result<()> {
         let name = entry_name_from_os(name)?;
         let mut meta = self.meta.write();
-        self.unlink_locked(&mut meta, parent, &name, true, Some(uid))
+        self.unlink_locked(&mut meta, parent, &name, true, Some(uid), false)
     }
 
     pub fn rename_path(&self, old: &str, new: &str) -> Result<()> {
@@ -726,7 +769,7 @@ impl ArgosFs {
         let inherited_acl = meta
             .inodes
             .get(&parent)
-            .and_then(acl::inherited_directory_acl);
+            .and_then(|parent| acl::inherited_access_acl(parent, 0o777));
         let target_string = encode_symlink_target(target);
         let target_size = decode_symlink_target_bytes(&target_string).len() as u64;
         let inode = Inode {
@@ -853,6 +896,9 @@ impl ArgosFs {
             .get_mut(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
         inode.mode = (inode.mode & !0o7777) | (mode & 0o7777);
+        if let Some(access_acl) = inode.posix_acl_access.as_mut() {
+            acl::apply_mode_to_access_acl(access_acl, mode);
+        }
         inode.ctime = now_f64();
         self.commit_locked(
             &mut meta,
@@ -889,6 +935,7 @@ impl ArgosFs {
         if let Some(gid) = gid {
             inode.gid = gid;
         }
+        inode.mode &= !(libc::S_ISUID | libc::S_ISGID);
         inode.ctime = now_f64();
         self.commit_locked(
             &mut meta,
@@ -946,7 +993,9 @@ impl ArgosFs {
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
         match name {
             acl::POSIX_ACL_ACCESS_XATTR | acl::ARGOS_POSIX_ACL_ACCESS_XATTR => {
-                inode.posix_acl_access = Some(acl::parse_posix_acl_xattr(value)?);
+                let access_acl = acl::parse_posix_acl_xattr(value)?;
+                inode.mode = acl::mode_from_access_acl(&access_acl, inode.mode);
+                inode.posix_acl_access = Some(access_acl);
             }
             acl::POSIX_ACL_DEFAULT_XATTR | acl::ARGOS_POSIX_ACL_DEFAULT_XATTR => {
                 if inode.kind != NodeKind::Directory {
@@ -1124,6 +1173,7 @@ impl ArgosFs {
         if default_acl {
             inode.posix_acl_default = Some(acl_value);
         } else {
+            inode.mode = acl::mode_from_access_acl(&acl_value, inode.mode);
             inode.posix_acl_access = Some(acl_value);
         }
         inode.ctime = now_f64();
@@ -1176,16 +1226,26 @@ impl ArgosFs {
     }
 
     pub fn check_access_inode(&self, ino: InodeId, uid: u32, gid: u32, mask: i32) -> Result<()> {
+        self.check_access_inode_with_groups(ino, uid, &[gid], mask)
+    }
+
+    pub fn check_access_inode_with_groups(
+        &self,
+        ino: InodeId,
+        uid: u32,
+        gids: &[u32],
+        mask: i32,
+    ) -> Result<()> {
         let meta = self.meta.read();
         let inode = meta
             .inodes
             .get(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
-        if acl::evaluate_access(inode, uid, gid, mask) {
+        if acl::evaluate_access_with_groups(inode, uid, gids, mask) {
             Ok(())
         } else {
             Err(ArgosError::PermissionDenied(format!(
-                "uid {uid} gid {gid} mask {mask:o} inode {ino}"
+                "uid {uid} gids {gids:?} mask {mask:o} inode {ino}"
             )))
         }
     }

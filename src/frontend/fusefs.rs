@@ -22,12 +22,69 @@ const FUSE_WRITEBACK_MAX_BYTES: usize = 1024 * 1024;
 pub struct ArgosFuse {
     volume: ArgosFs,
     writeback: Mutex<FuseWriteback>,
+    handles: Mutex<FuseHandles>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenFileHandle {
+    ino: InodeId,
+    flags: i32,
+    uid: u32,
+    gid: u32,
+}
+
+#[derive(Default)]
+struct FuseHandles {
+    next: u64,
+    files: BTreeMap<u64, OpenFileHandle>,
+    refs: BTreeMap<InodeId, usize>,
+}
+
+impl FuseHandles {
+    fn open(&mut self, file: OpenFileHandle) -> FileHandle {
+        loop {
+            self.next = self.next.wrapping_add(1).max(1);
+            if self.files.contains_key(&self.next) {
+                continue;
+            }
+            let handle = self.next;
+            *self.refs.entry(file.ino).or_default() += 1;
+            self.files.insert(handle, file);
+            return FileHandle(handle);
+        }
+    }
+
+    fn get(&self, handle: FileHandle) -> Option<&OpenFileHandle> {
+        self.files.get(&handle.0)
+    }
+
+    fn refs(&self, ino: InodeId) -> usize {
+        self.refs.get(&ino).copied().unwrap_or(0)
+    }
+
+    fn close(&mut self, handle: FileHandle) -> Option<(OpenFileHandle, bool)> {
+        let file = self.files.remove(&handle.0)?;
+        let last = if let Some(count) = self.refs.get_mut(&file.ino) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.refs.remove(&file.ino);
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        };
+        Some((file, last))
+    }
 }
 
 #[derive(Clone, Debug)]
 struct DirtyExtent {
     offset: u64,
     data: Vec<u8>,
+    uid: u32,
+    gid: u32,
 }
 
 impl DirtyExtent {
@@ -35,7 +92,17 @@ impl DirtyExtent {
         self.offset.checked_add(self.data.len() as u64)
     }
 
-    fn try_merge(&mut self, offset: u64, data: &[u8], max_bytes: usize) -> bool {
+    fn try_merge(
+        &mut self,
+        offset: u64,
+        data: &[u8],
+        max_bytes: usize,
+        uid: u32,
+        gid: u32,
+    ) -> bool {
+        if self.uid != uid || self.gid != gid {
+            return false;
+        }
         let Some(existing_end) = self.end() else {
             return false;
         };
@@ -72,12 +139,14 @@ impl ArgosFuse {
         Self {
             volume,
             writeback: Mutex::new(FuseWriteback::default()),
+            handles: Mutex::new(FuseHandles::default()),
         }
     }
 
     fn require_access(&self, req: &Request, ino: INodeNo, mask: i32) -> Result<()> {
+        let groups = request_groups(req);
         self.volume
-            .check_access_inode(ino.0, req.uid(), req.gid(), mask)
+            .check_access_inode_with_groups(ino.0, req.uid(), &groups, mask)
     }
 
     fn open_reply_flags(&self, write_open: bool) -> FopenFlags {
@@ -130,19 +199,21 @@ impl ArgosFuse {
         Ok(())
     }
 
-    fn queue_writeback(&self, ino: InodeId, offset: u64, data: &[u8]) -> bool {
+    fn queue_writeback(&self, ino: InodeId, offset: u64, data: &[u8], uid: u32, gid: u32) -> bool {
         if data.len() > FUSE_WRITEBACK_MAX_BYTES {
             return false;
         }
         let mut writeback = self.writeback.lock();
         if let Some(dirty) = writeback.dirty.get_mut(&ino) {
-            return dirty.try_merge(offset, data, FUSE_WRITEBACK_MAX_BYTES);
+            return dirty.try_merge(offset, data, FUSE_WRITEBACK_MAX_BYTES, uid, gid);
         }
         writeback.dirty.insert(
             ino,
             DirtyExtent {
                 offset,
                 data: data.to_vec(),
+                uid,
+                gid,
             },
         );
         true
@@ -153,10 +224,13 @@ impl ArgosFuse {
         let Some(dirty) = writeback.dirty.remove(&ino) else {
             return Ok(());
         };
-        match self
-            .volume
-            .write_inode_range(ino, dirty.offset, dirty.data.as_slice())
-        {
+        match self.volume.write_inode_range_as(
+            ino,
+            dirty.offset,
+            dirty.data.as_slice(),
+            dirty.uid,
+            dirty.gid,
+        ) {
             Ok(written) if written == dirty.data.len() => Ok(()),
             Ok(written) => {
                 writeback.dirty.insert(ino, dirty);
@@ -363,7 +437,7 @@ impl Filesystem for ArgosFuse {
                 attr = self.volume.chown_inode(ino, uid, gid)?;
             }
             if let Some(size) = size {
-                self.volume.truncate_inode(ino, size)?;
+                self.volume.truncate_inode_as(ino, size)?;
                 attr = self.volume.attr_inode(ino)?;
             }
             if atime.is_some() || mtime.is_some() {
@@ -458,10 +532,20 @@ impl Filesystem for ArgosFuse {
             reply.error(errno(&err));
             return;
         }
-        match self
+        let handles = self.handles.lock();
+        let result = self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.unlink_at_as(parent.0, name, req.uid()))
-        {
+            .and_then(|()| self.volume.lookup(parent.0, name))
+            .and_then(|attr| {
+                if handles.refs(attr.ino) > 0 {
+                    self.volume
+                        .unlink_at_as_preserving_open(parent.0, name, req.uid())
+                } else {
+                    self.volume.unlink_at_as(parent.0, name, req.uid())
+                }
+            });
+        drop(handles);
+        match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
         }
@@ -529,10 +613,20 @@ impl Filesystem for ArgosFuse {
             reply.error(Errno::EINVAL);
             return;
         }
+        let handles = self.handles.lock();
+        let preserve_replaced_inode = if flags.contains(RenameFlags::RENAME_EXCHANGE) {
+            false
+        } else {
+            self.volume
+                .lookup(newparent.0, newname)
+                .ok()
+                .is_some_and(|attr| handles.refs(attr.ino) > 0)
+        };
         let policy = RenamePolicy {
             no_replace: flags.contains(RenameFlags::RENAME_NOREPLACE),
             exchange: flags.contains(RenameFlags::RENAME_EXCHANGE),
             uid: Some(req.uid()),
+            preserve_replaced_inode,
         };
         let result = self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
@@ -541,6 +635,7 @@ impl Filesystem for ArgosFuse {
                 self.volume
                     .rename_at_with_policy(parent.0, name, newparent.0, newname, policy)
             });
+        drop(handles);
         match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
@@ -575,21 +670,28 @@ impl Filesystem for ArgosFuse {
                 return;
             }
         }
-        let result = (|| -> Result<NodeAttr> {
+        let mut handles = self.handles.lock();
+        let result = (|| -> Result<FileHandle> {
             self.require_access(req, ino, open_mask(flags))?;
             let mut attr = self.volume.attr_inode(ino.0)?;
             if attr.kind != NodeKind::File {
                 return Err(ArgosError::IsDirectory(format!("inode {ino}")));
             }
             if flags.0 & libc::O_TRUNC != 0 {
-                self.volume.truncate_inode(ino.0, 0)?;
+                self.volume.truncate_inode_as(ino.0, 0)?;
                 attr = self.volume.attr_inode(ino.0)?;
             }
-            Ok(attr)
+            Ok(handles.open(OpenFileHandle {
+                ino: attr.ino,
+                flags: flags.0,
+                uid: req.uid(),
+                gid: req.gid(),
+            }))
         })();
+        drop(handles);
         match result {
-            Ok(_) => reply.opened(
-                FileHandle(ino.0),
+            Ok(handle) => reply.opened(
+                handle,
                 self.open_reply_flags(flags.0 & (libc::O_WRONLY | libc::O_RDWR) != 0),
             ),
             Err(err) => reply.error(errno(&err)),
@@ -600,7 +702,7 @@ impl Filesystem for ArgosFuse {
         &self,
         req: &Request,
         ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         offset: u64,
         size: u32,
         _flags: OpenFlags,
@@ -611,10 +713,19 @@ impl Filesystem for ArgosFuse {
             reply.error(errno(&err));
             return;
         }
-        match self
-            .require_access(req, ino, libc::R_OK)
-            .and_then(|()| self.volume.read_inode(ino.0, offset, size as usize, true))
-        {
+        let file = self.handles.lock().get(fh).cloned();
+        let result = file
+            .ok_or_else(|| ArgosError::Invalid("invalid FUSE file handle".to_string()))
+            .and_then(|file| {
+                if file.ino != ino.0 {
+                    return Err(ArgosError::Invalid(
+                        "FUSE file handle inode mismatch".to_string(),
+                    ));
+                }
+                self.require_access(req, ino, libc::R_OK)?;
+                self.volume.read_inode(ino.0, offset, size as usize, true)
+            });
+        match result {
             Ok(data) => reply.data(&data),
             Err(err) => reply.error(errno(&err)),
         }
@@ -625,7 +736,7 @@ impl Filesystem for ArgosFuse {
         &self,
         req: &Request,
         ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         offset: u64,
         data: &[u8],
         _write_flags: WriteFlags,
@@ -637,27 +748,43 @@ impl Filesystem for ArgosFuse {
             reply.written(0);
             return;
         }
-        let direct = self.volume.io_policy().direct_io || data.len() > FUSE_WRITEBACK_MAX_BYTES;
-        let result = if direct {
-            self.flush_inode_writeback(ino.0).and_then(|()| {
-                self.volume
-                    .write_inode_range_as(ino.0, offset, data, req.uid(), req.gid())
-            })
-        } else {
-            self.require_writeback_access(req, ino).and_then(|()| {
-                if self.queue_writeback(ino.0, offset, data) {
-                    Ok(data.len())
-                } else {
-                    self.flush_inode_writeback(ino.0)?;
-                    if self.queue_writeback(ino.0, offset, data) {
-                        Ok(data.len())
-                    } else {
-                        self.volume
-                            .write_inode_range_as(ino.0, offset, data, req.uid(), req.gid())
-                    }
+        let file = self.handles.lock().get(fh).cloned();
+        let result = file
+            .ok_or_else(|| ArgosError::Invalid("invalid FUSE file handle".to_string()))
+            .and_then(|file| {
+                if file.ino != ino.0 {
+                    return Err(ArgosError::Invalid(
+                        "FUSE file handle inode mismatch".to_string(),
+                    ));
                 }
-            })
-        };
+                let sync_write = file.flags & (libc::O_SYNC | libc::O_DSYNC) != 0;
+                let direct = self.volume.io_policy().direct_io
+                    || data.len() > FUSE_WRITEBACK_MAX_BYTES
+                    || sync_write;
+                let written = if direct {
+                    self.flush_inode_writeback(ino.0).and_then(|()| {
+                        self.volume
+                            .write_inode_range_as(ino.0, offset, data, file.uid, file.gid)
+                    })?
+                } else {
+                    self.require_writeback_access(req, ino)?;
+                    if self.queue_writeback(ino.0, offset, data, file.uid, file.gid) {
+                        data.len()
+                    } else {
+                        self.flush_inode_writeback(ino.0)?;
+                        if self.queue_writeback(ino.0, offset, data, file.uid, file.gid) {
+                            data.len()
+                        } else {
+                            self.volume
+                                .write_inode_range_as(ino.0, offset, data, file.uid, file.gid)?
+                        }
+                    }
+                };
+                if sync_write {
+                    self.volume.sync()?;
+                }
+                Ok(written)
+            });
         match result {
             Ok(written) => reply.written(written as u32),
             Err(err) => reply.error(errno(&err)),
@@ -668,7 +795,7 @@ impl Filesystem for ArgosFuse {
         &self,
         _req: &Request,
         ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         offset: i64,
         whence: i32,
         reply: ReplyLseek,
@@ -678,8 +805,20 @@ impl Filesystem for ArgosFuse {
             return;
         }
         let result = self
-            .flush_inode_writeback(ino.0)
-            .and_then(|()| self.volume.seek_data_or_hole(ino.0, offset as u64, whence));
+            .handles
+            .lock()
+            .get(fh)
+            .cloned()
+            .ok_or_else(|| ArgosError::Invalid("invalid FUSE file handle".to_string()))
+            .and_then(|file| {
+                if file.ino != ino.0 {
+                    return Err(ArgosError::Invalid(
+                        "FUSE file handle inode mismatch".to_string(),
+                    ));
+                }
+                self.flush_inode_writeback(ino.0)?;
+                self.volume.seek_data_or_hole(ino.0, offset as u64, whence)
+            });
         match result {
             Ok(next) => match i64::try_from(next) {
                 Ok(next) => reply.offset(next),
@@ -750,53 +889,8 @@ impl Filesystem for ArgosFuse {
             return;
         }
         let meta = self.volume.metadata_snapshot();
-        let block = meta.config.chunk_size as u64;
-        let (explicit_capacity, grouped_capacity) = meta
-            .disks
-            .values()
-            .filter(|disk| disk.status == DiskStatus::Online)
-            .fold(
-                (0u64, std::collections::BTreeMap::<String, u64>::new()),
-                |mut acc, disk| {
-                    if disk.capacity_source == CapacitySource::UserOverride {
-                        acc.0 = acc.0.saturating_add(disk.capacity_bytes);
-                    } else if let Some(fs_id) = disk.backing_fs_id.as_ref() {
-                        let entry = acc.1.entry(fs_id.clone()).or_default();
-                        *entry = (*entry).max(disk.capacity_bytes);
-                    } else {
-                        acc.0 = acc.0.saturating_add(disk.capacity_bytes);
-                    }
-                    acc
-                },
-            );
-        let raw_capacity = explicit_capacity.saturating_add(grouped_capacity.values().sum::<u64>());
-        let logical_used: u64 = meta
-            .inodes
-            .values()
-            .filter(|inode| inode.kind == NodeKind::File)
-            .map(|inode| inode.size)
-            .sum();
-        let (raw_capacity, raw_free) = if raw_capacity > 0 {
-            (raw_capacity, 0)
-        } else {
-            fallback_statfs_capacity(
-                self.volume.root(),
-                meta.disks.values().map(|disk| {
-                    if disk.path.is_absolute() {
-                        disk.path.clone()
-                    } else {
-                        self.volume.root().join(&disk.path)
-                    }
-                }),
-            )
-        };
-        let usable = raw_capacity.saturating_mul(meta.config.k as u64)
-            / (meta.config.k + meta.config.m) as u64;
-        let free = if raw_free > 0 {
-            raw_free.saturating_mul(meta.config.k as u64) / (meta.config.k + meta.config.m) as u64
-        } else {
-            usable.saturating_sub(logical_used)
-        };
+        let block = (meta.config.chunk_size as u64).max(4096);
+        let (usable, free) = statfs_bytes(&meta, self.volume.root());
         reply.statfs(
             usable / block,
             free / block,
@@ -812,14 +906,26 @@ impl Filesystem for ArgosFuse {
     fn release(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        _fh: FileHandle,
+        ino: INodeNo,
+        fh: FileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        match self.flush_inode_writeback(_ino.0) {
+        let flush_result = self.flush_inode_writeback(ino.0);
+        let mut handles = self.handles.lock();
+        let Some((file, last)) = handles.close(fh) else {
+            reply.error(Errno::EBADF);
+            return;
+        };
+        let reap_result = if flush_result.is_ok() && last {
+            self.volume.reap_unlinked_inode(file.ino)
+        } else {
+            Ok(())
+        };
+        drop(handles);
+        match flush_result.and(reap_result) {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
         }
@@ -828,15 +934,27 @@ impl Filesystem for ArgosFuse {
     fn fsync(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        _fh: FileHandle,
+        ino: INodeNo,
+        fh: FileHandle,
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        match self
-            .flush_inode_writeback(_ino.0)
-            .and_then(|()| self.volume.sync())
-        {
+        let result = self
+            .handles
+            .lock()
+            .get(fh)
+            .cloned()
+            .ok_or_else(|| ArgosError::Invalid("invalid FUSE file handle".to_string()))
+            .and_then(|file| {
+                if file.ino != ino.0 {
+                    return Err(ArgosError::Invalid(
+                        "FUSE file handle inode mismatch".to_string(),
+                    ));
+                }
+                self.flush_inode_writeback(ino.0)?;
+                self.volume.sync()
+            });
+        match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
         }
@@ -968,14 +1086,15 @@ impl Filesystem for ArgosFuse {
         name: &OsStr,
         mode: u32,
         umask: u32,
-        _flags: i32,
+        flags: i32,
         reply: ReplyCreate,
     ) {
         if let Err(err) = self.flush_all_writeback() {
             reply.error(errno(&err));
             return;
         }
-        match self
+        let mut handles = self.handles.lock();
+        let result = self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
                 self.volume.create_file_at_with_owner(
@@ -985,12 +1104,23 @@ impl Filesystem for ArgosFuse {
                     req.uid(),
                     req.gid(),
                 )
-            }) {
-            Ok(attr) => reply.created(
+            })
+            .map(|attr| {
+                let handle = handles.open(OpenFileHandle {
+                    ino: attr.ino,
+                    flags,
+                    uid: req.uid(),
+                    gid: req.gid(),
+                });
+                (attr, handle)
+            });
+        drop(handles);
+        match result {
+            Ok((attr, handle)) => reply.created(
                 &TTL,
                 &to_file_attr(&attr),
                 Generation(0),
-                FileHandle(attr.ino),
+                handle,
                 self.open_reply_flags(true),
             ),
             Err(err) => reply.error(errno(&err)),
@@ -1077,6 +1207,108 @@ fn is_owner_managed_xattr(name: &str) -> bool {
             | acl::ARGOS_POSIX_ACL_ACCESS_XATTR
             | acl::ARGOS_POSIX_ACL_DEFAULT_XATTR
     )
+}
+
+fn statfs_bytes(meta: &crate::types::Metadata, root: &Path) -> (u64, u64) {
+    if meta.backend != crate::types::BackendKind::Host && !meta.raw_pool.allocators.is_empty() {
+        let width = meta.config.k.saturating_add(meta.config.m);
+        if meta.config.k == 0 || width == 0 {
+            return (0, 0);
+        }
+        let mut capacities = Vec::new();
+        let mut free = Vec::new();
+        for (disk_id, allocator) in &meta.raw_pool.allocators {
+            let Some(disk) = meta.disks.get(disk_id) else {
+                continue;
+            };
+            if !matches!(
+                disk.status,
+                DiskStatus::Online | DiskStatus::Degraded | DiskStatus::Draining
+            ) {
+                continue;
+            }
+            capacities.push(allocator.data_end.saturating_sub(allocator.data_start));
+            free.push(raw_allocator_free_bytes(allocator));
+        }
+        let usable = max_stripe_units(&capacities, width).saturating_mul(meta.config.k as u64);
+        let available = max_stripe_units(&free, width).saturating_mul(meta.config.k as u64);
+        return (usable, available.min(usable));
+    }
+
+    let (explicit_capacity, grouped_capacity) = meta
+        .disks
+        .values()
+        .filter(|disk| disk.status == DiskStatus::Online)
+        .fold((0u64, BTreeMap::<String, u64>::new()), |mut acc, disk| {
+            if disk.capacity_source == CapacitySource::UserOverride {
+                acc.0 = acc.0.saturating_add(disk.capacity_bytes);
+            } else if let Some(fs_id) = disk.backing_fs_id.as_ref() {
+                let entry = acc.1.entry(fs_id.clone()).or_default();
+                *entry = (*entry).max(disk.capacity_bytes);
+            } else {
+                acc.0 = acc.0.saturating_add(disk.capacity_bytes);
+            }
+            acc
+        });
+    let configured_capacity =
+        explicit_capacity.saturating_add(grouped_capacity.values().sum::<u64>());
+    let (capacity, free) = if configured_capacity > 0 {
+        let logical_used = meta
+            .inodes
+            .values()
+            .filter(|inode| inode.kind == NodeKind::File)
+            .map(|inode| inode.size)
+            .sum::<u64>();
+        (
+            configured_capacity,
+            configured_capacity.saturating_sub(logical_used),
+        )
+    } else {
+        fallback_statfs_capacity(
+            root,
+            meta.disks.values().map(|disk| {
+                if disk.path.is_absolute() {
+                    disk.path.clone()
+                } else {
+                    root.join(&disk.path)
+                }
+            }),
+        )
+    };
+    let width = meta.config.k.saturating_add(meta.config.m).max(1) as u64;
+    (
+        capacity.saturating_mul(meta.config.k as u64) / width,
+        free.saturating_mul(meta.config.k as u64) / width,
+    )
+}
+
+fn raw_allocator_free_bytes(allocator: &crate::types::RawAllocatorState) -> u64 {
+    let block = allocator.block_size.max(4096);
+    let tail = allocator.data_end.saturating_sub(allocator.next_offset) / block * block;
+    allocator.free_extents.iter().fold(tail, |total, extent| {
+        total.saturating_add(extent.length / block * block)
+    })
+}
+
+fn max_stripe_units(per_disk: &[u64], width: usize) -> u64 {
+    if width == 0 || per_disk.len() < width {
+        return 0;
+    }
+    let mut low = 0u64;
+    let mut high = per_disk.iter().copied().sum::<u64>() / width as u64;
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let support = per_disk
+            .iter()
+            .map(|value| (*value).min(mid) as u128)
+            .sum::<u128>();
+        if support >= mid as u128 * width as u128 {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    low
 }
 
 fn fallback_statfs_capacity(root: &Path, paths: impl IntoIterator<Item = PathBuf>) -> (u64, u64) {
@@ -1179,6 +1411,29 @@ fn time_or_now(value: TimeOrNow) -> f64 {
     }
 }
 
+fn request_groups(req: &Request) -> Vec<u32> {
+    let mut groups = std::fs::read_to_string(format!("/proc/{}/status", req.pid()))
+        .ok()
+        .map(|status| parse_status_groups(&status))
+        .unwrap_or_default();
+    if !groups.contains(&req.gid()) {
+        groups.push(req.gid());
+    }
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+fn parse_status_groups(status: &str) -> Vec<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Groups:"))
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .filter_map(|value| value.parse::<u32>().ok())
+        .collect()
+}
+
 fn is_specific_time(value: &Option<TimeOrNow>) -> bool {
     matches!(value, Some(TimeOrNow::SpecificTime(_)))
 }
@@ -1235,6 +1490,12 @@ mod tests {
     }
 
     #[test]
+    fn proc_status_group_parser_reads_supplementary_groups() {
+        let groups = parse_status_groups("Name:\ttest\nGroups:\t10 20 30 \n");
+        assert_eq!(groups, vec![10, 20, 30]);
+    }
+
+    #[test]
     fn missing_xattr_maps_to_enodata() {
         let err = ArgosError::NotFound("xattr security.selinux".to_string());
         assert_eq!(xattr_errno(&err).code(), Errno::NO_XATTR.code());
@@ -1245,13 +1506,15 @@ mod tests {
         let mut dirty = DirtyExtent {
             offset: 10,
             data: b"abcd".to_vec(),
+            uid: 1000,
+            gid: 1000,
         };
 
-        assert!(dirty.try_merge(14, b"ef", 16));
+        assert!(dirty.try_merge(14, b"ef", 16, 1000, 1000));
         assert_eq!(dirty.offset, 10);
         assert_eq!(dirty.data, b"abcdef");
 
-        assert!(dirty.try_merge(12, b"XY", 16));
+        assert!(dirty.try_merge(12, b"XY", 16, 1000, 1000));
         assert_eq!(dirty.offset, 10);
         assert_eq!(dirty.data, b"abXYef");
     }
@@ -1261,15 +1524,81 @@ mod tests {
         let mut dirty = DirtyExtent {
             offset: 10,
             data: b"abcd".to_vec(),
+            uid: 1000,
+            gid: 1000,
         };
 
-        assert!(!dirty.try_merge(15, b"z", 16));
+        assert!(!dirty.try_merge(15, b"z", 16, 1000, 1000));
         assert_eq!(dirty.offset, 10);
         assert_eq!(dirty.data, b"abcd");
 
-        assert!(!dirty.try_merge(14, b"efgh", 6));
+        assert!(!dirty.try_merge(14, b"efgh", 6, 1000, 1000));
         assert_eq!(dirty.offset, 10);
         assert_eq!(dirty.data, b"abcd");
+    }
+
+    #[test]
+    fn stripe_capacity_respects_distinct_device_constraints() {
+        assert_eq!(max_stripe_units(&[100, 100, 100], 3), 100);
+        assert_eq!(max_stripe_units(&[300, 10, 10], 3), 10);
+        assert_eq!(max_stripe_units(&[100, 100, 100, 100, 100, 100], 3), 200);
+        assert_eq!(max_stripe_units(&[100, 100], 3), 0);
+    }
+
+    #[test]
+    fn raw_statfs_uses_allocator_regions_and_free_extents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let images = (0..3)
+            .map(|index| tmp.path().join(format!("disk-{index}.img")))
+            .collect::<Vec<_>>();
+        let volume = ArgosFs::create_loop(
+            &images,
+            VolumeConfig {
+                k: 2,
+                m: 1,
+                chunk_size: 4096,
+                ..VolumeConfig::default()
+            },
+            32 * 1024 * 1024,
+            "statfs",
+            false,
+        )
+        .unwrap();
+        let before = statfs_bytes(&volume.metadata_snapshot(), volume.root());
+        volume
+            .write_file("/payload", &vec![7u8; 64 * 1024], 0o644)
+            .unwrap();
+        let after = statfs_bytes(&volume.metadata_snapshot(), volume.root());
+        assert!(before.0 > 0);
+        assert!(before.0 < 3 * 32 * 1024 * 1024);
+        assert!(after.1 < before.1);
+        assert!(after.1 <= after.0);
+    }
+
+    #[test]
+    fn file_handles_track_independent_open_references() {
+        let mut handles = FuseHandles::default();
+        let first = handles.open(OpenFileHandle {
+            ino: 42,
+            flags: libc::O_RDONLY,
+            uid: 1000,
+            gid: 1000,
+        });
+        let second = handles.open(OpenFileHandle {
+            ino: 42,
+            flags: libc::O_SYNC | libc::O_WRONLY,
+            uid: 1001,
+            gid: 1001,
+        });
+        assert_ne!(first, second);
+        assert_eq!(handles.refs(42), 2);
+        assert_eq!(
+            handles.get(second).unwrap().flags & libc::O_SYNC,
+            libc::O_SYNC
+        );
+        assert!(!handles.close(first).unwrap().1);
+        assert!(handles.close(second).unwrap().1);
+        assert_eq!(handles.refs(42), 0);
     }
 
     #[test]
@@ -1289,8 +1618,8 @@ mod tests {
         let ino = volume.create_file_path("/buffered", 0o644).unwrap();
         let fuse = ArgosFuse::new(volume.clone());
 
-        assert!(fuse.queue_writeback(ino, 0, b"hello"));
-        assert!(fuse.queue_writeback(ino, 5, b" world"));
+        assert!(fuse.queue_writeback(ino, 0, b"hello", 0, 0));
+        assert!(fuse.queue_writeback(ino, 5, b" world", 0, 0));
         assert_eq!(volume.read_file("/buffered", true).unwrap(), b"");
 
         fuse.flush_inode_writeback(ino).unwrap();

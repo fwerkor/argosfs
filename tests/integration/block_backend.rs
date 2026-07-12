@@ -37,17 +37,11 @@ fn raw_journal_replay_chains_from_bulk_checkpoint_for_rootfs_writes() {
         ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
     create_rootfs_mountpoints(&fs);
 
-    let previous_bulk = std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT");
-    std::env::set_var("ARGOSFS_BULK_IMPORT_COMMIT", "1");
+    let _bulk_import = argosfs::volume::bulk_import_scope(true);
     fs.mkdir("/sbin", 0o755).unwrap();
     fs.write_file("/sbin/init", b"#!/bin/sh\nexit 0\n", 0o755)
         .unwrap();
     fs.sync().unwrap();
-    if let Some(value) = previous_bulk {
-        std::env::set_var("ARGOSFS_BULK_IMPORT_COMMIT", value);
-    } else {
-        std::env::remove_var("ARGOSFS_BULK_IMPORT_COMMIT");
-    }
 
     let created = fs
         .create_file_at_with_owner(1, OsStr::new("etc-test"), 0o644, 0, 0)
@@ -320,20 +314,48 @@ fn loop_block_scan_inspect_and_repair_corrupt_extent() {
 }
 
 #[test]
-fn clean_state_updates_device_label_generation() {
+fn clean_state_tracks_mount_lifetime_and_generation() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
     let fs =
         ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    let (mounted, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(!mounted.clean);
+
     fs.write_file("/payload", b"label-generation", 0o644)
         .unwrap();
     fs.sync().unwrap();
+    let (after_sync, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(!after_sync.clean);
+    assert_eq!(after_sync.generation, mounted.generation);
     drop(fs);
 
-    let (superblock, label) =
+    let (clean, clean_label) =
         argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
-    assert_eq!(superblock.generation, label.generation);
-    assert_eq!(superblock.disk_id, label.disk_id);
+    assert!(clean.clean);
+    assert!(clean.generation > after_sync.generation);
+    assert_eq!(clean.generation, clean_label.generation);
+
+    let reopened = ArgosFs::open_loop(&images, true).unwrap();
+    let (remounted, remounted_label) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(!remounted.clean);
+    assert!(remounted.generation > clean.generation);
+    assert_eq!(remounted.generation, remounted_label.generation);
+    reopened.sync().unwrap();
+    let (after_second_sync, _) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(!after_second_sync.clean);
+    assert_eq!(after_second_sync.generation, remounted.generation);
+    drop(reopened);
+
+    let (final_clean, final_label) =
+        argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone()).unwrap();
+    assert!(final_clean.clean);
+    assert!(final_clean.generation > remounted.generation);
+    assert_eq!(final_clean.generation, final_label.generation);
 }
 
 #[test]
@@ -449,7 +471,7 @@ fn rootfs_preflight_rejects_dirty_raw_pool_for_rw() {
     drop(fs);
 
     let dirty = ArgosFs::open_loop(&images, true).unwrap();
-    drop(dirty);
+    std::mem::forget(dirty);
 
     let reopened = ArgosFs::open_loop(&images, false).unwrap();
     let report =
@@ -745,7 +767,7 @@ fn raw_deferred_data_flush_requires_batched_metadata_commit() {
 #[test]
 fn raw_hot_file_transactions_use_metadata_deltas() {
     let _guard = env_lock();
-    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "1000");
+    let _interval = journal::thread_checkpoint_interval(1000);
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
     let mut cfg = config(1, 0);
@@ -773,7 +795,6 @@ fn raw_hot_file_transactions_use_metadata_deltas() {
     assert!(hot_records
         .iter()
         .all(|record| record.get("metadata_delta").is_some()));
-    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
 }
 
 #[test]
@@ -939,4 +960,172 @@ fn loop_block_cli_replace_device_rewrites_off_old_member() {
         reopened.read_file("/payload", false).unwrap(),
         b"before-replace"
     );
+}
+
+#[test]
+fn raw_recovery_ignores_unquorumed_metadata_and_journal_tail() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let mut cfg = config(2, 1);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "quorum", false).unwrap();
+    fs.write_file("/value", b"committed", 0o644).unwrap();
+    fs.sync().unwrap();
+    let committed = fs.metadata_snapshot();
+    drop(fs);
+
+    let mut uncommitted = committed.clone();
+    uncommitted.raw_pool.pool_name = "unquorumed".to_string();
+    uncommitted.txid += 1;
+    let previous_hash = uncommitted.integrity.meta_hash.clone();
+    journal::prepare_metadata_integrity_with_previous(&mut uncommitted, previous_hash).unwrap();
+
+    let disk_id = "disk-0000".to_string();
+    let backend = FileBlockBackend::open_with_ids(
+        BackendKind::LoopBlock,
+        vec![(disk_id, images[0].clone())],
+        true,
+    )
+    .unwrap();
+    let superblock = argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone())
+        .unwrap()
+        .0;
+    argosfs::raw_store::append_transaction(
+        &backend,
+        std::slice::from_ref(&superblock),
+        &uncommitted,
+        "unquorumed-tail",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    argosfs::raw_store::write_metadata_copies(
+        &backend,
+        std::slice::from_ref(&superblock),
+        &uncommitted,
+    )
+    .unwrap();
+    drop(backend);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(reopened.metadata_snapshot().txid, committed.txid);
+    assert_eq!(reopened.metadata_snapshot().raw_pool.pool_name, "quorum");
+    assert_eq!(reopened.read_file("/value", true).unwrap(), b"committed");
+}
+
+#[test]
+fn raw_partial_fanout_crash_helper() {
+    let Some(root) = std::env::var_os("ARGOSFS_TEST_PARTIAL_FANOUT_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let images = (0..3)
+        .map(|index| root.join(format!("disk{index}.img")))
+        .collect::<Vec<_>>();
+    let fs = ArgosFs::open_loop(&images, true).unwrap();
+    std::env::set_var(
+        "ARGOSFS_CRASH_POINT",
+        argosfs::types::FaultPoint::AfterPartialJournalFanout.as_str(),
+    );
+    std::env::set_var("ARGOSFS_CRASH_ABORT", "1");
+    let _ = fs.write_file("/quorum-value", b"uncommitted-single-member", 0o644);
+    panic!("partial journal fanout crash point did not abort");
+}
+
+#[test]
+fn raw_recovery_ignores_journal_head_without_membership_quorum() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/quorum-value", b"committed-majority", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("block_backend::raw_partial_fanout_crash_helper")
+        .arg("--nocapture")
+        .env("ARGOSFS_TEST_PARTIAL_FANOUT_ROOT", tmp.path())
+        .status()
+        .unwrap();
+    assert!(!status.success());
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/quorum-value", false).unwrap(),
+        b"committed-majority"
+    );
+    assert_eq!(reopened.metadata_snapshot().txid, 2);
+    assert_eq!(
+        reopened.transaction_report().unwrap().raw_journal_quorum,
+        Some(true)
+    );
+}
+
+#[test]
+fn failed_raw_commit_restores_in_memory_metadata_before_returning() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/atomic-value", b"old", 0o644).unwrap();
+    fs.sync().unwrap();
+
+    let _crash =
+        journal::thread_crash_point(argosfs::types::FaultPoint::AfterPartialJournalFanout.as_str());
+    let err = fs
+        .write_file("/atomic-value", b"must-not-survive", 0o644)
+        .unwrap_err();
+    assert!(matches!(err, ArgosError::InjectedCrash(_)));
+    assert_eq!(fs.read_file("/atomic-value", false).unwrap(), b"old");
+
+    fs.sync().unwrap();
+    drop(fs);
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(reopened.read_file("/atomic-value", false).unwrap(), b"old");
+}
+
+#[test]
+fn raw_mkfs_rejects_luks_and_unknown_nonzero_data_without_force() {
+    let tmp = TempDir::new().unwrap();
+    let luks = tmp.path().join("luks.img");
+    let unknown = tmp.path().join("unknown.img");
+    for path in [&luks, &unknown] {
+        let file = fs::File::create(path).unwrap();
+        file.set_len(32 * 1024 * 1024).unwrap();
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&luks)
+        .unwrap()
+        .write_at(b"LUKS\xba\xbe", 0)
+        .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&unknown)
+        .unwrap()
+        .write_at(b"old-data", 1024 * 1024)
+        .unwrap();
+
+    for path in [&luks, &unknown] {
+        let err =
+            match ArgosFs::create_raw(std::slice::from_ref(path), config(1, 0), "safe-mkfs", false)
+            {
+                Ok(_) => panic!("raw mkfs unexpectedly overwrote {}", path.display()),
+                Err(err) => err,
+            };
+        assert!(matches!(err, ArgosError::UnsafeMount(_)));
+    }
+
+    let forced = ArgosFs::create_raw(
+        std::slice::from_ref(&luks),
+        config(1, 0),
+        "forced-mkfs",
+        true,
+    )
+    .unwrap();
+    drop(forced);
 }

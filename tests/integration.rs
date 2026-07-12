@@ -60,7 +60,9 @@ fn shard_abs(fs: &ArgosFs, disk_id: &str, rel: &std::path::Path) -> std::path::P
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn argosfs_binary() -> String {

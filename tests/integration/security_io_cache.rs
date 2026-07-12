@@ -451,3 +451,143 @@ fn import_tree_canonicalizes_dotdot_destination_components() {
     );
     assert!(fs.resolve_path("/nested", false).is_err());
 }
+
+#[test]
+fn matching_posix_acl_group_does_not_fall_through_to_other() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let attr = fs
+        .create_file_at_with_owner(1, OsStr::new("group-acl"), 0o604, 0, 0)
+        .unwrap();
+    fs.set_posix_acl_path(
+        "/group-acl",
+        false,
+        acl::parse_posix_acl("user::rw-,group::---,group:1000:---,mask::rwx,other::r--").unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs.check_access_inode(attr.ino, 2000, 1000, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+}
+
+#[test]
+fn root_execute_check_requires_an_execute_bit_for_regular_files() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let file = fs
+        .create_file_at_with_owner(1, OsStr::new("not-executable"), 0o600, 1000, 1000)
+        .unwrap();
+    assert_eq!(
+        fs.check_access_inode(file.ino, 0, 0, libc::X_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+    fs.mkdir("/searchable-by-root", 0o000).unwrap();
+    let dir = fs.resolve_path("/searchable-by-root", false).unwrap();
+    fs.check_access_inode(dir, 0, 0, libc::X_OK).unwrap();
+}
+
+#[test]
+fn chmod_updates_effective_posix_acl_permissions() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let attr = fs
+        .create_file_at_with_owner(1, OsStr::new("chmod-acl"), 0o600, 1000, 1000)
+        .unwrap();
+    fs.set_posix_acl_path(
+        "/chmod-acl",
+        false,
+        acl::parse_posix_acl("user::rw-,group::---,mask::---,other::---").unwrap(),
+    )
+    .unwrap();
+    fs.check_access_inode(attr.ino, 1000, 1000, libc::R_OK)
+        .unwrap();
+
+    fs.chmod_inode(attr.ino, 0).unwrap();
+    assert_eq!(
+        fs.check_access_inode(attr.ino, 1000, 1000, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+}
+
+#[test]
+fn inherited_default_acl_is_restricted_by_creation_mode() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    fs.mkdir("/parent", 0o777).unwrap();
+    fs.set_posix_acl_path(
+        "/parent",
+        true,
+        acl::parse_posix_acl("user::rwx,user:2000:rwx,group::rwx,mask::rwx,other::rwx").unwrap(),
+    )
+    .unwrap();
+    let parent = fs.resolve_path("/parent", false).unwrap();
+    let child = fs
+        .create_file_at_with_owner(parent, OsStr::new("private"), 0o600, 1000, 1000)
+        .unwrap();
+
+    assert_eq!(child.mode & 0o777, 0o600);
+    assert_eq!(
+        fs.check_access_inode(child.ino, 2000, 2000, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+}
+
+#[test]
+fn content_and_owner_changes_clear_setid_bits() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let attr = fs
+        .create_file_at_with_owner(1, OsStr::new("setid"), 0o6755, 0, 0)
+        .unwrap();
+    fs.set_posix_acl_path(
+        "/setid",
+        false,
+        acl::parse_posix_acl("user::rwx,user:1000:rw-,group::r-x,mask::rwx,other::r-x").unwrap(),
+    )
+    .unwrap();
+
+    fs.write_inode_range_as(attr.ino, 0, b"replacement", 1000, 1000)
+        .unwrap();
+    assert_eq!(fs.attr_inode(attr.ino).unwrap().mode & 0o6000, 0);
+
+    fs.chmod_inode(attr.ino, 0o6755).unwrap();
+    fs.truncate_inode_as(attr.ino, 1).unwrap();
+    assert_eq!(fs.attr_inode(attr.ino).unwrap().mode & 0o6000, 0);
+
+    fs.chmod_inode(attr.ino, 0o6755).unwrap();
+    fs.chown_inode(attr.ino, Some(1234), Some(1234)).unwrap();
+    assert_eq!(fs.attr_inode(attr.ino).unwrap().mode & 0o6000, 0);
+}
+
+#[test]
+fn supplementary_groups_are_used_for_mode_and_acl_checks() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let mode_file = fs
+        .create_file_at_with_owner(1, OsStr::new("mode-group"), 0o640, 1000, 2000)
+        .unwrap();
+    fs.check_access_inode_with_groups(mode_file.ino, 3000, &[3000, 2000], libc::R_OK)
+        .unwrap();
+
+    let acl_file = fs
+        .create_file_at_with_owner(1, OsStr::new("acl-group"), 0o600, 1000, 1000)
+        .unwrap();
+    fs.set_posix_acl_path(
+        "/acl-group",
+        false,
+        acl::parse_posix_acl("user::rw-,group::---,group:2000:r--,mask::r--,other::---").unwrap(),
+    )
+    .unwrap();
+    fs.check_access_inode_with_groups(acl_file.ino, 3000, &[3000, 2000], libc::R_OK)
+        .unwrap();
+}

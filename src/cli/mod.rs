@@ -430,26 +430,14 @@ pub fn run() -> Result<()> {
         } => {
             let (root, source, dest) = import_args(backend, args)?;
             let fs = open_backend(root, backend, images, devices, true)?;
-            let previous_bulk = if backend != BackendKind::Host {
-                let previous = std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT");
-                std::env::set_var("ARGOSFS_BULK_IMPORT_COMMIT", "1");
-                Some(previous)
-            } else {
-                None
-            };
+            let _bulk_import =
+                (backend != BackendKind::Host).then(|| crate::volume::bulk_import_scope(true));
             let import_result = import_tree(&fs, &source, &dest);
             let sync_result = if import_result.is_ok() {
                 fs.sync()
             } else {
                 Ok(())
             };
-            if let Some(previous) = previous_bulk {
-                if let Some(value) = previous {
-                    std::env::set_var("ARGOSFS_BULK_IMPORT_COMMIT", value);
-                } else {
-                    std::env::remove_var("ARGOSFS_BULK_IMPORT_COMMIT");
-                }
-            }
             import_result?;
             sync_result?;
         }

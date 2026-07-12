@@ -20,6 +20,7 @@ use crate::util::{
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -28,6 +29,31 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
+
+thread_local! {
+    static THREAD_BULK_IMPORT_MODE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+pub struct BulkImportModeGuard {
+    previous: Option<bool>,
+}
+
+impl Drop for BulkImportModeGuard {
+    fn drop(&mut self) {
+        THREAD_BULK_IMPORT_MODE.with(|value| value.set(self.previous));
+    }
+}
+
+pub fn bulk_import_scope(enabled: bool) -> BulkImportModeGuard {
+    let previous = THREAD_BULK_IMPORT_MODE.with(|value| value.replace(Some(enabled)));
+    BulkImportModeGuard { previous }
+}
+
+fn bulk_import_enabled() -> bool {
+    THREAD_BULK_IMPORT_MODE
+        .with(|value| value.get())
+        .unwrap_or_else(|| std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some())
+}
 
 const ROOT_INO: InodeId = 1;
 const NON_UTF8_NAME_PREFIX: &str = ".argosfs-name-nonutf8-v3:";
@@ -61,6 +87,17 @@ pub struct ArgosFs {
     dirty_host_shards: Arc<Mutex<BTreeSet<PathBuf>>>,
     inode_locks: Arc<Mutex<BTreeMap<InodeId, Arc<Mutex<()>>>>>,
     cache: Arc<BlockCache>,
+}
+
+impl Drop for ArgosFs {
+    fn drop(&mut self) {
+        if !self.backend_writable || Arc::strong_count(&self.meta) != 1 {
+            return;
+        }
+        if self.meta.read().backend != BackendKind::Host {
+            let _ = self.mark_clean_unmount();
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -404,6 +441,7 @@ impl ArgosFs {
         journal::prepare_metadata_integrity_for_external_store(&mut meta)?;
         let backend: Arc<dyn StorageBackend> = Arc::new(backend_file);
         raw_store::initialize_pool(backend.clone(), &superblocks, &mut meta, force)?;
+        raw_store::write_superblock_clean_state(&*backend, &superblocks, false)?;
         Self::from_block_parts(paths, backend, true, superblocks, meta)
     }
 
@@ -470,16 +508,13 @@ impl ArgosFs {
         let mut meta = self.meta.write();
         if meta.backend != BackendKind::Host {
             self.ensure_block_backend_writable_locked(&meta)?;
-            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
-                || meta.config.defer_metadata_commit
-            {
+            if bulk_import_enabled() || meta.config.defer_metadata_commit {
                 let previous_meta_hash = meta.integrity.meta_hash.clone();
                 journal::prepare_metadata_integrity_with_previous(&mut meta, previous_meta_hash)?;
             }
             let superblocks = self.active_superblocks_locked(&meta)?;
             let backend = self.active_block_backend_locked(&meta, true)?;
             raw_store::write_metadata_copies(&backend, &superblocks, &meta)?;
-            raw_store::write_superblock_clean_state(&backend, &superblocks, true)?;
             backend.flush_all()?;
             return Ok(());
         }
@@ -503,6 +538,19 @@ impl ArgosFs {
             sync_directory(&disk_root.join("shards"));
         }
         Ok(())
+    }
+
+    pub fn mark_clean_unmount(&self) -> Result<()> {
+        self.sync()?;
+        let meta = self.meta.read();
+        if meta.backend == BackendKind::Host {
+            return Ok(());
+        }
+        self.ensure_block_backend_writable_locked(&meta)?;
+        let superblocks = self.active_superblocks_locked(&meta)?;
+        let backend = self.active_block_backend_locked(&meta, true)?;
+        raw_store::write_superblock_clean_state(&backend, &superblocks, true)?;
+        backend.flush_all()
     }
 
     fn sync_dirty_host_shards(&self) -> Result<()> {
@@ -671,10 +719,14 @@ impl ArgosFs {
         }
         let now = now_f64();
         let ino = self.alloc_inode_locked(meta);
-        let inherited_acl = meta
+        let inherited_default_acl = meta
             .inodes
             .get(&parent)
             .and_then(acl::inherited_directory_acl);
+        let inherited_access_acl = meta
+            .inodes
+            .get(&parent)
+            .and_then(|parent| acl::inherited_access_acl(parent, mode));
         let inode = Inode {
             id: ino,
             kind: NodeKind::Directory,
@@ -693,8 +745,8 @@ impl ArgosFs {
             inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
-            posix_acl_access: inherited_acl.clone(),
-            posix_acl_default: inherited_acl,
+            posix_acl_access: inherited_access_acl,
+            posix_acl_default: inherited_default_acl,
             nfs4_acl: None,
             access_count: 0,
             write_count: 0,
@@ -774,7 +826,7 @@ impl ArgosFs {
         let inherited_acl = meta
             .inodes
             .get(&parent)
-            .and_then(acl::inherited_directory_acl);
+            .and_then(|parent| acl::inherited_access_acl(parent, mode));
         let normalized_mode = if kind == NodeKind::File && file_type == 0 {
             libc::S_IFREG | (mode & 0o7777)
         } else {
@@ -827,7 +879,9 @@ impl ArgosFs {
             "mknod",
             json!({"parent": parent, "name": name, "inode": ino, "mode": mode, "rdev": rdev}),
         ) {
-            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
+            if !Self::transaction_error_is_committed(&err)
+                && !matches!(err, ArgosError::Conflict(_))
+            {
                 if let Some(rollback) = rollback {
                     *meta = rollback;
                 }
@@ -844,6 +898,7 @@ impl ArgosFs {
         name: &str,
         dir: bool,
         uid: Option<u32>,
+        preserve_unlinked: bool,
     ) -> Result<()> {
         validate_entry_name(name)?;
         let child = *self
@@ -880,7 +935,7 @@ impl ArgosFs {
             meta.inodes.remove(&child);
         } else if let Some(live) = meta.inodes.get_mut(&child) {
             live.nlink = live.nlink.saturating_sub(1);
-            if live.nlink == 0 {
+            if live.nlink == 0 && !preserve_unlinked {
                 blocks_to_delete = live.blocks.clone();
                 meta.inodes.remove(&child);
             }
@@ -892,6 +947,23 @@ impl ArgosFs {
             json!({"parent": parent, "name": name, "inode": child}),
         )?;
         self.delete_blocks_locked(meta, &blocks_to_delete);
+        Ok(())
+    }
+
+    pub fn reap_unlinked_inode(&self, ino: InodeId) -> Result<()> {
+        let mut meta = self.meta.write();
+        self.ensure_block_backend_writable_locked(&meta)?;
+        let Some(inode) = meta.inodes.get(&ino).cloned() else {
+            return Ok(());
+        };
+        if inode.nlink != 0 {
+            return Ok(());
+        }
+        let blocks = inode.blocks.clone();
+        meta.inodes.remove(&ino);
+        self.account_blocks_locked(&mut meta, &blocks, false);
+        self.commit_locked(&mut meta, "orphan-reap", json!({"inode": ino}))?;
+        self.delete_blocks_locked(&mut meta, &blocks);
         Ok(())
     }
 
@@ -1031,7 +1103,7 @@ impl ArgosFs {
             } else if let Some(live) = meta.inodes.get_mut(&existing) {
                 live.nlink = live.nlink.saturating_sub(1);
                 live.ctime = now_f64();
-                if live.nlink == 0 {
+                if live.nlink == 0 && !policy.preserve_replaced_inode {
                     blocks_to_delete = live.blocks.clone();
                     meta.inodes.remove(&existing);
                 }
@@ -1266,6 +1338,22 @@ impl ArgosFs {
         Ok(())
     }
 
+    fn transaction_error_is_committed(err: &ArgosError) -> bool {
+        matches!(
+            err,
+            ArgosError::InjectedCrash(point)
+                if matches!(
+                    point.as_str(),
+                    "after-journal"
+                        | "after-primary-metadata"
+                        | "after-secondary-metadata"
+                        | "after-compatible-metadata"
+                        | "after-journal-commit-before-metadata-commit"
+                        | "after-metadata-commit-before-superblock-update"
+                )
+        )
+    }
+
     fn commit_locked(
         &self,
         meta: &mut Metadata,
@@ -1284,8 +1372,7 @@ impl ArgosFs {
     ) -> Result<()> {
         self.ensure_block_backend_writable_locked(meta)?;
         if meta.backend != BackendKind::Host
-            && (std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
-                || meta.config.defer_metadata_commit)
+            && (bulk_import_enabled() || meta.config.defer_metadata_commit)
         {
             meta.txid += 1;
             meta.updated_at = now_f64();
@@ -1301,13 +1388,13 @@ impl ArgosFs {
         meta.updated_at = now_f64();
         if meta.backend != BackendKind::Host {
             journal::prepare_metadata_integrity_with_previous(meta, previous_meta_hash.clone())?;
-            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+            if bulk_import_enabled() {
                 return Ok(());
             }
             let superblocks = self.active_superblocks_locked(meta)?;
             let details = json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details});
-            if self.open_backend_covers_superblocks(&superblocks) {
-                return match previous_metadata {
+            let result = if self.open_backend_covers_superblocks(&superblocks) {
+                match previous_metadata {
                     Some(previous) => raw_store::append_transaction_with_previous(
                         &*self.backend,
                         &superblocks,
@@ -1323,22 +1410,38 @@ impl ArgosFs {
                         action,
                         details,
                     ),
-                };
-            }
-            let backend = self.active_block_backend_locked(meta, true)?;
-            return match previous_metadata {
-                Some(previous) => raw_store::append_transaction_with_previous(
-                    &backend,
-                    &superblocks,
-                    meta,
-                    Some(previous),
-                    action,
-                    details,
-                ),
-                None => {
-                    raw_store::append_transaction(&backend, &superblocks, meta, action, details)
+                }
+            } else {
+                let backend = self.active_block_backend_locked(meta, true)?;
+                match previous_metadata {
+                    Some(previous) => raw_store::append_transaction_with_previous(
+                        &backend,
+                        &superblocks,
+                        meta,
+                        Some(previous),
+                        action,
+                        details,
+                    ),
+                    None => {
+                        raw_store::append_transaction(&backend, &superblocks, meta, action, details)
+                    }
                 }
             };
+            if let Err(commit_err) = result {
+                let should_restore = !Self::transaction_error_is_committed(&commit_err)
+                    && (previous_metadata.is_none()
+                        || matches!(commit_err, ArgosError::Conflict(_)));
+                if should_restore {
+                    if let Err(recovery_err) = self.restore_raw_metadata_locked(meta, &superblocks)
+                    {
+                        return Err(ArgosError::CorruptedMetadata(format!(
+                            "raw transaction failed ({commit_err}) and metadata rollback failed ({recovery_err})"
+                        )));
+                    }
+                }
+                return Err(commit_err);
+            }
+            return Ok(());
         }
         let result = journal::append_transaction_checked(
             &self.root,
@@ -1361,6 +1464,22 @@ impl ArgosFs {
         }
 
         result
+    }
+
+    fn restore_raw_metadata_locked(
+        &self,
+        meta: &mut Metadata,
+        superblocks: &[RawSuperblock],
+    ) -> Result<()> {
+        let recovered = if self.open_backend_covers_superblocks(superblocks) {
+            raw_store::recover_metadata(&*self.backend, superblocks)?
+        } else {
+            let backend = self.active_block_backend_locked(meta, false)?;
+            raw_store::recover_metadata(&backend, superblocks)?
+        };
+        *meta = recovered;
+        recompute_disk_usage_from_metadata(meta);
+        Ok(())
     }
 
     fn journal_locked(

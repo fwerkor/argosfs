@@ -26,7 +26,9 @@ fn loop_images(tmp: &TempDir, count: usize) -> Vec<std::path::PathBuf> {
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -44,16 +46,12 @@ fn loop_write_failure_rolls_back_raw_allocator() {
     let disk_id = before.disks.keys().next().unwrap().clone();
     let before_allocator = before.raw_pool.allocators.get(&disk_id).unwrap().clone();
 
-    let key = text(&[
-        65, 82, 71, 79, 83, 70, 83, 95, 67, 82, 65, 83, 72, 95, 80, 79, 73, 78, 84,
-    ]);
     let point = text(&[
         98, 101, 102, 111, 114, 101, 45, 100, 97, 116, 97, 45, 119, 114, 105, 116, 101,
     ]);
-    std::env::set_var(&key, &point);
+    let _crash = argosfs::journal::thread_crash_point(&point);
     let payload = vec![b'x'; 20 * 1024];
     let result = fs.write_file("/interrupted", &payload, 0o644);
-    std::env::remove_var(&key);
 
     let err = result.unwrap_err();
     assert!(format!("{err}").contains(&point));

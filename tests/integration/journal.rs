@@ -48,7 +48,7 @@ fn normal_transactions_after_mkfs_are_delta_only_until_checkpoint() {
 #[test]
 fn checkpoint_record_is_written_at_configured_txid_interval() {
     let _guard = env_lock();
-    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "4");
+    let _interval = journal::thread_checkpoint_interval(4);
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
     let interval = journal::checkpoint_interval_txids();
@@ -63,13 +63,12 @@ fn checkpoint_record_is_written_at_configured_txid_interval() {
         .find(|record| record["record_type"] == "checkpoint" && record["txid"] == interval)
         .expect("interval checkpoint exists");
     assert!(checkpoint.get("metadata").is_some());
-    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
 }
 
 #[test]
 fn checkpoint_plus_deltas_reconstruct_latest_metadata_when_copies_are_behind() {
     let _guard = env_lock();
-    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "4");
+    let _interval = journal::thread_checkpoint_interval(4);
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
     let interval = journal::checkpoint_interval_txids();
@@ -104,7 +103,6 @@ fn checkpoint_plus_deltas_reconstruct_latest_metadata_when_copies_are_behind() {
         b"first delta"
     );
     assert!(fs.resolve_path("/after-checkpoint-b", false).is_ok());
-    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
 }
 
 #[test]
@@ -167,7 +165,7 @@ fn old_style_full_snapshot_journal_record_remains_recoverable() {
 #[test]
 fn corrupt_delta_suffix_falls_back_to_checkpoint_state() {
     let _guard = env_lock();
-    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "4");
+    let _interval = journal::thread_checkpoint_interval(4);
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
     let interval = journal::checkpoint_interval_txids();
@@ -214,7 +212,6 @@ fn corrupt_delta_suffix_falls_back_to_checkpoint_state() {
         .resolve_path(&format!("/stable-{interval}"), false)
         .is_ok());
     assert!(fs.resolve_path("/lost-to-corrupt-delta", false).is_err());
-    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
 }
 
 #[test]
@@ -246,7 +243,7 @@ fn ordinary_delta_journal_growth_stays_below_full_metadata_size_between_checkpoi
 #[test]
 fn checkpoint_compaction_bounds_host_journal_growth_and_preserves_replay() {
     let tmp = TempDir::new().unwrap();
-    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "4");
+    let _interval = journal::thread_checkpoint_interval(4);
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
 
     for index in 1..11 {
@@ -276,14 +273,13 @@ fn checkpoint_compaction_bounds_host_journal_growth_and_preserves_replay() {
     }
     let reopened = ArgosFs::open(tmp.path()).unwrap();
     assert!(reopened.resolve_path("/compact-10", false).is_ok());
-    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
 }
 
 #[test]
 fn manual_journal_compaction_rebases_hash_chain() {
     let tmp = TempDir::new().unwrap();
-    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "4");
-    std::env::set_var("ARGOSFS_DISABLE_JOURNAL_COMPACTION", "1");
+    let _interval = journal::thread_checkpoint_interval(4);
+    let disable_compaction = journal::thread_journal_compaction_disabled(true);
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
 
     for index in 1..10 {
@@ -295,7 +291,7 @@ fn manual_journal_compaction_rebases_hash_chain() {
     let before = fs::read_to_string(tmp.path().join(".argosfs/journal.jsonl")).unwrap();
     assert!(before.lines().count() > 4);
 
-    std::env::remove_var("ARGOSFS_DISABLE_JOURNAL_COMPACTION");
+    drop(disable_compaction);
     journal::compact_journal(tmp.path()).unwrap();
 
     let after = fs::read_to_string(tmp.path().join(".argosfs/journal.jsonl")).unwrap();
@@ -308,7 +304,6 @@ fn manual_journal_compaction_rebases_hash_chain() {
     }
     let reopened = ArgosFs::open(tmp.path()).unwrap();
     assert!(reopened.resolve_path("/manual-compact-9", false).is_ok());
-    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
 }
 
 #[test]

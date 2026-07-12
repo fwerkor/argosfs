@@ -75,13 +75,17 @@ impl ArgosFs {
         self.account_blocks_locked(meta, &old_blocks, false);
         if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
         {
-            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                if let Some(rollback) = rollback {
-                    *meta = rollback;
+            if !Self::transaction_error_is_committed(&err) {
+                if matches!(err, ArgosError::Conflict(_)) {
+                    if meta.backend == BackendKind::Host {
+                        self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
+                    }
+                } else {
+                    self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
+                    if let Some(rollback) = rollback {
+                        *meta = rollback;
+                    }
                 }
-                self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
-            } else if matches!(&err, ArgosError::Conflict(_)) {
-                self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
             }
             return Err(err);
         }
@@ -214,6 +218,7 @@ impl ArgosFs {
         new_size: usize,
         window: &[u8],
         logical_write_bytes: u64,
+        clear_setid: bool,
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
@@ -284,17 +289,24 @@ impl ArgosFs {
         inode.workload_score = inode.workload_score * 0.90 + 2.0;
         inode.mtime = now;
         inode.ctime = now;
+        if clear_setid {
+            inode.mode &= !(libc::S_ISUID | libc::S_ISGID);
+        }
 
         self.account_blocks_locked(meta, &replaced, false);
         if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
         {
-            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                if let Some(rollback) = rollback {
-                    *meta = rollback;
+            if !Self::transaction_error_is_committed(&err) {
+                if matches!(err, ArgosError::Conflict(_)) {
+                    if meta.backend == BackendKind::Host {
+                        self.delete_blocks_locked(meta, &written_blocks);
+                    }
+                } else {
+                    self.delete_blocks_locked(meta, &written_blocks);
+                    if let Some(rollback) = rollback {
+                        *meta = rollback;
+                    }
                 }
-                self.delete_blocks_locked(meta, &written_blocks);
-            } else if matches!(&err, ArgosError::Conflict(_)) {
-                self.delete_blocks_locked(meta, &written_blocks);
             }
             return Err(err);
         }
@@ -846,9 +858,7 @@ impl ArgosFs {
                 journal::inject_crash(FaultPoint::BeforeDataWrite.as_str())?;
                 self.backend_write_at_locked(meta, disk_id, extent.offset, data)?;
                 journal::inject_crash(FaultPoint::AfterDataWriteBeforeFlush.as_str())?;
-                if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_none()
-                    && !meta.config.defer_data_flush
-                {
+                if !bulk_import_enabled() && !meta.config.defer_data_flush {
                     self.backend_flush_locked(meta, disk_id)?;
                     journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
                 }
@@ -956,7 +966,7 @@ impl ArgosFs {
             }
         }
         let mut scored = Vec::new();
-        let local_numa = if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+        let local_numa = if bulk_import_enabled() {
             None
         } else {
             meta.config

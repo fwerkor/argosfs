@@ -323,6 +323,13 @@ fn write_metadata_slot(
     Ok(())
 }
 
+pub fn recover_metadata(
+    backend: &dyn StorageBackend,
+    superblocks: &[RawSuperblock],
+) -> Result<Metadata> {
+    load_or_recover(backend, superblocks, false).map(|(metadata, _)| metadata)
+}
+
 pub fn audit(
     backend: &dyn StorageBackend,
     superblocks: &[RawSuperblock],
@@ -342,7 +349,20 @@ pub fn write_superblock_clean_state(
     clean: bool,
 ) -> Result<()> {
     for sb in superblocks {
-        let mut copy = sb.clone();
+        let mut encoded_current = vec![0u8; SUPERBLOCK_SIZE];
+        let mut copy = if backend
+            .read_at(&sb.disk_id, PRIMARY_SUPERBLOCK_OFFSET, &mut encoded_current)
+            .is_ok()
+        {
+            RawSuperblock::decode(&encoded_current)
+                .ok()
+                .filter(|current| {
+                    current.pool_uuid == sb.pool_uuid && current.device_uuid == sb.device_uuid
+                })
+                .unwrap_or_else(|| sb.clone())
+        } else {
+            sb.clone()
+        };
         copy.clean = clean;
         copy.generation = copy.generation.saturating_add(1);
         let now = now_f64().max(0.0) as u64;
@@ -381,10 +401,20 @@ fn preflight_empty(
                 sb.disk_id
             )));
         }
-        let mut sig = vec![0u8; 128 * 1024];
-        if backend.read_at(&sb.disk_id, 0, &mut sig).is_ok() && has_known_signature(&sig) {
+        let probe_len = sb.data.offset.clamp(128 * 1024, 4 * 1024 * 1024) as usize;
+        let mut head = vec![0u8; probe_len];
+        backend.read_at(&sb.disk_id, 0, &mut head)?;
+        let capacity = backend.capacity(&sb.disk_id)?;
+        let tail_len = probe_len.min(capacity as usize);
+        let mut tail = vec![0u8; tail_len];
+        backend.read_at(
+            &sb.disk_id,
+            capacity.saturating_sub(tail_len as u64),
+            &mut tail,
+        )?;
+        if has_known_signature(&head, &tail) || head.iter().chain(&tail).any(|byte| *byte != 0) {
             return Err(ArgosError::UnsafeMount(format!(
-                "{} appears to contain an existing filesystem or partition table; pass --force to overwrite",
+                "{} contains an existing signature or non-zero data in protected probe regions; pass --force to overwrite",
                 sb.disk_id
             )));
         }
@@ -392,14 +422,33 @@ fn preflight_empty(
     Ok(())
 }
 
-fn has_known_signature(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"hsqs")
-        || bytes.get(0x438..0x43a) == Some(&[0x53, 0xef])
-        || bytes.get(510..512) == Some(&[0x55, 0xaa])
-        || bytes.starts_with(b"XFSB")
-        || bytes
+fn has_known_signature(head: &[u8], tail: &[u8]) -> bool {
+    head.starts_with(b"hsqs")
+        || head.starts_with(b"XFSB")
+        || head.starts_with(b"LUKS\xba\xbe")
+        || head.get(3..11) == Some(b"NTFS    ")
+        || head.get(3..11) == Some(b"EXFAT   ")
+        || head.get(512..520) == Some(b"EFI PART")
+        || head.get(512..520) == Some(b"LABELONE")
+        || head.get(0x438..0x43a) == Some(&[0x53, 0xef])
+        || head.get(1024..1028) == Some(&0xF2F5_2010u32.to_le_bytes())
+        || head.get(4096..4100) == Some(&0xA92B_4EFCu32.to_le_bytes())
+        || head
             .get(0x10040..0x10048)
             .is_some_and(|sig| sig == b"_BHRfS_M")
+        || contains_swap_signature(head)
+        || contains_swap_signature(tail)
+        || tail.windows(8).any(|window| window == b"EFI PART")
+        || tail
+            .windows(4)
+            .any(|window| window == 0xA92B_4EFCu32.to_le_bytes())
+}
+
+fn contains_swap_signature(bytes: &[u8]) -> bool {
+    [4096usize, 8192, 16384, 32768, 65536]
+        .into_iter()
+        .filter_map(|page_size| page_size.checked_sub(10))
+        .any(|offset| bytes.get(offset..offset + 10) == Some(b"SWAPSPACE2"))
 }
 
 fn initialize_journal_region(
@@ -522,19 +571,18 @@ fn load_or_recover(
 ) -> Result<(Metadata, TransactionReport)> {
     let mut candidates = Vec::new();
     for sb in superblocks {
-        candidates.extend(read_metadata_candidates(backend, sb)?);
+        candidates.extend(
+            read_metadata_candidates(backend, sb)?
+                .into_iter()
+                .map(|(metadata, report)| (sb.disk_id.clone(), metadata, report)),
+        );
     }
     let mut report = TransactionReport::default();
     report.metadata_candidates = candidates
         .iter()
-        .map(|(_, report)| report.clone())
+        .map(|(_, _, report)| report.clone())
         .collect();
-    let mut best = candidates
-        .into_iter()
-        .filter_map(|(metadata, _)| metadata)
-        .max_by(|left, right| {
-            (left.txid, left.integrity.generation).cmp(&(right.txid, right.integrity.generation))
-        });
+    let mut best = select_quorum_metadata_candidate(&candidates)?;
     let journal_best =
         read_latest_journal_metadata(backend, superblocks, &mut report, best.as_ref())?;
     if let Some(journal_meta) = journal_best {
@@ -558,6 +606,33 @@ fn load_or_recover(
         write_metadata_copies(backend, superblocks, &metadata)?;
     }
     Ok((metadata, report))
+}
+
+fn select_quorum_metadata_candidate(
+    candidates: &[(String, Option<Metadata>, MetadataCandidateReport)],
+) -> Result<Option<Metadata>> {
+    let mut supported =
+        BTreeMap::<(u64, u64, String), (Metadata, std::collections::BTreeSet<String>)>::new();
+    for (disk_id, metadata, _) in candidates {
+        let Some(metadata) = metadata else {
+            continue;
+        };
+        let hash = metadata_hash_for_replay(metadata)?;
+        supported
+            .entry((metadata.txid, metadata.integrity.generation, hash))
+            .or_insert_with(|| (metadata.clone(), std::collections::BTreeSet::new()))
+            .1
+            .insert(disk_id.clone());
+    }
+    Ok(supported
+        .into_iter()
+        .filter(|(_, (metadata, members))| members.len() >= metadata_quorum_requirement(metadata))
+        .max_by_key(|((txid, generation, _), _)| (*txid, *generation))
+        .map(|(_, (metadata, _))| metadata))
+}
+
+fn metadata_quorum_requirement(metadata: &Metadata) -> usize {
+    metadata.disks.len().max(1) / 2 + 1
 }
 
 fn read_metadata_candidates(
@@ -741,7 +816,8 @@ fn read_latest_journal_metadata(
     report: &mut TransactionReport,
     base_metadata: Option<&Metadata>,
 ) -> Result<Option<Metadata>> {
-    let mut best = None;
+    let mut supported =
+        BTreeMap::<(u64, u64, String), (Metadata, std::collections::BTreeSet<String>)>::new();
     let mut members = Vec::new();
     for sb in superblocks {
         let valid_before = report.valid_entries;
@@ -751,6 +827,7 @@ fn read_latest_journal_metadata(
             ..RawJournalMemberReport::default()
         };
         let mut latest = base_metadata.cloned();
+        let mut member_candidates = BTreeMap::<(u64, u64, String), Metadata>::new();
         let mut header = vec![0u8; RAW_HEADER_SIZE];
         if let Err(err) = backend.read_at(&sb.disk_id, sb.journal.offset, &mut header) {
             member.error = Some(err.to_string());
@@ -909,13 +986,15 @@ fn read_latest_journal_metadata(
                         cursor += 36 + len as u64;
                         continue;
                     }
-                    if best
-                        .as_ref()
-                        .map(|metadata: &Metadata| candidate.txid > metadata.txid)
-                        .unwrap_or(true)
-                    {
-                        best = Some(candidate.clone());
-                    }
+                    let candidate_hash = metadata_hash_for_replay(&candidate)?;
+                    member_candidates.insert(
+                        (
+                            candidate.txid,
+                            candidate.integrity.generation,
+                            candidate_hash,
+                        ),
+                        candidate.clone(),
+                    );
                     latest = Some(candidate);
                 }
                 Err(err) => {
@@ -931,9 +1010,29 @@ fn read_latest_journal_metadata(
         }
         member.valid_entries = report.valid_entries.saturating_sub(valid_before);
         member.invalid_entries = report.invalid_entries.saturating_sub(invalid_before);
+        if member.invalid_entries == 0 {
+            for (key, metadata) in member_candidates {
+                supported
+                    .entry(key)
+                    .or_insert_with(|| (metadata, std::collections::BTreeSet::new()))
+                    .1
+                    .insert(sb.disk_id.clone());
+            }
+        }
         members.push(member);
     }
-    report.raw_journal_quorum = Some(raw_journal_quorum(&members, superblocks.len()));
+    let best = supported
+        .into_iter()
+        .filter(|(_, (metadata, member_ids))| {
+            member_ids.len() >= metadata_quorum_requirement(metadata)
+        })
+        .max_by_key(|((txid, generation, _), _)| (*txid, *generation))
+        .map(|(_, (metadata, _))| metadata);
+    let total_members = base_metadata
+        .map(|metadata| metadata.disks.len())
+        .unwrap_or(superblocks.len())
+        .max(superblocks.len());
+    report.raw_journal_quorum = Some(raw_journal_quorum(&members, total_members) || best.is_some());
     report.raw_journal_members = members;
     Ok(best)
 }
