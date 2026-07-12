@@ -22,12 +22,69 @@ const FUSE_WRITEBACK_MAX_BYTES: usize = 1024 * 1024;
 pub struct ArgosFuse {
     volume: ArgosFs,
     writeback: Mutex<FuseWriteback>,
+    handles: Mutex<FuseHandles>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenFileHandle {
+    ino: InodeId,
+    flags: i32,
+    uid: u32,
+    gid: u32,
+}
+
+#[derive(Default)]
+struct FuseHandles {
+    next: u64,
+    files: BTreeMap<u64, OpenFileHandle>,
+    refs: BTreeMap<InodeId, usize>,
+}
+
+impl FuseHandles {
+    fn open(&mut self, file: OpenFileHandle) -> FileHandle {
+        loop {
+            self.next = self.next.wrapping_add(1).max(1);
+            if self.files.contains_key(&self.next) {
+                continue;
+            }
+            let handle = self.next;
+            *self.refs.entry(file.ino).or_default() += 1;
+            self.files.insert(handle, file);
+            return FileHandle(handle);
+        }
+    }
+
+    fn get(&self, handle: FileHandle) -> Option<&OpenFileHandle> {
+        self.files.get(&handle.0)
+    }
+
+    fn refs(&self, ino: InodeId) -> usize {
+        self.refs.get(&ino).copied().unwrap_or(0)
+    }
+
+    fn close(&mut self, handle: FileHandle) -> Option<(OpenFileHandle, bool)> {
+        let file = self.files.remove(&handle.0)?;
+        let last = if let Some(count) = self.refs.get_mut(&file.ino) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.refs.remove(&file.ino);
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        };
+        Some((file, last))
+    }
 }
 
 #[derive(Clone, Debug)]
 struct DirtyExtent {
     offset: u64,
     data: Vec<u8>,
+    uid: u32,
+    gid: u32,
 }
 
 impl DirtyExtent {
@@ -35,7 +92,17 @@ impl DirtyExtent {
         self.offset.checked_add(self.data.len() as u64)
     }
 
-    fn try_merge(&mut self, offset: u64, data: &[u8], max_bytes: usize) -> bool {
+    fn try_merge(
+        &mut self,
+        offset: u64,
+        data: &[u8],
+        max_bytes: usize,
+        uid: u32,
+        gid: u32,
+    ) -> bool {
+        if self.uid != uid || self.gid != gid {
+            return false;
+        }
         let Some(existing_end) = self.end() else {
             return false;
         };
@@ -72,6 +139,7 @@ impl ArgosFuse {
         Self {
             volume,
             writeback: Mutex::new(FuseWriteback::default()),
+            handles: Mutex::new(FuseHandles::default()),
         }
     }
 
@@ -130,19 +198,21 @@ impl ArgosFuse {
         Ok(())
     }
 
-    fn queue_writeback(&self, ino: InodeId, offset: u64, data: &[u8]) -> bool {
+    fn queue_writeback(&self, ino: InodeId, offset: u64, data: &[u8], uid: u32, gid: u32) -> bool {
         if data.len() > FUSE_WRITEBACK_MAX_BYTES {
             return false;
         }
         let mut writeback = self.writeback.lock();
         if let Some(dirty) = writeback.dirty.get_mut(&ino) {
-            return dirty.try_merge(offset, data, FUSE_WRITEBACK_MAX_BYTES);
+            return dirty.try_merge(offset, data, FUSE_WRITEBACK_MAX_BYTES, uid, gid);
         }
         writeback.dirty.insert(
             ino,
             DirtyExtent {
                 offset,
                 data: data.to_vec(),
+                uid,
+                gid,
             },
         );
         true
@@ -153,10 +223,13 @@ impl ArgosFuse {
         let Some(dirty) = writeback.dirty.remove(&ino) else {
             return Ok(());
         };
-        match self
-            .volume
-            .write_inode_range(ino, dirty.offset, dirty.data.as_slice())
-        {
+        match self.volume.write_inode_range_as(
+            ino,
+            dirty.offset,
+            dirty.data.as_slice(),
+            dirty.uid,
+            dirty.gid,
+        ) {
             Ok(written) if written == dirty.data.len() => Ok(()),
             Ok(written) => {
                 writeback.dirty.insert(ino, dirty);
@@ -458,10 +531,20 @@ impl Filesystem for ArgosFuse {
             reply.error(errno(&err));
             return;
         }
-        match self
+        let handles = self.handles.lock();
+        let result = self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
-            .and_then(|()| self.volume.unlink_at_as(parent.0, name, req.uid()))
-        {
+            .and_then(|()| self.volume.lookup(parent.0, name))
+            .and_then(|attr| {
+                if handles.refs(attr.ino) > 0 {
+                    self.volume
+                        .unlink_at_as_preserving_open(parent.0, name, req.uid())
+                } else {
+                    self.volume.unlink_at_as(parent.0, name, req.uid())
+                }
+            });
+        drop(handles);
+        match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
         }
@@ -529,11 +612,20 @@ impl Filesystem for ArgosFuse {
             reply.error(Errno::EINVAL);
             return;
         }
+        let handles = self.handles.lock();
+        let preserve_replaced_inode = if flags.contains(RenameFlags::RENAME_EXCHANGE) {
+            false
+        } else {
+            self.volume
+                .lookup(newparent.0, newname)
+                .ok()
+                .is_some_and(|attr| handles.refs(attr.ino) > 0)
+        };
         let policy = RenamePolicy {
             no_replace: flags.contains(RenameFlags::RENAME_NOREPLACE),
             exchange: flags.contains(RenameFlags::RENAME_EXCHANGE),
             uid: Some(req.uid()),
-            preserve_replaced_inode: false,
+            preserve_replaced_inode,
         };
         let result = self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
@@ -542,6 +634,7 @@ impl Filesystem for ArgosFuse {
                 self.volume
                     .rename_at_with_policy(parent.0, name, newparent.0, newname, policy)
             });
+        drop(handles);
         match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
@@ -576,7 +669,8 @@ impl Filesystem for ArgosFuse {
                 return;
             }
         }
-        let result = (|| -> Result<NodeAttr> {
+        let mut handles = self.handles.lock();
+        let result = (|| -> Result<FileHandle> {
             self.require_access(req, ino, open_mask(flags))?;
             let mut attr = self.volume.attr_inode(ino.0)?;
             if attr.kind != NodeKind::File {
@@ -586,11 +680,17 @@ impl Filesystem for ArgosFuse {
                 self.volume.truncate_inode_as(ino.0, 0)?;
                 attr = self.volume.attr_inode(ino.0)?;
             }
-            Ok(attr)
+            Ok(handles.open(OpenFileHandle {
+                ino: attr.ino,
+                flags: flags.0,
+                uid: req.uid(),
+                gid: req.gid(),
+            }))
         })();
+        drop(handles);
         match result {
-            Ok(_) => reply.opened(
-                FileHandle(ino.0),
+            Ok(handle) => reply.opened(
+                handle,
                 self.open_reply_flags(flags.0 & (libc::O_WRONLY | libc::O_RDWR) != 0),
             ),
             Err(err) => reply.error(errno(&err)),
@@ -601,7 +701,7 @@ impl Filesystem for ArgosFuse {
         &self,
         req: &Request,
         ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         offset: u64,
         size: u32,
         _flags: OpenFlags,
@@ -612,10 +712,19 @@ impl Filesystem for ArgosFuse {
             reply.error(errno(&err));
             return;
         }
-        match self
-            .require_access(req, ino, libc::R_OK)
-            .and_then(|()| self.volume.read_inode(ino.0, offset, size as usize, true))
-        {
+        let file = self.handles.lock().get(fh).cloned();
+        let result = file
+            .ok_or_else(|| ArgosError::Invalid("invalid FUSE file handle".to_string()))
+            .and_then(|file| {
+                if file.ino != ino.0 {
+                    return Err(ArgosError::Invalid(
+                        "FUSE file handle inode mismatch".to_string(),
+                    ));
+                }
+                self.require_access(req, ino, libc::R_OK)?;
+                self.volume.read_inode(ino.0, offset, size as usize, true)
+            });
+        match result {
             Ok(data) => reply.data(&data),
             Err(err) => reply.error(errno(&err)),
         }
@@ -626,7 +735,7 @@ impl Filesystem for ArgosFuse {
         &self,
         req: &Request,
         ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         offset: u64,
         data: &[u8],
         _write_flags: WriteFlags,
@@ -638,27 +747,43 @@ impl Filesystem for ArgosFuse {
             reply.written(0);
             return;
         }
-        let direct = self.volume.io_policy().direct_io || data.len() > FUSE_WRITEBACK_MAX_BYTES;
-        let result = if direct {
-            self.flush_inode_writeback(ino.0).and_then(|()| {
-                self.volume
-                    .write_inode_range_as(ino.0, offset, data, req.uid(), req.gid())
-            })
-        } else {
-            self.require_writeback_access(req, ino).and_then(|()| {
-                if self.queue_writeback(ino.0, offset, data) {
-                    Ok(data.len())
-                } else {
-                    self.flush_inode_writeback(ino.0)?;
-                    if self.queue_writeback(ino.0, offset, data) {
-                        Ok(data.len())
-                    } else {
-                        self.volume
-                            .write_inode_range_as(ino.0, offset, data, req.uid(), req.gid())
-                    }
+        let file = self.handles.lock().get(fh).cloned();
+        let result = file
+            .ok_or_else(|| ArgosError::Invalid("invalid FUSE file handle".to_string()))
+            .and_then(|file| {
+                if file.ino != ino.0 {
+                    return Err(ArgosError::Invalid(
+                        "FUSE file handle inode mismatch".to_string(),
+                    ));
                 }
-            })
-        };
+                let sync_write = file.flags & (libc::O_SYNC | libc::O_DSYNC) != 0;
+                let direct = self.volume.io_policy().direct_io
+                    || data.len() > FUSE_WRITEBACK_MAX_BYTES
+                    || sync_write;
+                let written = if direct {
+                    self.flush_inode_writeback(ino.0).and_then(|()| {
+                        self.volume
+                            .write_inode_range_as(ino.0, offset, data, file.uid, file.gid)
+                    })?
+                } else {
+                    self.require_writeback_access(req, ino)?;
+                    if self.queue_writeback(ino.0, offset, data, file.uid, file.gid) {
+                        data.len()
+                    } else {
+                        self.flush_inode_writeback(ino.0)?;
+                        if self.queue_writeback(ino.0, offset, data, file.uid, file.gid) {
+                            data.len()
+                        } else {
+                            self.volume
+                                .write_inode_range_as(ino.0, offset, data, file.uid, file.gid)?
+                        }
+                    }
+                };
+                if sync_write {
+                    self.volume.sync()?;
+                }
+                Ok(written)
+            });
         match result {
             Ok(written) => reply.written(written as u32),
             Err(err) => reply.error(errno(&err)),
@@ -669,7 +794,7 @@ impl Filesystem for ArgosFuse {
         &self,
         _req: &Request,
         ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         offset: i64,
         whence: i32,
         reply: ReplyLseek,
@@ -679,8 +804,20 @@ impl Filesystem for ArgosFuse {
             return;
         }
         let result = self
-            .flush_inode_writeback(ino.0)
-            .and_then(|()| self.volume.seek_data_or_hole(ino.0, offset as u64, whence));
+            .handles
+            .lock()
+            .get(fh)
+            .cloned()
+            .ok_or_else(|| ArgosError::Invalid("invalid FUSE file handle".to_string()))
+            .and_then(|file| {
+                if file.ino != ino.0 {
+                    return Err(ArgosError::Invalid(
+                        "FUSE file handle inode mismatch".to_string(),
+                    ));
+                }
+                self.flush_inode_writeback(ino.0)?;
+                self.volume.seek_data_or_hole(ino.0, offset as u64, whence)
+            });
         match result {
             Ok(next) => match i64::try_from(next) {
                 Ok(next) => reply.offset(next),
@@ -813,14 +950,26 @@ impl Filesystem for ArgosFuse {
     fn release(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        _fh: FileHandle,
+        ino: INodeNo,
+        fh: FileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        match self.flush_inode_writeback(_ino.0) {
+        let flush_result = self.flush_inode_writeback(ino.0);
+        let mut handles = self.handles.lock();
+        let Some((file, last)) = handles.close(fh) else {
+            reply.error(Errno::EBADF);
+            return;
+        };
+        let reap_result = if flush_result.is_ok() && last {
+            self.volume.reap_unlinked_inode(file.ino)
+        } else {
+            Ok(())
+        };
+        drop(handles);
+        match flush_result.and(reap_result) {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
         }
@@ -829,15 +978,27 @@ impl Filesystem for ArgosFuse {
     fn fsync(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        _fh: FileHandle,
+        ino: INodeNo,
+        fh: FileHandle,
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        match self
-            .flush_inode_writeback(_ino.0)
-            .and_then(|()| self.volume.sync())
-        {
+        let result = self
+            .handles
+            .lock()
+            .get(fh)
+            .cloned()
+            .ok_or_else(|| ArgosError::Invalid("invalid FUSE file handle".to_string()))
+            .and_then(|file| {
+                if file.ino != ino.0 {
+                    return Err(ArgosError::Invalid(
+                        "FUSE file handle inode mismatch".to_string(),
+                    ));
+                }
+                self.flush_inode_writeback(ino.0)?;
+                self.volume.sync()
+            });
+        match result {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno(&err)),
         }
@@ -969,14 +1130,15 @@ impl Filesystem for ArgosFuse {
         name: &OsStr,
         mode: u32,
         umask: u32,
-        _flags: i32,
+        flags: i32,
         reply: ReplyCreate,
     ) {
         if let Err(err) = self.flush_all_writeback() {
             reply.error(errno(&err));
             return;
         }
-        match self
+        let mut handles = self.handles.lock();
+        let result = self
             .require_access(req, parent, libc::W_OK | libc::X_OK)
             .and_then(|()| {
                 self.volume.create_file_at_with_owner(
@@ -986,12 +1148,23 @@ impl Filesystem for ArgosFuse {
                     req.uid(),
                     req.gid(),
                 )
-            }) {
-            Ok(attr) => reply.created(
+            })
+            .map(|attr| {
+                let handle = handles.open(OpenFileHandle {
+                    ino: attr.ino,
+                    flags,
+                    uid: req.uid(),
+                    gid: req.gid(),
+                });
+                (attr, handle)
+            });
+        drop(handles);
+        match result {
+            Ok((attr, handle)) => reply.created(
                 &TTL,
                 &to_file_attr(&attr),
                 Generation(0),
-                FileHandle(attr.ino),
+                handle,
                 self.open_reply_flags(true),
             ),
             Err(err) => reply.error(errno(&err)),
@@ -1246,13 +1419,15 @@ mod tests {
         let mut dirty = DirtyExtent {
             offset: 10,
             data: b"abcd".to_vec(),
+            uid: 1000,
+            gid: 1000,
         };
 
-        assert!(dirty.try_merge(14, b"ef", 16));
+        assert!(dirty.try_merge(14, b"ef", 16, 1000, 1000));
         assert_eq!(dirty.offset, 10);
         assert_eq!(dirty.data, b"abcdef");
 
-        assert!(dirty.try_merge(12, b"XY", 16));
+        assert!(dirty.try_merge(12, b"XY", 16, 1000, 1000));
         assert_eq!(dirty.offset, 10);
         assert_eq!(dirty.data, b"abXYef");
     }
@@ -1262,15 +1437,43 @@ mod tests {
         let mut dirty = DirtyExtent {
             offset: 10,
             data: b"abcd".to_vec(),
+            uid: 1000,
+            gid: 1000,
         };
 
-        assert!(!dirty.try_merge(15, b"z", 16));
+        assert!(!dirty.try_merge(15, b"z", 16, 1000, 1000));
         assert_eq!(dirty.offset, 10);
         assert_eq!(dirty.data, b"abcd");
 
-        assert!(!dirty.try_merge(14, b"efgh", 6));
+        assert!(!dirty.try_merge(14, b"efgh", 6, 1000, 1000));
         assert_eq!(dirty.offset, 10);
         assert_eq!(dirty.data, b"abcd");
+    }
+
+    #[test]
+    fn file_handles_track_independent_open_references() {
+        let mut handles = FuseHandles::default();
+        let first = handles.open(OpenFileHandle {
+            ino: 42,
+            flags: libc::O_RDONLY,
+            uid: 1000,
+            gid: 1000,
+        });
+        let second = handles.open(OpenFileHandle {
+            ino: 42,
+            flags: libc::O_SYNC | libc::O_WRONLY,
+            uid: 1001,
+            gid: 1001,
+        });
+        assert_ne!(first, second);
+        assert_eq!(handles.refs(42), 2);
+        assert_eq!(
+            handles.get(second).unwrap().flags & libc::O_SYNC,
+            libc::O_SYNC
+        );
+        assert!(!handles.close(first).unwrap().1);
+        assert!(handles.close(second).unwrap().1);
+        assert_eq!(handles.refs(42), 0);
     }
 
     #[test]
@@ -1290,8 +1493,8 @@ mod tests {
         let ino = volume.create_file_path("/buffered", 0o644).unwrap();
         let fuse = ArgosFuse::new(volume.clone());
 
-        assert!(fuse.queue_writeback(ino, 0, b"hello"));
-        assert!(fuse.queue_writeback(ino, 5, b" world"));
+        assert!(fuse.queue_writeback(ino, 0, b"hello", 0, 0));
+        assert!(fuse.queue_writeback(ino, 5, b" world", 0, 0));
         assert_eq!(volume.read_file("/buffered", true).unwrap(), b"");
 
         fuse.flush_inode_writeback(ino).unwrap();
