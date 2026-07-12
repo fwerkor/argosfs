@@ -196,6 +196,58 @@ pub fn inherited_directory_acl(parent: &Inode) -> Option<PosixAcl> {
     }
 }
 
+pub fn inherited_access_acl(parent: &Inode, mode: u32) -> Option<PosixAcl> {
+    let mut acl = inherited_directory_acl(parent)?;
+    apply_mode_to_access_acl(&mut acl, mode);
+    Some(acl)
+}
+
+pub fn apply_mode_to_access_acl(acl: &mut PosixAcl, mode: u32) {
+    let owner = ((mode >> 6) & 0o7) as u16;
+    let group = ((mode >> 3) & 0o7) as u16;
+    let other = (mode & 0o7) as u16;
+    let has_mask = acl
+        .entries
+        .iter()
+        .any(|entry| entry.tag == PosixAclTag::Mask);
+    for entry in &mut acl.entries {
+        match entry.tag {
+            PosixAclTag::UserObj => entry.perms = owner,
+            PosixAclTag::Mask => entry.perms = group,
+            PosixAclTag::GroupObj if !has_mask => entry.perms = group,
+            PosixAclTag::Other => entry.perms = other,
+            _ => {}
+        }
+    }
+}
+
+pub fn mode_from_access_acl(acl: &PosixAcl, current_mode: u32) -> u32 {
+    let owner = acl
+        .entries
+        .iter()
+        .find(|entry| entry.tag == PosixAclTag::UserObj)
+        .map(|entry| entry.perms as u32)
+        .unwrap_or((current_mode >> 6) & 0o7);
+    let group = acl
+        .entries
+        .iter()
+        .find(|entry| entry.tag == PosixAclTag::Mask)
+        .or_else(|| {
+            acl.entries
+                .iter()
+                .find(|entry| entry.tag == PosixAclTag::GroupObj)
+        })
+        .map(|entry| entry.perms as u32)
+        .unwrap_or((current_mode >> 3) & 0o7);
+    let other = acl
+        .entries
+        .iter()
+        .find(|entry| entry.tag == PosixAclTag::Other)
+        .map(|entry| entry.perms as u32)
+        .unwrap_or(current_mode & 0o7);
+    (current_mode & !0o777) | (owner << 6) | (group << 3) | other
+}
+
 fn evaluate_posix(acl: &PosixAcl, inode: &Inode, uid: u32, gid: u32, requested: u16) -> bool {
     let mask = acl
         .entries

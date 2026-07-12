@@ -695,10 +695,14 @@ impl ArgosFs {
         }
         let now = now_f64();
         let ino = self.alloc_inode_locked(meta);
-        let inherited_acl = meta
+        let inherited_default_acl = meta
             .inodes
             .get(&parent)
             .and_then(acl::inherited_directory_acl);
+        let inherited_access_acl = meta
+            .inodes
+            .get(&parent)
+            .and_then(|parent| acl::inherited_access_acl(parent, mode));
         let inode = Inode {
             id: ino,
             kind: NodeKind::Directory,
@@ -717,8 +721,8 @@ impl ArgosFs {
             inline_sha256: String::new(),
             blocks: Vec::new(),
             xattrs: BTreeMap::new(),
-            posix_acl_access: inherited_acl.clone(),
-            posix_acl_default: inherited_acl,
+            posix_acl_access: inherited_access_acl,
+            posix_acl_default: inherited_default_acl,
             nfs4_acl: None,
             access_count: 0,
             write_count: 0,
@@ -798,7 +802,7 @@ impl ArgosFs {
         let inherited_acl = meta
             .inodes
             .get(&parent)
-            .and_then(acl::inherited_directory_acl);
+            .and_then(|parent| acl::inherited_access_acl(parent, mode));
         let normalized_mode = if kind == NodeKind::File && file_type == 0 {
             libc::S_IFREG | (mode & 0o7777)
         } else {

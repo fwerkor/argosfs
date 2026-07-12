@@ -491,3 +491,53 @@ fn root_execute_check_requires_an_execute_bit_for_regular_files() {
     let dir = fs.resolve_path("/searchable-by-root", false).unwrap();
     fs.check_access_inode(dir, 0, 0, libc::X_OK).unwrap();
 }
+
+#[test]
+fn chmod_updates_effective_posix_acl_permissions() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let attr = fs
+        .create_file_at_with_owner(1, OsStr::new("chmod-acl"), 0o600, 1000, 1000)
+        .unwrap();
+    fs.set_posix_acl_path(
+        "/chmod-acl",
+        false,
+        acl::parse_posix_acl("user::rw-,group::---,mask::---,other::---").unwrap(),
+    )
+    .unwrap();
+    fs.check_access_inode(attr.ino, 1000, 1000, libc::R_OK)
+        .unwrap();
+
+    fs.chmod_inode(attr.ino, 0).unwrap();
+    assert_eq!(
+        fs.check_access_inode(attr.ino, 1000, 1000, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+}
+
+#[test]
+fn inherited_default_acl_is_restricted_by_creation_mode() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    fs.mkdir("/parent", 0o777).unwrap();
+    fs.set_posix_acl_path(
+        "/parent",
+        true,
+        acl::parse_posix_acl("user::rwx,user:2000:rwx,group::rwx,mask::rwx,other::rwx").unwrap(),
+    )
+    .unwrap();
+    let parent = fs.resolve_path("/parent", false).unwrap();
+    let child = fs
+        .create_file_at_with_owner(parent, OsStr::new("private"), 0o600, 1000, 1000)
+        .unwrap();
+
+    assert_eq!(child.mode & 0o777, 0o600);
+    assert_eq!(
+        fs.check_access_inode(child.ino, 2000, 2000, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+}
