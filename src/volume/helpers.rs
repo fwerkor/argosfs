@@ -1,7 +1,43 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 
 pub(super) fn canonical_or_self(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub(super) fn harden_host_storage_permissions(root: &Path, meta: &Metadata) -> Result<()> {
+    let system = root.join(".argosfs");
+    ensure_private_dir(&system)?;
+    for directory in ["devices", "snapshots", "cache"] {
+        let path = system.join(directory);
+        if path.exists() {
+            ensure_private_dir(&path)?;
+        }
+    }
+    for file in [
+        "journal.jsonl",
+        "meta.primary.json",
+        "meta.secondary.json",
+        "meta.json",
+        "tx.lock",
+        "autopilot.jsonl",
+    ] {
+        let path = system.join(file);
+        if path.exists() {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    for disk in meta.disks.values() {
+        let disk_root = relative_or_absolute(root, &disk.path);
+        if disk_root.exists() {
+            ensure_private_dir(&disk_root)?;
+            let shards = disk_root.join("shards");
+            if shards.exists() {
+                ensure_private_dir(&shards)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn prepare_loop_images(paths: &[PathBuf], image_size: u64, force: bool) -> Result<()> {

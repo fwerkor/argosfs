@@ -920,7 +920,7 @@ impl ArgosFs {
         let relpath = PathBuf::from(format!("shards/{subdir}/{stripe_id}.{slot:03}.blk"));
         let path = self.shard_path_locked(meta, disk_id, &relpath);
         if let Some(parent) = path.parent() {
-            ensure_dir(parent)?;
+            ensure_private_dir(parent)?;
         }
         self.ensure_disk_capacity_locked(meta, disk_id, data.len() as u64)?;
         let start = std::time::Instant::now();

@@ -16,7 +16,7 @@ use crate::raw_store;
 use crate::types::*;
 use crate::util::{
     append_json_line, atomic_write, clean_path, content_hash_hex, content_hash_matches, ensure_dir,
-    now_f64, parent_name, relative_or_absolute, split_path, stable_u01,
+    ensure_private_dir, now_f64, parent_name, relative_or_absolute, split_path, stable_u01,
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
@@ -148,9 +148,10 @@ impl ArgosFs {
         if system.exists() {
             return Err(ArgosError::AlreadyExists(root.display().to_string()));
         }
-        ensure_dir(&system.join("devices"))?;
-        ensure_dir(&system.join("snapshots"))?;
-        ensure_dir(&system.join("cache"))?;
+        ensure_private_dir(&system)?;
+        ensure_private_dir(&system.join("devices"))?;
+        ensure_private_dir(&system.join("snapshots"))?;
+        ensure_private_dir(&system.join("cache"))?;
         let uuid = Uuid::new_v4().to_string();
         let created_at = now_f64();
         let mut disks = BTreeMap::new();
@@ -158,7 +159,8 @@ impl ArgosFs {
             let id = format!("disk-{index:04}");
             let path = PathBuf::from(format!(".argosfs/devices/{id}"));
             let disk_root = root.join(&path);
-            ensure_dir(&disk_root.join("shards"))?;
+            ensure_private_dir(&disk_root)?;
+            ensure_private_dir(&disk_root.join("shards"))?;
             atomic_write(
                 &disk_root.join("argosfs-disk.json"),
                 serde_json::to_vec_pretty(&json!({
@@ -279,6 +281,7 @@ impl ArgosFs {
             )));
         }
         let _ = RsCodec::new(meta.config.k, meta.config.m)?;
+        harden_host_storage_permissions(&root, &meta)?;
         let cache = BlockCache::new(
             root.join(".argosfs/cache/l2"),
             64 * 1024 * 1024,

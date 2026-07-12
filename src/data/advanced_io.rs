@@ -1,6 +1,6 @@
 use crate::error::{ArgosError, Result};
 use crate::types::IoMode;
-use crate::util::{ensure_dir, read_to_vec};
+use crate::util::{ensure_private_dir, read_to_vec};
 use io_uring::{opcode, types, IoUring};
 use memmap2::MmapOptions;
 use std::fs::{self, File, OpenOptions};
@@ -14,7 +14,7 @@ const MAX_SHARD_IO_BYTES: usize = 256 * 1024 * 1024;
 
 pub fn write_all(path: &Path, data: &[u8], mode: IoMode) -> Result<()> {
     if let Some(parent) = path.parent() {
-        ensure_dir(parent)?;
+        ensure_private_dir(parent)?;
     }
     match mode {
         IoMode::Buffered => write_buffered(path, data),
@@ -64,7 +64,12 @@ pub fn current_numa_node() -> Option<i32> {
 }
 
 fn write_buffered(path: &Path, data: &[u8]) -> Result<()> {
-    let mut file = File::create(path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
     file.write_all(data)?;
     file.sync_all()?;
     Ok(())

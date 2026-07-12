@@ -68,7 +68,8 @@ impl ArgosFs {
         let id = format!("disk-{next:04}");
         let stored = path.unwrap_or_else(|| PathBuf::from(format!(".argosfs/devices/{id}")));
         let disk_root = relative_or_absolute(&self.root, &stored);
-        ensure_dir(&disk_root.join("shards"))?;
+        ensure_private_dir(&disk_root)?;
+        ensure_private_dir(&disk_root.join("shards"))?;
         let disk_root_canonical = canonical_or_self(&disk_root);
         if meta.disks.values().any(|disk| {
             canonical_or_self(&relative_or_absolute(&self.root, &disk.path)) == disk_root_canonical

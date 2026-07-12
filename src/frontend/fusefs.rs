@@ -12,6 +12,8 @@ use fuser::{
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr};
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1413,9 +1415,8 @@ fn time_or_now(value: TimeOrNow) -> f64 {
 }
 
 fn request_groups(req: &Request) -> Vec<u32> {
-    let mut groups = std::fs::read_to_string(format!("/proc/{}/status", req.pid()))
-        .ok()
-        .map(|status| parse_status_groups(&status))
+    let mut groups = read_proc_status(req.pid())
+        .and_then(|status| parse_status_groups_for_identity(&status, req.uid(), req.gid()))
         .unwrap_or_default();
     if !groups.contains(&req.gid()) {
         groups.push(req.gid());
@@ -1423,6 +1424,44 @@ fn request_groups(req: &Request) -> Vec<u32> {
     groups.sort_unstable();
     groups.dedup();
     groups
+}
+
+fn read_proc_status(pid: u32) -> Option<String> {
+    let proc_dir = std::fs::File::open(format!("/proc/{pid}")).ok()?;
+    let name = CString::new("status").ok()?;
+    let fd = unsafe {
+        libc::openat(
+            proc_dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut status = String::new();
+    file.read_to_string(&mut status).ok()?;
+    Some(status)
+}
+
+fn parse_status_groups_for_identity(status: &str, uid: u32, gid: u32) -> Option<Vec<u32>> {
+    let fsuid = parse_status_identity(status, "Uid:")?;
+    let fsgid = parse_status_identity(status, "Gid:")?;
+    if fsuid != uid || fsgid != gid {
+        return None;
+    }
+    Some(parse_status_groups(status))
+}
+
+fn parse_status_identity(status: &str, key: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(key))?
+        .split_whitespace()
+        .last()?
+        .parse::<u32>()
+        .ok()
 }
 
 fn parse_status_groups(status: &str) -> Vec<u32> {
@@ -1492,8 +1531,11 @@ mod tests {
 
     #[test]
     fn proc_status_group_parser_reads_supplementary_groups() {
-        let groups = parse_status_groups("Name:\ttest\nGroups:\t10 20 30 \n");
+        let status = "Name:\ttest\nUid:\t1000 1000 1000 1000\nGid:\t2000 2000 2000 2000\nGroups:\t10 20 30 \n";
+        let groups = parse_status_groups_for_identity(status, 1000, 2000).unwrap();
         assert_eq!(groups, vec![10, 20, 30]);
+        assert!(parse_status_groups_for_identity(status, 1001, 2000).is_none());
+        assert!(parse_status_groups_for_identity(status, 1000, 2001).is_none());
     }
 
     #[test]

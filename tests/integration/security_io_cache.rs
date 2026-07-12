@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn importable_special_metadata_matches_unix_expectations() {
@@ -450,6 +451,50 @@ fn import_tree_canonicalizes_dotdot_destination_components() {
         b"clean import"
     );
     assert!(fs.resolve_path("/nested", false).is_err());
+}
+
+#[test]
+fn host_storage_internals_use_private_permissions_and_are_hardened_on_open() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 1, false).unwrap();
+    fs.write_file("/private", &vec![b'x'; 2048], 0o600).unwrap();
+    let meta = fs.metadata_snapshot();
+    let ino = fs.resolve_path("/private", false).unwrap();
+    let shard = &meta.inodes[&ino].blocks[0].shards[0];
+    let disk_root = tmp.path().join(&meta.disks[&shard.disk_id].path);
+    let shard_path = shard_abs(&fs, &shard.disk_id, &shard.relpath);
+    let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    assert_eq!(mode(&tmp.path().join(".argosfs")), 0o700);
+    assert_eq!(mode(&disk_root), 0o700);
+    assert_eq!(mode(&disk_root.join("shards")), 0o700);
+    assert_eq!(mode(&tmp.path().join(".argosfs/meta.primary.json")), 0o600);
+    assert_eq!(mode(&tmp.path().join(".argosfs/journal.jsonl")), 0o600);
+    assert_eq!(mode(&shard_path), 0o600);
+
+    fs::set_permissions(
+        tmp.path().join(".argosfs"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::set_permissions(
+        tmp.path().join(".argosfs/meta.primary.json"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    fs::set_permissions(&disk_root, fs::Permissions::from_mode(0o755)).unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open(tmp.path()).unwrap();
+    assert_eq!(mode(&tmp.path().join(".argosfs")), 0o700);
+    assert_eq!(mode(&disk_root), 0o700);
+    assert_eq!(mode(&tmp.path().join(".argosfs/meta.primary.json")), 0o600);
+    assert_eq!(
+        reopened.read_file("/private", false).unwrap(),
+        vec![b'x'; 2048]
+    );
 }
 
 #[test]
