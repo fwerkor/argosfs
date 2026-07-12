@@ -378,7 +378,7 @@ impl ArgosFs {
             return Ok(0);
         }
         if start == old_size && start % stripe_raw_size == 0 {
-            self.append_inode_data_locked(&mut meta, ino, start, data)?;
+            self.append_inode_data_locked(&mut meta, ino, start, data, access.is_some())?;
             return Ok(data.len());
         }
         let new_size = old_size.max(end);
@@ -417,6 +417,7 @@ impl ArgosFs {
             new_size,
             &window,
             data.len() as u64,
+            access.is_some(),
             "write-range",
             json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "stripe-window-local"}),
         )?;
@@ -429,6 +430,7 @@ impl ArgosFs {
         ino: InodeId,
         offset: usize,
         data: &[u8],
+        clear_setid: bool,
     ) -> Result<()> {
         let rollback = commit_previous_snapshot(meta);
         let (storage_class, boot_critical, existing_inline, had_blocks) = {
@@ -508,6 +510,9 @@ impl ArgosFs {
         inode.workload_score = inode.workload_score * 0.90 + 2.0;
         inode.mtime = now;
         inode.ctime = now;
+        if clear_setid {
+            inode.mode &= !(libc::S_ISUID | libc::S_ISGID);
+        }
 
         if let Err(err) = self.commit_locked_with_previous(
             meta,
@@ -530,6 +535,14 @@ impl ArgosFs {
     }
 
     pub fn truncate_inode(&self, ino: InodeId, size: u64) -> Result<()> {
+        self.truncate_inode_checked(ino, size, false)
+    }
+
+    pub fn truncate_inode_as(&self, ino: InodeId, size: u64) -> Result<()> {
+        self.truncate_inode_checked(ino, size, true)
+    }
+
+    fn truncate_inode_checked(&self, ino: InodeId, size: u64, clear_setid: bool) -> Result<()> {
         let requested_size = size;
         let new_size = usize::try_from(requested_size)
             .map_err(|_| ArgosError::Invalid("truncate size is too large".to_string()))?;
@@ -572,6 +585,7 @@ impl ArgosFs {
             new_size,
             &window,
             0,
+            clear_setid,
             "truncate",
             json!({"inode": ino, "size": requested_size, "rewrite": "stripe-window-local"}),
         )
@@ -888,6 +902,7 @@ impl ArgosFs {
         if let Some(gid) = gid {
             inode.gid = gid;
         }
+        inode.mode &= !(libc::S_ISUID | libc::S_ISGID);
         inode.ctime = now_f64();
         self.commit_locked(
             &mut meta,

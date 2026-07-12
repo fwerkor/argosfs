@@ -363,7 +363,7 @@ impl Filesystem for ArgosFuse {
                 attr = self.volume.chown_inode(ino, uid, gid)?;
             }
             if let Some(size) = size {
-                self.volume.truncate_inode(ino, size)?;
+                self.volume.truncate_inode_as(ino, size)?;
                 attr = self.volume.attr_inode(ino)?;
             }
             if atime.is_some() || mtime.is_some() {
@@ -582,7 +582,7 @@ impl Filesystem for ArgosFuse {
                 return Err(ArgosError::IsDirectory(format!("inode {ino}")));
             }
             if flags.0 & libc::O_TRUNC != 0 {
-                self.volume.truncate_inode(ino.0, 0)?;
+                self.volume.truncate_inode_as(ino.0, 0)?;
                 attr = self.volume.attr_inode(ino.0)?;
             }
             Ok(attr)

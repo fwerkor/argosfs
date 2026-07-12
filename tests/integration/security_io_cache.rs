@@ -541,3 +541,30 @@ fn inherited_default_acl_is_restricted_by_creation_mode() {
         libc::EACCES
     );
 }
+
+#[test]
+fn content_and_owner_changes_clear_setid_bits() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let attr = fs
+        .create_file_at_with_owner(1, OsStr::new("setid"), 0o6755, 0, 0)
+        .unwrap();
+    fs.set_posix_acl_path(
+        "/setid",
+        false,
+        acl::parse_posix_acl("user::rwx,user:1000:rw-,group::r-x,mask::rwx,other::r-x").unwrap(),
+    )
+    .unwrap();
+
+    fs.write_inode_range_as(attr.ino, 0, b"replacement", 1000, 1000)
+        .unwrap();
+    assert_eq!(fs.attr_inode(attr.ino).unwrap().mode & 0o6000, 0);
+
+    fs.chmod_inode(attr.ino, 0o6755).unwrap();
+    fs.truncate_inode_as(attr.ino, 1).unwrap();
+    assert_eq!(fs.attr_inode(attr.ino).unwrap().mode & 0o6000, 0);
+
+    fs.chmod_inode(attr.ino, 0o6755).unwrap();
+    fs.chown_inode(attr.ino, Some(1234), Some(1234)).unwrap();
+    assert_eq!(fs.attr_inode(attr.ino).unwrap().mode & 0o6000, 0);
+}

@@ -210,6 +210,7 @@ impl ArgosFs {
         new_size: usize,
         window: &[u8],
         logical_write_bytes: u64,
+        clear_setid: bool,
         action: &str,
         details: serde_json::Value,
     ) -> Result<()> {
@@ -280,6 +281,9 @@ impl ArgosFs {
         inode.workload_score = inode.workload_score * 0.90 + 2.0;
         inode.mtime = now;
         inode.ctime = now;
+        if clear_setid {
+            inode.mode &= !(libc::S_ISUID | libc::S_ISGID);
+        }
 
         self.account_blocks_locked(meta, &replaced, false);
         if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
