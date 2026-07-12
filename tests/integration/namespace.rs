@@ -86,6 +86,85 @@ fn invalid_entry_names_are_rejected_before_metadata_changes() {
 }
 
 #[test]
+fn entry_names_longer_than_name_max_are_rejected_consistently() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/source", b"payload", 0o644).unwrap();
+    let source = fs.resolve_path("/source", false).unwrap();
+    let long_name = OsString::from("x".repeat(256));
+
+    for err in [
+        fs.create_file_at(1, &long_name, 0o644).unwrap_err(),
+        fs.mkdir_at(1, &long_name, 0o755).unwrap_err(),
+        fs.symlink_at(1, &long_name, std::path::Path::new("target"))
+            .unwrap_err(),
+        fs.link_at(source, 1, &long_name).unwrap_err(),
+        fs.lookup(1, &long_name).unwrap_err(),
+        fs.unlink_at_as(1, &long_name, 0).unwrap_err(),
+        fs.rmdir_at_as(1, &long_name, 0).unwrap_err(),
+        fs.rename_at(1, OsStr::new("source"), 1, &long_name)
+            .unwrap_err(),
+    ] {
+        assert_eq!(err.errno(), libc::ENAMETOOLONG);
+    }
+
+    assert_eq!(fs.read_file("/source", false).unwrap(), b"payload");
+    assert!(fs.fsck(true, true).unwrap().errors.is_empty());
+}
+
+#[test]
+fn non_root_owner_can_select_a_supplementary_group() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    let file = fs
+        .create_file_at_with_owner(1, OsStr::new("owned"), 0o6755, 65534, 65533)
+        .unwrap();
+
+    let changed = fs
+        .chown_inode_as(file.ino, Some(65534), Some(65532), 65534, &[65532, 65531])
+        .unwrap();
+    assert_eq!(changed.uid, 65534);
+    assert_eq!(changed.gid, 65532);
+    assert_eq!(changed.mode & (libc::S_ISUID | libc::S_ISGID), 0);
+
+    assert_eq!(
+        fs.chown_inode_as(file.ino, Some(65535), None, 65534, &[65532])
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+    assert_eq!(
+        fs.chown_inode_as(file.ino, None, Some(65530), 65534, &[65532])
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+
+    let txid = fs.metadata_snapshot().txid;
+    let unchanged = fs.chown_inode_as(file.ino, None, None, 12345, &[]).unwrap();
+    assert_eq!(unchanged.uid, 65534);
+    assert_eq!(unchanged.gid, 65532);
+    assert_eq!(fs.metadata_snapshot().txid, txid);
+}
+
+#[test]
+fn unlinking_a_hard_link_updates_the_surviving_inode_ctime() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    fs.write_file("/source", b"payload", 0o644).unwrap();
+    let ino = fs.resolve_path("/source", false).unwrap();
+    fs.link_at(ino, 1, OsStr::new("alias")).unwrap();
+    let before = fs.attr_inode(ino).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    fs.unlink_at_as(1, OsStr::new("alias"), 0).unwrap();
+
+    let after = fs.attr_inode(ino).unwrap();
+    assert_eq!(after.nlink, 1);
+    assert!(after.ctime > before.ctime);
+}
+
+#[test]
 fn readdir_reports_real_parent_for_dotdot() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
