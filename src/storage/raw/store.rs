@@ -522,19 +522,18 @@ fn load_or_recover(
 ) -> Result<(Metadata, TransactionReport)> {
     let mut candidates = Vec::new();
     for sb in superblocks {
-        candidates.extend(read_metadata_candidates(backend, sb)?);
+        candidates.extend(
+            read_metadata_candidates(backend, sb)?
+                .into_iter()
+                .map(|(metadata, report)| (sb.disk_id.clone(), metadata, report)),
+        );
     }
     let mut report = TransactionReport::default();
     report.metadata_candidates = candidates
         .iter()
-        .map(|(_, report)| report.clone())
+        .map(|(_, _, report)| report.clone())
         .collect();
-    let mut best = candidates
-        .into_iter()
-        .filter_map(|(metadata, _)| metadata)
-        .max_by(|left, right| {
-            (left.txid, left.integrity.generation).cmp(&(right.txid, right.integrity.generation))
-        });
+    let mut best = select_quorum_metadata_candidate(&candidates)?;
     let journal_best =
         read_latest_journal_metadata(backend, superblocks, &mut report, best.as_ref())?;
     if let Some(journal_meta) = journal_best {
@@ -558,6 +557,33 @@ fn load_or_recover(
         write_metadata_copies(backend, superblocks, &metadata)?;
     }
     Ok((metadata, report))
+}
+
+fn select_quorum_metadata_candidate(
+    candidates: &[(String, Option<Metadata>, MetadataCandidateReport)],
+) -> Result<Option<Metadata>> {
+    let mut supported =
+        BTreeMap::<(u64, u64, String), (Metadata, std::collections::BTreeSet<String>)>::new();
+    for (disk_id, metadata, _) in candidates {
+        let Some(metadata) = metadata else {
+            continue;
+        };
+        let hash = metadata_hash_for_replay(metadata)?;
+        supported
+            .entry((metadata.txid, metadata.integrity.generation, hash))
+            .or_insert_with(|| (metadata.clone(), std::collections::BTreeSet::new()))
+            .1
+            .insert(disk_id.clone());
+    }
+    Ok(supported
+        .into_iter()
+        .filter(|(_, (metadata, members))| members.len() >= metadata_quorum_requirement(metadata))
+        .max_by_key(|((txid, generation, _), _)| (*txid, *generation))
+        .map(|(_, (metadata, _))| metadata))
+}
+
+fn metadata_quorum_requirement(metadata: &Metadata) -> usize {
+    metadata.disks.len().max(1) / 2 + 1
 }
 
 fn read_metadata_candidates(
@@ -741,7 +767,8 @@ fn read_latest_journal_metadata(
     report: &mut TransactionReport,
     base_metadata: Option<&Metadata>,
 ) -> Result<Option<Metadata>> {
-    let mut best = None;
+    let required = superblocks.len() / 2 + 1;
+    let mut candidates = BTreeMap::<(u64, u64, String), (usize, Metadata)>::new();
     let mut members = Vec::new();
     for sb in superblocks {
         let valid_before = report.valid_entries;
@@ -797,6 +824,7 @@ fn read_latest_journal_metadata(
                         break;
                     }
                     report.valid_entries += 1;
+                    let record_key = (record.txid, record.generation, record.record_hash.clone());
                     report.last_valid_txid = report.last_valid_txid.max(record.txid);
                     report.last_valid_generation =
                         report.last_valid_generation.max(record.generation);
@@ -909,13 +937,10 @@ fn read_latest_journal_metadata(
                         cursor += 36 + len as u64;
                         continue;
                     }
-                    if best
-                        .as_ref()
-                        .map(|metadata: &Metadata| candidate.txid > metadata.txid)
-                        .unwrap_or(true)
-                    {
-                        best = Some(candidate.clone());
-                    }
+                    let entry = candidates
+                        .entry(record_key)
+                        .or_insert_with(|| (0, candidate.clone()));
+                    entry.0 += 1;
                     latest = Some(candidate);
                 }
                 Err(err) => {
@@ -935,7 +960,11 @@ fn read_latest_journal_metadata(
     }
     report.raw_journal_quorum = Some(raw_journal_quorum(&members, superblocks.len()));
     report.raw_journal_members = members;
-    Ok(best)
+    Ok(candidates
+        .into_iter()
+        .filter(|(_, (count, _))| *count >= required)
+        .max_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, (_, metadata))| metadata))
 }
 
 fn raw_journal_quorum(members: &[RawJournalMemberReport], total_members: usize) -> bool {

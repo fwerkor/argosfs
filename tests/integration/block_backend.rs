@@ -940,3 +940,53 @@ fn loop_block_cli_replace_device_rewrites_off_old_member() {
         b"before-replace"
     );
 }
+
+#[test]
+fn raw_recovery_ignores_unquorumed_metadata_and_journal_tail() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let mut cfg = config(2, 1);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "quorum", false).unwrap();
+    fs.write_file("/value", b"committed", 0o644).unwrap();
+    fs.sync().unwrap();
+    let committed = fs.metadata_snapshot();
+    drop(fs);
+
+    let mut uncommitted = committed.clone();
+    uncommitted.raw_pool.pool_name = "unquorumed".to_string();
+    uncommitted.txid += 1;
+    let previous_hash = uncommitted.integrity.meta_hash.clone();
+    journal::prepare_metadata_integrity_with_previous(&mut uncommitted, previous_hash).unwrap();
+
+    let disk_id = "disk-0000".to_string();
+    let backend = FileBlockBackend::open_with_ids(
+        BackendKind::LoopBlock,
+        vec![(disk_id, images[0].clone())],
+        true,
+    )
+    .unwrap();
+    let superblock = argosfs::raw_store::inspect_device(BackendKind::LoopBlock, images[0].clone())
+        .unwrap()
+        .0;
+    argosfs::raw_store::append_transaction(
+        &backend,
+        std::slice::from_ref(&superblock),
+        &uncommitted,
+        "unquorumed-tail",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    argosfs::raw_store::write_metadata_copies(
+        &backend,
+        std::slice::from_ref(&superblock),
+        &uncommitted,
+    )
+    .unwrap();
+    drop(backend);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(reopened.metadata_snapshot().txid, committed.txid);
+    assert_eq!(reopened.metadata_snapshot().raw_pool.pool_name, "quorum");
+    assert_eq!(reopened.read_file("/value", true).unwrap(), b"committed");
+}
