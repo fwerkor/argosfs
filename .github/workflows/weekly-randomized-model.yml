@@ -122,12 +122,48 @@ jobs:
           path: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}-${{ matrix.seed }}
           if-no-files-found: ignore
 
+  block-fault-injection:
+    name: Raw block EIO and corruption injection
+    needs: prepare-matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: scripts/ci/install-deps.sh
+
+      - name: Install Rust toolchain
+        run: scripts/ci/install-rust.sh stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: weekly-block-fault-injection
+
+      - name: Inject block EIO and raw corruption
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-block-fault-injection
+          ARGOSFS_REQUIRE_BLOCK_FAULTS: "1"
+          ARGOSFS_BLOCK_FAULT_SEED: ${{ fromJSON(needs.prepare-matrix.outputs.seeds)[0] }}
+        run: scripts/tests/host/block_fault_injection.sh
+
+      - name: Upload block fault artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-block-fault-injection
+          path: ${{ runner.temp }}/weekly-block-fault-injection
+          if-no-files-found: error
+
   open-issue-on-failure:
     name: Open issue on weekly failure
     needs:
       - prepare-matrix
       - randomized-model-stress
-    if: ${{ always() && github.event_name == 'schedule' && (needs.prepare-matrix.result != 'success' || needs.randomized-model-stress.result != 'success') }}
+      - block-fault-injection
+    if: ${{ always() && github.event_name == 'schedule' && (needs.prepare-matrix.result != 'success' || needs.randomized-model-stress.result != 'success' || needs.block-fault-injection.result != 'success') }}
     runs-on: ubuntu-24.04
     steps:
       - name: Open or update failure issue

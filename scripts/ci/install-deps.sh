@@ -8,6 +8,7 @@ sudo apt-get install -y --no-install-recommends \
 	bison \
 	build-essential \
 	clang \
+	dmsetup \
 	file \
 	flex \
 	fuse3 \
