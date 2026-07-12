@@ -75,13 +75,9 @@ impl ArgosFs {
         self.account_blocks_locked(meta, &old_blocks, false);
         if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
         {
-            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                if let Some(rollback) = rollback {
-                    *meta = rollback;
-                }
-                self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
-            } else if matches!(&err, ArgosError::Conflict(_)) {
-                self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
+            self.delete_blocks_locked(meta, &new_blocks_for_cleanup);
+            if let Some(rollback) = rollback {
+                *meta = rollback;
             }
             return Err(err);
         }
@@ -288,13 +284,9 @@ impl ArgosFs {
         self.account_blocks_locked(meta, &replaced, false);
         if let Err(err) = self.commit_locked_with_previous(meta, rollback.as_ref(), action, details)
         {
-            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                if let Some(rollback) = rollback {
-                    *meta = rollback;
-                }
-                self.delete_blocks_locked(meta, &written_blocks);
-            } else if matches!(&err, ArgosError::Conflict(_)) {
-                self.delete_blocks_locked(meta, &written_blocks);
+            self.delete_blocks_locked(meta, &written_blocks);
+            if let Some(rollback) = rollback {
+                *meta = rollback;
             }
             return Err(err);
         }

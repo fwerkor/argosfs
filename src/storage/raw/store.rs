@@ -323,6 +323,13 @@ fn write_metadata_slot(
     Ok(())
 }
 
+pub fn recover_metadata(
+    backend: &dyn StorageBackend,
+    superblocks: &[RawSuperblock],
+) -> Result<Metadata> {
+    load_or_recover(backend, superblocks, false).map(|(metadata, _)| metadata)
+}
+
 pub fn audit(
     backend: &dyn StorageBackend,
     superblocks: &[RawSuperblock],

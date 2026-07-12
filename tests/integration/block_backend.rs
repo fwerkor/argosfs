@@ -1042,3 +1042,30 @@ fn raw_recovery_ignores_journal_head_without_membership_quorum() {
         Some(true)
     );
 }
+
+#[test]
+fn failed_raw_commit_restores_in_memory_metadata_before_returning() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&images, config(2, 1), 32 * 1024 * 1024, "capos-root", false).unwrap();
+    fs.write_file("/atomic-value", b"old", 0o644).unwrap();
+    fs.sync().unwrap();
+
+    std::env::set_var(
+        "ARGOSFS_CRASH_POINT",
+        argosfs::types::FaultPoint::AfterPartialJournalFanout.as_str(),
+    );
+    let err = fs
+        .write_file("/atomic-value", b"must-not-survive", 0o644)
+        .unwrap_err();
+    std::env::remove_var("ARGOSFS_CRASH_POINT");
+    assert!(matches!(err, ArgosError::InjectedCrash(_)));
+    assert_eq!(fs.read_file("/atomic-value", false).unwrap(), b"old");
+
+    fs.sync().unwrap();
+    drop(fs);
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(reopened.read_file("/atomic-value", false).unwrap(), b"old");
+}

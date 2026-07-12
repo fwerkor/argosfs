@@ -827,10 +827,8 @@ impl ArgosFs {
             "mknod",
             json!({"parent": parent, "name": name, "inode": ino, "mode": mode, "rdev": rdev}),
         ) {
-            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                if let Some(rollback) = rollback {
-                    *meta = rollback;
-                }
+            if let Some(rollback) = rollback {
+                *meta = rollback;
             }
             return Err(err);
         }
@@ -1306,8 +1304,8 @@ impl ArgosFs {
             }
             let superblocks = self.active_superblocks_locked(meta)?;
             let details = json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details});
-            if self.open_backend_covers_superblocks(&superblocks) {
-                return match previous_metadata {
+            let result = if self.open_backend_covers_superblocks(&superblocks) {
+                match previous_metadata {
                     Some(previous) => raw_store::append_transaction_with_previous(
                         &*self.backend,
                         &superblocks,
@@ -1323,22 +1321,35 @@ impl ArgosFs {
                         action,
                         details,
                     ),
-                };
-            }
-            let backend = self.active_block_backend_locked(meta, true)?;
-            return match previous_metadata {
-                Some(previous) => raw_store::append_transaction_with_previous(
-                    &backend,
-                    &superblocks,
-                    meta,
-                    Some(previous),
-                    action,
-                    details,
-                ),
-                None => {
-                    raw_store::append_transaction(&backend, &superblocks, meta, action, details)
+                }
+            } else {
+                let backend = self.active_block_backend_locked(meta, true)?;
+                match previous_metadata {
+                    Some(previous) => raw_store::append_transaction_with_previous(
+                        &backend,
+                        &superblocks,
+                        meta,
+                        Some(previous),
+                        action,
+                        details,
+                    ),
+                    None => {
+                        raw_store::append_transaction(&backend, &superblocks, meta, action, details)
+                    }
                 }
             };
+            if let Err(commit_err) = result {
+                if previous_metadata.is_none() {
+                    if let Err(recovery_err) = self.restore_raw_metadata_locked(meta, &superblocks)
+                    {
+                        return Err(ArgosError::CorruptedMetadata(format!(
+                            "raw transaction failed ({commit_err}) and metadata rollback failed ({recovery_err})"
+                        )));
+                    }
+                }
+                return Err(commit_err);
+            }
+            return Ok(());
         }
         let result = journal::append_transaction_checked(
             &self.root,
@@ -1361,6 +1372,22 @@ impl ArgosFs {
         }
 
         result
+    }
+
+    fn restore_raw_metadata_locked(
+        &self,
+        meta: &mut Metadata,
+        superblocks: &[RawSuperblock],
+    ) -> Result<()> {
+        let recovered = if self.open_backend_covers_superblocks(superblocks) {
+            raw_store::recover_metadata(&*self.backend, superblocks)?
+        } else {
+            let backend = self.active_block_backend_locked(meta, false)?;
+            raw_store::recover_metadata(&backend, superblocks)?
+        };
+        *meta = recovered;
+        recompute_disk_usage_from_metadata(meta);
+        Ok(())
     }
 
     fn journal_locked(

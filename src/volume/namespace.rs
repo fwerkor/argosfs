@@ -515,13 +515,9 @@ impl ArgosFs {
             "write-range",
             json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "aligned-eof-append"}),
         ) {
-            if matches!(&err, ArgosError::InjectedCrash(point) if point == "before-journal") {
-                if let Some(rollback) = rollback {
-                    *meta = rollback;
-                }
-                self.delete_blocks_locked(meta, &written_blocks);
-            } else if matches!(&err, ArgosError::Conflict(_)) {
-                self.delete_blocks_locked(meta, &written_blocks);
+            self.delete_blocks_locked(meta, &written_blocks);
+            if let Some(rollback) = rollback {
+                *meta = rollback;
             }
             return Err(err);
         }
