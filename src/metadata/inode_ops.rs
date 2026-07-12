@@ -37,4 +37,5 @@ pub struct RenamePolicy {
     pub no_replace: bool,
     pub exchange: bool,
     pub uid: Option<u32>,
+    pub preserve_replaced_inode: bool,
 }

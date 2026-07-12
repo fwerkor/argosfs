@@ -870,6 +870,7 @@ impl ArgosFs {
         name: &str,
         dir: bool,
         uid: Option<u32>,
+        preserve_unlinked: bool,
     ) -> Result<()> {
         validate_entry_name(name)?;
         let child = *self
@@ -906,7 +907,7 @@ impl ArgosFs {
             meta.inodes.remove(&child);
         } else if let Some(live) = meta.inodes.get_mut(&child) {
             live.nlink = live.nlink.saturating_sub(1);
-            if live.nlink == 0 {
+            if live.nlink == 0 && !preserve_unlinked {
                 blocks_to_delete = live.blocks.clone();
                 meta.inodes.remove(&child);
             }
@@ -918,6 +919,23 @@ impl ArgosFs {
             json!({"parent": parent, "name": name, "inode": child}),
         )?;
         self.delete_blocks_locked(meta, &blocks_to_delete);
+        Ok(())
+    }
+
+    pub fn reap_unlinked_inode(&self, ino: InodeId) -> Result<()> {
+        let mut meta = self.meta.write();
+        self.ensure_block_backend_writable_locked(&meta)?;
+        let Some(inode) = meta.inodes.get(&ino).cloned() else {
+            return Ok(());
+        };
+        if inode.nlink != 0 {
+            return Ok(());
+        }
+        let blocks = inode.blocks.clone();
+        meta.inodes.remove(&ino);
+        self.account_blocks_locked(&mut meta, &blocks, false);
+        self.commit_locked(&mut meta, "orphan-reap", json!({"inode": ino}))?;
+        self.delete_blocks_locked(&mut meta, &blocks);
         Ok(())
     }
 
@@ -1057,7 +1075,7 @@ impl ArgosFs {
             } else if let Some(live) = meta.inodes.get_mut(&existing) {
                 live.nlink = live.nlink.saturating_sub(1);
                 live.ctime = now_f64();
-                if live.nlink == 0 {
+                if live.nlink == 0 && !policy.preserve_replaced_inode {
                     blocks_to_delete = live.blocks.clone();
                     meta.inodes.remove(&existing);
                 }

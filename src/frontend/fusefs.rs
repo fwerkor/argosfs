@@ -533,6 +533,7 @@ impl Filesystem for ArgosFuse {
             no_replace: flags.contains(RenameFlags::RENAME_NOREPLACE),
             exchange: flags.contains(RenameFlags::RENAME_EXCHANGE),
             uid: Some(req.uid()),
+            preserve_replaced_inode: false,
         };
         let result = self
             .require_access(req, parent, libc::W_OK | libc::X_OK)

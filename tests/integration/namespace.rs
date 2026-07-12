@@ -288,6 +288,7 @@ fn rename_policy_supports_noreplace_exchange_and_sticky_checks() {
                 no_replace: true,
                 exchange: false,
                 uid: Some(0),
+                preserve_replaced_inode: false,
             },
         )
         .unwrap_err();
@@ -302,6 +303,7 @@ fn rename_policy_supports_noreplace_exchange_and_sticky_checks() {
             no_replace: false,
             exchange: true,
             uid: Some(0),
+            preserve_replaced_inode: false,
         },
     )
     .unwrap();
@@ -393,4 +395,51 @@ fn range_write_propagates_read_errors_without_overwriting_existing_data() {
     std::env::set_var("ARGOSFS_KEY", key);
     assert_eq!(fs.read_file("/secret", true).unwrap(), b"original secret");
     std::env::remove_var("ARGOSFS_KEY");
+}
+
+#[test]
+fn unlinked_open_inode_survives_until_explicit_reap() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    fs.write_file("/open-unlink", b"still-open", 0o644).unwrap();
+    let ino = fs.resolve_path("/open-unlink", false).unwrap();
+
+    fs.unlink_at_as_preserving_open(1, OsStr::new("open-unlink"), 0)
+        .unwrap();
+    assert!(fs.resolve_path("/open-unlink", false).is_err());
+    assert_eq!(fs.attr_inode(ino).unwrap().nlink, 0);
+    assert_eq!(fs.read_inode(ino, 0, 64, false).unwrap(), b"still-open");
+
+    fs.reap_unlinked_inode(ino).unwrap();
+    assert!(fs.attr_inode(ino).is_err());
+}
+
+#[test]
+fn rename_replacement_can_preserve_open_target_inode() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    fs.write_file("/source", b"source", 0o644).unwrap();
+    fs.write_file("/target", b"open-target", 0o644).unwrap();
+    let target_ino = fs.resolve_path("/target", false).unwrap();
+
+    fs.rename_at_with_policy(
+        1,
+        OsStr::new("source"),
+        1,
+        OsStr::new("target"),
+        argosfs::volume::RenamePolicy {
+            preserve_replaced_inode: true,
+            ..argosfs::volume::RenamePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(fs.read_file("/target", false).unwrap(), b"source");
+    assert_eq!(fs.attr_inode(target_ino).unwrap().nlink, 0);
+    assert_eq!(
+        fs.read_inode(target_ino, 0, 64, false).unwrap(),
+        b"open-target"
+    );
+
+    fs.reap_unlinked_inode(target_ino).unwrap();
+    assert!(fs.attr_inode(target_ino).is_err());
 }

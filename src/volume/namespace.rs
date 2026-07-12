@@ -625,7 +625,14 @@ impl ArgosFs {
         let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.write();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
-        self.unlink_locked(&mut meta, parent_ino, &name, false, Some(current_uid()))
+        self.unlink_locked(
+            &mut meta,
+            parent_ino,
+            &name,
+            false,
+            Some(current_uid()),
+            false,
+        )
     }
 
     pub fn unlink_at(&self, parent: InodeId, name: &OsStr) -> Result<()> {
@@ -635,7 +642,18 @@ impl ArgosFs {
     pub fn unlink_at_as(&self, parent: InodeId, name: &OsStr, uid: u32) -> Result<()> {
         let name = entry_name_from_os(name)?;
         let mut meta = self.meta.write();
-        self.unlink_locked(&mut meta, parent, &name, false, Some(uid))
+        self.unlink_locked(&mut meta, parent, &name, false, Some(uid), false)
+    }
+
+    pub fn unlink_at_as_preserving_open(
+        &self,
+        parent: InodeId,
+        name: &OsStr,
+        uid: u32,
+    ) -> Result<()> {
+        let name = entry_name_from_os(name)?;
+        let mut meta = self.meta.write();
+        self.unlink_locked(&mut meta, parent, &name, false, Some(uid), true)
     }
 
     pub fn rmdir_path(&self, path: &str) -> Result<()> {
@@ -643,7 +661,14 @@ impl ArgosFs {
         let name = entry_name_from_str(&name)?;
         let mut meta = self.meta.write();
         let parent_ino = self.resolve_path_locked(&meta, &parent, true, 40)?;
-        self.unlink_locked(&mut meta, parent_ino, &name, true, Some(current_uid()))
+        self.unlink_locked(
+            &mut meta,
+            parent_ino,
+            &name,
+            true,
+            Some(current_uid()),
+            false,
+        )
     }
 
     pub fn rmdir_at(&self, parent: InodeId, name: &OsStr) -> Result<()> {
@@ -653,7 +678,7 @@ impl ArgosFs {
     pub fn rmdir_at_as(&self, parent: InodeId, name: &OsStr, uid: u32) -> Result<()> {
         let name = entry_name_from_os(name)?;
         let mut meta = self.meta.write();
-        self.unlink_locked(&mut meta, parent, &name, true, Some(uid))
+        self.unlink_locked(&mut meta, parent, &name, true, Some(uid), false)
     }
 
     pub fn rename_path(&self, old: &str, new: &str) -> Result<()> {
