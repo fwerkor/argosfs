@@ -9,10 +9,14 @@ on:
         description: Number of randomized operations per seed
         required: false
         default: "1200"
-      seeds:
-        description: Comma-separated deterministic seeds
+      seed_count:
+        description: Number of fresh random seeds when replay seeds are not supplied
         required: false
-        default: "0xA2605F5,0xC0FFEE,0x5EED2026"
+        default: "12"
+      seeds:
+        description: Optional comma-separated replay seeds; leave empty for fresh random seeds
+        required: false
+        default: ""
       max_file_size:
         description: Maximum generated file size in bytes
         required: false
@@ -31,38 +35,39 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       seeds: ${{ steps.seeds.outputs.seeds }}
+      seed_source: ${{ steps.seeds.outputs.source }}
+      seed_count: ${{ steps.seeds.outputs.count }}
     steps:
-      - name: Validate and serialize seeds
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Generate and record seed matrix
         id: seeds
         env:
-          REQUESTED_SEEDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seeds || '0xA2605F5,0xC0FFEE,0x5EED2026' }}
+          REQUESTED_SEEDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seeds || '' }}
+          REQUESTED_SEED_COUNT: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_count || '12' }}
+          SEED_MANIFEST: ${{ runner.temp }}/weekly-random-seeds.json
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import re
+          python3 scripts/ci/generate-random-seeds.py \
+            --count "$REQUESTED_SEED_COUNT" \
+            --seeds "$REQUESTED_SEEDS" \
+            --manifest "$SEED_MANIFEST" \
+            --github-output "$GITHUB_OUTPUT"
+          cat "$SEED_MANIFEST"
+          {
+            echo "### Weekly randomized seed matrix"
+            echo
+            echo "- Source: ${{ steps.seeds.outputs.source }}"
+            echo "- Count: ${{ steps.seeds.outputs.count }}"
+            echo "- Manifest artifact: weekly-random-seed-manifest"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          raw = os.environ["REQUESTED_SEEDS"]
-          seeds = []
-          for value in raw.split(","):
-              seed = value.strip()
-              if not seed:
-                  continue
-              if not re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", seed):
-                  raise SystemExit(f"invalid seed: {seed!r}")
-              if seed not in seeds:
-                  seeds.append(seed)
-
-          if not seeds:
-              raise SystemExit("at least one randomized-model seed is required")
-          if len(seeds) > 16:
-              raise SystemExit("at most 16 randomized-model seeds are supported")
-
-          serialized = json.dumps(seeds, separators=(",", ":"))
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"seeds={serialized}\n")
-          print(f"Randomized-model seed matrix: {serialized}")
-          PY
+      - name: Upload seed manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-random-seed-manifest
+          path: ${{ runner.temp }}/weekly-random-seeds.json
+          if-no-files-found: error
 
   randomized-model-stress:
     name: Randomized model stress (${{ matrix.arch }}, ${{ matrix.seed }})
@@ -143,7 +148,7 @@ jobs:
           - Workflow: $GITHUB_WORKFLOW
           - Run ID: $GITHUB_RUN_ID
 
-          Each architecture/seed pair runs as an independent shard. The uploaded shard artifacts contain operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in logs/metadata.json.
+          Each architecture/seed pair runs as an independent shard. Download `weekly-random-seed-manifest` for the complete generated seed set. Each shard artifact contains operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in `logs/metadata.json`.
           EOF
           )"
           if [ -n "$existing" ]; then
