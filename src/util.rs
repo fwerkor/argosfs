@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,6 +33,12 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn ensure_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
 pub struct FileLock {
     file: File,
 }
@@ -46,7 +53,9 @@ impl FileLock {
             .truncate(false)
             .read(true)
             .write(true)
+            .mode(0o600)
             .open(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
         if rc != 0 {
             return Err(ArgosError::Io(std::io::Error::last_os_error()));
@@ -71,7 +80,11 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
         now_f64().to_bits()
     ));
     let write_result = (|| -> Result<()> {
-        let mut file = File::create(&tmp)?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)?;
         file.write_all(data)?;
         file.sync_all()?;
         Ok(())
@@ -92,7 +105,12 @@ pub fn append_json_line<T: serde::Serialize>(path: &Path, value: &T) -> Result<(
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     serde_json::to_writer(&mut file, value)?;
     file.write_all(b"\n")?;
     file.sync_all()?;

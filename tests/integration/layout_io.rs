@@ -54,10 +54,58 @@ fn range_write_rewrites_only_affected_stripe_window() {
         .map(|block| block.stripe_id.clone())
         .collect::<Vec<_>>();
     assert_eq!(unchanged_prefix, after_prefix);
+    let unchanged_suffix = before_blocks
+        .iter()
+        .filter(|block| block.raw_offset >= 16)
+        .map(|block| block.stripe_id.clone())
+        .collect::<Vec<_>>();
+    let after_suffix = after_blocks
+        .iter()
+        .filter(|block| block.raw_offset >= 16)
+        .map(|block| block.stripe_id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(unchanged_suffix, after_suffix);
+    assert_eq!(after.next_stripe - before.next_stripe, 1);
 
     let mut expected = original.to_vec();
     expected[10..12].copy_from_slice(b"XX");
     assert_eq!(fs.read_file("/file", true).unwrap(), expected);
+}
+
+#[test]
+fn failed_multistripe_host_write_rolls_back_all_provisional_shards() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.chunk_size = 1024;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 1, false).unwrap();
+    let ino = fs.create_file_path("/victim", 0o600).unwrap();
+    let before = fs.metadata_snapshot();
+    let next = before.next_stripe;
+    let failing = format!("s{:016x}", next + 1);
+    let blocker = tmp
+        .path()
+        .join(".argosfs/devices/disk-0000/shards")
+        .join(&failing[failing.len() - 2..])
+        .join(format!("{failing}.000.blk"));
+    fs::create_dir_all(&blocker).unwrap();
+
+    assert!(fs.write_inode_range(ino, 0, &vec![b'x'; 3 * 1024]).is_err());
+
+    let after = fs.metadata_snapshot();
+    assert_eq!(after.next_stripe, before.next_stripe);
+    assert_eq!(
+        after.disks["disk-0000"].used_bytes,
+        before.disks["disk-0000"].used_bytes
+    );
+    assert_eq!(after.inodes[&ino].size, 0);
+    let first = format!("s{next:016x}");
+    let first_path = tmp
+        .path()
+        .join(".argosfs/devices/disk-0000/shards")
+        .join(&first[first.len() - 2..])
+        .join(format!("{first}.000.blk"));
+    assert!(!first_path.exists());
 }
 
 #[test]
@@ -230,6 +278,29 @@ fn fallocate_extends_regular_file_with_zeroes() {
             .unwrap_err()
             .errno(),
         libc::ENOTSUP
+    );
+}
+
+#[test]
+fn sparse_extension_does_not_materialize_the_hole_or_exhaust_memory() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create(tmp.path(), cfg, 1, false).unwrap();
+    fs.write_file("/sparse", b"abc", 0o644).unwrap();
+    let ino = fs.resolve_path("/sparse", true).unwrap();
+    let size = 512 * 1024 * 1024u64;
+
+    fs.truncate_inode(ino, size).unwrap();
+
+    let inode = fs.metadata_snapshot().inodes[&ino].clone();
+    assert_eq!(inode.size, size);
+    assert_eq!(inode.blocks.len(), 1);
+    assert_eq!(fs.read_inode(ino, 0, 3, false).unwrap(), b"abc");
+    assert_eq!(fs.read_inode(ino, size - 1, 1, false).unwrap(), b"\0");
+    assert_eq!(
+        fs.read_file("/sparse", false).unwrap_err().errno(),
+        libc::EFBIG
     );
 }
 

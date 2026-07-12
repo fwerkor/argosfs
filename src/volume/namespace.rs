@@ -208,19 +208,96 @@ impl ArgosFs {
         dst_offset: u64,
         len: u64,
     ) -> Result<usize> {
+        self.copy_inode_range_checked(src_ino, src_offset, dst_ino, dst_offset, len, false)
+    }
+
+    pub fn copy_inode_range_as(
+        &self,
+        src_ino: InodeId,
+        src_offset: u64,
+        dst_ino: InodeId,
+        dst_offset: u64,
+        len: u64,
+    ) -> Result<usize> {
+        self.copy_inode_range_checked(src_ino, src_offset, dst_ino, dst_offset, len, true)
+    }
+
+    fn copy_inode_range_checked(
+        &self,
+        src_ino: InodeId,
+        src_offset: u64,
+        dst_ino: InodeId,
+        dst_offset: u64,
+        len: u64,
+        clear_setid: bool,
+    ) -> Result<usize> {
         let len = usize::try_from(len)
             .map_err(|_| ArgosError::Invalid("copy_file_range length is too large".to_string()))?;
         if len == 0 {
             return Ok(0);
         }
-        let data = self.read_inode(src_ino, src_offset, len, true)?;
-        if data.is_empty() {
-            return Ok(0);
+        if src_ino == dst_ino {
+            let src_end = src_offset
+                .checked_add(len as u64)
+                .ok_or_else(|| ArgosError::Invalid("copy source range overflow".to_string()))?;
+            let dst_end = dst_offset.checked_add(len as u64).ok_or_else(|| {
+                ArgosError::Invalid("copy destination range overflow".to_string())
+            })?;
+            if src_offset < dst_end && dst_offset < src_end {
+                return Err(ArgosError::Invalid(
+                    "overlapping same-file copy_file_range is unsupported".to_string(),
+                ));
+            }
         }
-        self.write_inode_range(dst_ino, dst_offset, &data)
+
+        const COPY_CHUNK_BYTES: usize = 1024 * 1024;
+        let mut copied = 0usize;
+        while copied < len {
+            let chunk_len = (len - copied).min(COPY_CHUNK_BYTES);
+            let source = src_offset
+                .checked_add(copied as u64)
+                .ok_or_else(|| ArgosError::Invalid("copy source offset overflow".to_string()))?;
+            let destination = dst_offset.checked_add(copied as u64).ok_or_else(|| {
+                ArgosError::Invalid("copy destination offset overflow".to_string())
+            })?;
+            let data = self.read_inode(src_ino, source, chunk_len, true)?;
+            if data.is_empty() {
+                break;
+            }
+            match self.write_inode_range_checked(dst_ino, destination, &data, None, clear_setid) {
+                Ok(written) => copied = copied.saturating_add(written),
+                Err(_) if copied > 0 => return Ok(copied),
+                Err(err) => return Err(err),
+            }
+            if data.len() < chunk_len {
+                break;
+            }
+        }
+        Ok(copied)
     }
 
     pub fn fallocate_inode(&self, ino: InodeId, offset: u64, length: u64, mode: i32) -> Result<()> {
+        self.fallocate_inode_checked(ino, offset, length, mode, false)
+    }
+
+    pub fn fallocate_inode_as(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        length: u64,
+        mode: i32,
+    ) -> Result<()> {
+        self.fallocate_inode_checked(ino, offset, length, mode, true)
+    }
+
+    fn fallocate_inode_checked(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        length: u64,
+        mode: i32,
+        clear_setid: bool,
+    ) -> Result<()> {
         if mode != 0 {
             return Err(ArgosError::Unsupported(format!(
                 "unsupported fallocate mode {mode:#x}"
@@ -246,7 +323,7 @@ impl ArgosFs {
             }
         };
         if end > size {
-            self.truncate_inode(ino, end)?;
+            self.truncate_inode_checked(ino, end, clear_setid)?;
         }
         Ok(())
     }
@@ -331,7 +408,7 @@ impl ArgosFs {
     }
 
     pub fn write_inode_range(&self, ino: InodeId, offset: u64, data: &[u8]) -> Result<usize> {
-        self.write_inode_range_checked(ino, offset, data, None)
+        self.write_inode_range_checked(ino, offset, data, None, false)
     }
 
     pub fn write_inode_range_as(
@@ -342,7 +419,7 @@ impl ArgosFs {
         uid: u32,
         gid: u32,
     ) -> Result<usize> {
-        self.write_inode_range_checked(ino, offset, data, Some((uid, gid)))
+        self.write_inode_range_checked(ino, offset, data, Some((uid, gid)), true)
     }
 
     pub(super) fn write_inode_range_checked(
@@ -351,6 +428,7 @@ impl ArgosFs {
         offset: u64,
         data: &[u8],
         access: Option<(u32, u32)>,
+        clear_setid: bool,
     ) -> Result<usize> {
         let start = usize::try_from(offset)
             .map_err(|_| ArgosError::Invalid("write offset is too large".to_string()))?;
@@ -378,13 +456,12 @@ impl ArgosFs {
             return Ok(0);
         }
         if start == old_size && start % stripe_raw_size == 0 {
-            self.append_inode_data_locked(&mut meta, ino, start, data, access.is_some())?;
+            self.append_inode_data_locked(&mut meta, ino, start, data, clear_setid)?;
             return Ok(data.len());
         }
         let new_size = old_size.max(end);
         let affected_start = (start / stripe_raw_size) * stripe_raw_size;
         let affected_end = end
-            .max(old_size.min(new_size))
             .div_ceil(stripe_raw_size)
             .saturating_mul(stripe_raw_size)
             .min(new_size);
@@ -417,7 +494,7 @@ impl ArgosFs {
             new_size,
             &window,
             data.len() as u64,
-            access.is_some(),
+            clear_setid,
             "write-range",
             json!({"inode": ino, "offset": offset, "bytes": data.len(), "rewrite": "stripe-window-local"}),
         )?;
@@ -564,26 +641,40 @@ impl ArgosFs {
             return Ok(());
         }
 
-        let changed_start = old_size.min(new_size);
-        let affected_start = (changed_start / stripe_raw_size) * stripe_raw_size;
-        let affected_end = if new_size > affected_start {
-            new_size
-                .div_ceil(stripe_raw_size)
-                .saturating_mul(stripe_raw_size)
-                .min(new_size)
-        } else {
-            affected_start
-        };
+        if new_size > old_size {
+            let inline = {
+                let inode = meta
+                    .inodes
+                    .get(&ino)
+                    .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
+                decode_inline_data(inode)?
+            };
+            let (affected_start, affected_end, window) = if let Some(inline) = inline {
+                (0, old_size, inline)
+            } else {
+                (old_size, old_size, Vec::new())
+            };
+            return self.rewrite_inode_window_locked(
+                &mut meta,
+                ino,
+                affected_start,
+                affected_end,
+                new_size,
+                &window,
+                0,
+                clear_setid,
+                "truncate",
+                json!({"inode": ino, "size": requested_size, "rewrite": "sparse-extend"}),
+            );
+        }
 
-        let mut window = if affected_start < affected_end {
+        let affected_start = (new_size / stripe_raw_size) * stripe_raw_size;
+        let affected_end = new_size;
+        let window = if affected_start < affected_end {
             self.decode_inode_window_locked(&mut meta, ino, affected_start, affected_end)?
         } else {
             Vec::new()
         };
-        window.resize(affected_end.saturating_sub(affected_start), 0);
-        if new_size < affected_end {
-            window.truncate(new_size.saturating_sub(affected_start));
-        }
 
         self.rewrite_inode_window_locked(
             &mut meta,
@@ -889,21 +980,51 @@ impl ArgosFs {
     }
 
     pub fn chmod_inode(&self, ino: InodeId, mode: u32) -> Result<NodeAttr> {
+        self.chmod_inode_checked(ino, mode, None)
+    }
+
+    pub fn chmod_inode_as(
+        &self,
+        ino: InodeId,
+        mode: u32,
+        uid: u32,
+        gids: &[u32],
+    ) -> Result<NodeAttr> {
+        self.chmod_inode_checked(ino, mode, Some((uid, gids)))
+    }
+
+    fn chmod_inode_checked(
+        &self,
+        ino: InodeId,
+        mode: u32,
+        caller: Option<(u32, &[u32])>,
+    ) -> Result<NodeAttr> {
         let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
         let inode = meta
             .inodes
             .get_mut(&ino)
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
-        inode.mode = (inode.mode & !0o7777) | (mode & 0o7777);
+        let mut effective_mode = mode & 0o7777;
+        if let Some((uid, gids)) = caller {
+            if uid != 0 && uid != inode.uid {
+                return Err(ArgosError::PermissionDenied(
+                    "chmod requires file ownership or root".to_string(),
+                ));
+            }
+            if uid != 0 && effective_mode & libc::S_ISGID != 0 && !gids.contains(&inode.gid) {
+                effective_mode &= !libc::S_ISGID;
+            }
+        }
+        inode.mode = (inode.mode & !0o7777) | effective_mode;
         if let Some(access_acl) = inode.posix_acl_access.as_mut() {
-            acl::apply_mode_to_access_acl(access_acl, mode);
+            acl::apply_mode_to_access_acl(access_acl, effective_mode);
         }
         inode.ctime = now_f64();
         self.commit_locked(
             &mut meta,
             "chmod",
-            json!({"inode": ino, "mode": mode & 0o7777}),
+            json!({"inode": ino, "mode": effective_mode}),
         )?;
         Ok(Self::attr_from_inode(
             meta.inodes.get(&ino).unwrap(),

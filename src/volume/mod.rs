@@ -16,7 +16,7 @@ use crate::raw_store;
 use crate::types::*;
 use crate::util::{
     append_json_line, atomic_write, clean_path, content_hash_hex, content_hash_matches, ensure_dir,
-    now_f64, parent_name, relative_or_absolute, split_path, stable_u01,
+    ensure_private_dir, now_f64, parent_name, relative_or_absolute, split_path, stable_u01,
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
@@ -64,6 +64,7 @@ const BOOT_CRITICAL_XATTR: &str = "system.argosfs.boot_critical";
 const DEFAULT_LAYOUT_ID: &str = "layout-0000";
 const SHARD_CHECKSUM_BLOCK_SIZE: usize = 256 * 1024;
 const INLINE_DATA_MAX: usize = 512;
+const MAX_IN_MEMORY_IO_BYTES: usize = 256 * 1024 * 1024;
 
 mod autopilot;
 mod data_plane;
@@ -147,9 +148,10 @@ impl ArgosFs {
         if system.exists() {
             return Err(ArgosError::AlreadyExists(root.display().to_string()));
         }
-        ensure_dir(&system.join("devices"))?;
-        ensure_dir(&system.join("snapshots"))?;
-        ensure_dir(&system.join("cache"))?;
+        ensure_private_dir(&system)?;
+        ensure_private_dir(&system.join("devices"))?;
+        ensure_private_dir(&system.join("snapshots"))?;
+        ensure_private_dir(&system.join("cache"))?;
         let uuid = Uuid::new_v4().to_string();
         let created_at = now_f64();
         let mut disks = BTreeMap::new();
@@ -157,7 +159,8 @@ impl ArgosFs {
             let id = format!("disk-{index:04}");
             let path = PathBuf::from(format!(".argosfs/devices/{id}"));
             let disk_root = root.join(&path);
-            ensure_dir(&disk_root.join("shards"))?;
+            ensure_private_dir(&disk_root)?;
+            ensure_private_dir(&disk_root.join("shards"))?;
             atomic_write(
                 &disk_root.join("argosfs-disk.json"),
                 serde_json::to_vec_pretty(&json!({
@@ -278,6 +281,7 @@ impl ArgosFs {
             )));
         }
         let _ = RsCodec::new(meta.config.k, meta.config.m)?;
+        harden_host_storage_permissions(&root, &meta)?;
         let cache = BlockCache::new(
             root.join(".argosfs/cache/l2"),
             64 * 1024 * 1024,
@@ -940,13 +944,13 @@ impl ArgosFs {
                 meta.inodes.remove(&child);
             }
         }
-        self.account_blocks_locked(meta, &blocks_to_delete, false);
+        self.stage_block_reclamation_locked(meta, &blocks_to_delete);
         self.commit_locked(
             meta,
             if dir { "rmdir" } else { "unlink" },
             json!({"parent": parent, "name": name, "inode": child}),
         )?;
-        self.delete_blocks_locked(meta, &blocks_to_delete);
+        self.finish_block_reclamation_locked(meta, &blocks_to_delete);
         Ok(())
     }
 
@@ -961,9 +965,9 @@ impl ArgosFs {
         }
         let blocks = inode.blocks.clone();
         meta.inodes.remove(&ino);
-        self.account_blocks_locked(&mut meta, &blocks, false);
+        self.stage_block_reclamation_locked(&mut meta, &blocks);
         self.commit_locked(&mut meta, "orphan-reap", json!({"inode": ino}))?;
-        self.delete_blocks_locked(&mut meta, &blocks);
+        self.finish_block_reclamation_locked(&mut meta, &blocks);
         Ok(())
     }
 
@@ -1109,7 +1113,7 @@ impl ArgosFs {
                 }
             }
         }
-        self.account_blocks_locked(meta, &blocks_to_delete, false);
+        self.stage_block_reclamation_locked(meta, &blocks_to_delete);
         self.dir_inode_mut_locked(meta, old_parent)?
             .entries
             .remove(old_name);
@@ -1132,7 +1136,7 @@ impl ArgosFs {
             "rename",
             json!({"old_parent": old_parent, "old_name": old_name, "new_parent": new_parent, "new_name": new_name, "inode": child}),
         )?;
-        self.delete_blocks_locked(meta, &blocks_to_delete);
+        self.finish_block_reclamation_locked(meta, &blocks_to_delete);
         Ok(())
     }
 
@@ -1459,13 +1463,13 @@ impl ArgosFs {
             json!({"txid": meta.txid, "previous_meta_hash": previous_meta_hash, "details": details}),
         );
 
-        let should_reload = match &result {
-            Err(ArgosError::Conflict(_)) => true,
-            Err(ArgosError::InjectedCrash(point)) if point == "before-journal" => true,
-            _ => false,
-        };
-        if should_reload {
-            if let Ok(recovered) = journal::load_or_recover(&self.root) {
+        if let Err(commit_err) = &result {
+            if !Self::transaction_error_is_committed(commit_err) {
+                let recovered = journal::load_or_recover(&self.root).map_err(|recovery_err| {
+                    ArgosError::CorruptedMetadata(format!(
+                        "host transaction failed ({commit_err}) and metadata rollback failed ({recovery_err})"
+                    ))
+                })?;
                 *meta = recovered.metadata;
                 recompute_disk_usage_from_metadata(meta);
             }
