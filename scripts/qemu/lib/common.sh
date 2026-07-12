@@ -111,6 +111,86 @@ argosfs_qemu_wait_process_gone() {
 	return 1
 }
 
+argosfs_qemu_add_hotplug_ports() {
+	local count="$1"
+	local prefix="$2"
+	local index=0
+	local slot
+
+	[ "${arch:-}" = "arm64" ] || return 0
+	while [ "$index" -lt "$count" ]; do
+		slot=$((index + 2))
+		qemu_args+=(
+			-device "pcie-root-port,id=${prefix}port${index},chassis=${slot},slot=${slot}"
+		)
+		index=$((index + 1))
+	done
+}
+
+argosfs_qemu_hotplug_bus_arg() {
+	local prefix="$1"
+	local index="$2"
+	if [ "${arch:-}" = "arm64" ]; then
+		printf ',bus=%sport%s' "$prefix" "$index"
+	fi
+}
+
+argosfs_qemu_wait_log_marker() {
+	local log="$1"
+	local marker="$2"
+	local timeout_s="${3:-120}"
+	local deadline=$((SECONDS + timeout_s))
+
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		if [ -f "$log" ] && awk -v marker="$marker" \
+			'{ sub(/\r$/, ""); if ($0 == marker) found = 1 } END { exit !found }' "$log"; then
+			return 0
+		fi
+		sleep 1
+	done
+	echo "timed out waiting for QEMU guest marker: $marker" >&2
+	return 1
+}
+
+argosfs_qemu_monitor_command() {
+	local monitor="$1"
+	local command="$2"
+	local monitor_log="$3"
+	local attempt=1
+	local response
+	local status
+
+	while [ "$attempt" -le 3 ]; do
+		if [ ! -S "$monitor" ]; then
+			sleep 1
+			attempt=$((attempt + 1))
+			continue
+		fi
+
+		if response="$(printf '%s\n' "$command" | timeout 10 socat - "UNIX-CONNECT:$monitor" 2>&1)"; then
+			status=0
+		else
+			status=$?
+		fi
+		{
+			printf '>>> %s\n' "$command"
+			printf '%s\n' "$response" | tail -c 8192
+			printf '\n'
+		} >>"$monitor_log"
+
+		if [ "$status" -eq 0 ] && ! printf '%s\n' "$response" | grep -Eiq \
+			'Error:|unknown command|invalid parameter|not found|not supported|does not support hotplugging|already in use'; then
+			return 0
+		fi
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+
+	echo "QEMU monitor command failed: $command" >&2
+	tail -n 80 "$monitor_log" >&2 || true
+	return 1
+}
+
 argosfs_qemu_build_args() {
 	kernel="${ARGOSFS_QEMU_KERNEL:-}"
 	rootfs="${ARGOSFS_QEMU_ROOTFS:-}"

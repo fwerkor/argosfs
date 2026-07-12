@@ -9,6 +9,7 @@ argosfs_qemu_select_arch
 argosfs_qemu_require_binary
 
 monitor="$artifacts/qemu-monitor.sock"
+monitor_log="$artifacts/qemu-monitor.log"
 log1="$artifacts/qemu-mixed-chaos-phase1-$arch.log"
 log2="$artifacts/qemu-mixed-chaos-phase2-$arch.log"
 commands1="$artifacts/qemu-mixed-chaos-phase1.commands"
@@ -42,8 +43,10 @@ awk '\$2=="/"{print "ARGOSFS_ROOT_MOUNT_PHASE1 " \$1 " " \$3 " " \$4; exit}' /pr
 test -e /run/argosfs-root-active && echo ARGOSFS_CHAOS_ROOT_MARKER_PHASE1_OK
 echo ARGOSFS_WAIT_CHAOS_HOTPLUG
 for dev in /dev/vdb /dev/vdc /dev/vdd /dev/vde /dev/vdf /dev/vdg; do
-  for i in \$(seq 1 90); do [ -b "\$dev" ] && break; sleep 1; done
+  name="\${dev##*/}"
+  for i in \$(seq 1 90); do [ -b "\$dev" ] && [ -e "/sys/class/block/\$name" ] && break; sleep 1; done
   test -b "\$dev"
+  test -e "/sys/class/block/\$name"
 done
 echo ARGOSFS_CHAOS_BLOCK_DEVICES_OK
 src=/root/argosfs-chaos-source
@@ -94,8 +97,8 @@ while [ "\$id" -le "$worker_count" ]; do chaos_worker "\$id" & id=\$((id + 1)); 
 sleep 3
 echo ARGOSFS_CHAOS_WORKLOAD_STARTED
 echo ARGOSFS_WAIT_CHAOS_UNPLUG
-for i in \$(seq 1 90); do [ ! -b /dev/vdc ] && break; sleep 1; done
-test ! -b /dev/vdc
+for i in \$(seq 1 90); do [ ! -e /sys/class/block/vdc ] && break; sleep 1; done
+test ! -e /sys/class/block/vdc
 echo ARGOSFS_CHAOS_DEVICE_LOSS_OBSERVED
 survivors=/dev/vdb,/dev/vdd,/dev/vde,/dev/vdf
 minimum=/dev/vdb,/dev/vdd,/dev/vdf
@@ -145,8 +148,10 @@ grep -q 'mixed chaos persistent sentinel' /root/argosfs-chaos-source/sentinel.tx
 echo ARGOSFS_CHAOS_ROOT_REPLAY_OK
 echo ARGOSFS_WAIT_CHAOS_REATTACH
 for dev in /dev/vdb /dev/vdc /dev/vdd /dev/vde /dev/vdf; do
-  for i in $(seq 1 90); do [ -b "$dev" ] && break; sleep 1; done
+  name="${dev##*/}"
+  for i in $(seq 1 90); do [ -b "$dev" ] && [ -e "/sys/class/block/$name" ] && break; sleep 1; done
   test -b "$dev"
+  test -e "/sys/class/block/$name"
 done
 devs=/dev/vdb,/dev/vdc,/dev/vdd,/dev/vde,/dev/vdf
 argosfs list-devices --backend raw --devices "$devs" >/tmp/argosfs-chaos-devices-after-reboot.json
@@ -170,27 +175,33 @@ CMDS
 
 qemu_device_add() {
   local prefix="$1" index="$2" path="$3"
-  printf 'drive_add 0 if=none,file=%s,format=raw,id=%s%s\n' "$path" "$prefix" "$index" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  if [ "$arch" = "arm64" ]; then
-    printf 'device_add virtio-blk-pci,drive=%s%s,id=%sdisk%s,romfile=\n' "$prefix" "$index" "$prefix" "$index" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  else
-    printf 'device_add virtio-blk-pci,drive=%s%s,id=%sdisk%s\n' "$prefix" "$index" "$prefix" "$index" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  fi
+  local bus_arg rom_arg
+  argosfs_qemu_monitor_command "$monitor" \
+    "drive_add 0 if=none,file=$path,format=raw,id=$prefix$index" "$monitor_log"
+  bus_arg="$(argosfs_qemu_hotplug_bus_arg "$prefix" "$index")"
+  rom_arg=""
+  [ "$arch" != "arm64" ] || rom_arg=",romfile="
+  argosfs_qemu_monitor_command "$monitor" \
+    "device_add virtio-blk-pci,drive=$prefix$index,id=${prefix}disk$index${bus_arg}${rom_arg}" "$monitor_log"
 }
 
 qemu_device_del() {
   local prefix="$1" index="$2"
-  printf 'device_del %sdisk%s\n' "$prefix" "$index" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
+  argosfs_qemu_monitor_command "$monitor" "device_del ${prefix}disk$index" "$monitor_log"
   sleep 3
-  printf 'drive_del %s%s\n' "$prefix" "$index" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
+  argosfs_qemu_monitor_command "$monitor" "drive_del $prefix$index" "$monitor_log"
 }
 
 run_phase1_until_kill_marker() {
   rm -f "$monitor"
   argosfs_qemu_build_args
+  argosfs_qemu_add_hotplug_ports 6 chaos
   qemu_args+=(-monitor "unix:$monitor,server,nowait")
+  : >"$monitor_log"
   : >"$log1"
   set +e
+  # QEMU output is intentionally polled while this pipeline appends to the log.
+  # shellcheck disable=SC2094
   (
     sleep "$login_delay_s"
     printf '\r'
@@ -199,6 +210,7 @@ run_phase1_until_kill_marker() {
       printf '%s\r' "$line"
       sleep "$command_delay_s"
       if [ "$line" = "echo ARGOSFS_WAIT_CHAOS_HOTPLUG" ]; then
+        argosfs_qemu_wait_log_marker "$log1" ARGOSFS_WAIT_CHAOS_HOTPLUG 180
         for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
         idx=0
         for disk in "${disks[@]}"; do qemu_device_add chaos "$idx" "$disk"; idx=$((idx + 1)); done
@@ -229,8 +241,12 @@ run_phase1_until_kill_marker() {
 run_phase2() {
   rm -f "$monitor"
   argosfs_qemu_build_args
+  argosfs_qemu_add_hotplug_ports 5 recover
   qemu_args+=(-monitor "unix:$monitor,server,nowait")
+  : >"$monitor_log"
   set +e
+  # QEMU output is intentionally polled while this pipeline appends to the log.
+  # shellcheck disable=SC2094
   (
     sleep "$login_delay_s"
     printf '\r'
@@ -239,6 +255,7 @@ run_phase2() {
       printf '%s\r' "$line"
       sleep "$command_delay_s"
       if [ "$line" = "echo ARGOSFS_WAIT_CHAOS_REATTACH" ]; then
+        argosfs_qemu_wait_log_marker "$log2" ARGOSFS_WAIT_CHAOS_REATTACH 180
         for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
         qemu_device_add recover 0 "${disks[0]}"
         qemu_device_add recover 1 "${disks[2]}"

@@ -9,6 +9,7 @@ argosfs_qemu_select_arch
 argosfs_qemu_require_binary
 
 monitor="$artifacts/qemu-monitor.sock"
+monitor_log="$artifacts/qemu-monitor.log"
 log1="$artifacts/qemu-crash-recovery-phase1-$arch.log"
 log2="$artifacts/qemu-crash-recovery-phase2-$arch.log"
 commands1="$artifacts/qemu-crash-recovery-phase1.commands"
@@ -34,8 +35,10 @@ awk '$2=="/"{print "ARGOSFS_ROOT_MOUNT_PHASE1 " $1 " " $3 " " $4; exit}' /proc/m
 test -e /run/argosfs-root-active && echo ARGOSFS_CRASH_ROOT_MARKER_PHASE1_OK
 echo ARGOSFS_WAIT_CRASH_HOTPLUG
 for dev in /dev/vdb /dev/vdc /dev/vdd; do
-  for i in $(seq 1 60); do [ -b "$dev" ] && break; sleep 1; done
+  name="${dev##*/}"
+  for i in $(seq 1 60); do [ -b "$dev" ] && [ -e "/sys/class/block/$name" ] && break; sleep 1; done
   test -b "$dev"
+  test -e "/sys/class/block/$name"
 done
 base=/tmp/argosfs-crash-base
 next=/tmp/argosfs-crash-next
@@ -87,20 +90,26 @@ CMDS
 
 qemu_device_add() {
   local idx="$1" path="$2"
-  printf 'drive_add 0 if=none,file=%s,format=raw,id=crash%s\n' "$path" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  if [ "$arch" = "arm64" ]; then
-    printf 'device_add virtio-blk-pci,drive=crash%s,id=crashdisk%s,romfile=\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  else
-    printf 'device_add virtio-blk-pci,drive=crash%s,id=crashdisk%s\n' "$idx" "$idx" | socat - "UNIX-CONNECT:$monitor" >/dev/null 2>&1 || true
-  fi
+  local bus_arg rom_arg
+  argosfs_qemu_monitor_command "$monitor" \
+    "drive_add 0 if=none,file=$path,format=raw,id=crash$idx" "$monitor_log"
+  bus_arg="$(argosfs_qemu_hotplug_bus_arg crash "$idx")"
+  rom_arg=""
+  [ "$arch" != "arm64" ] || rom_arg=",romfile="
+  argosfs_qemu_monitor_command "$monitor" \
+    "device_add virtio-blk-pci,drive=crash$idx,id=crashdisk$idx${bus_arg}${rom_arg}" "$monitor_log"
 }
 
 run_phase1_until_kill_marker() {
   rm -f "$monitor"
   argosfs_qemu_build_args
+  argosfs_qemu_add_hotplug_ports 3 crash
   qemu_args+=(-monitor "unix:$monitor,server,nowait")
+  : >"$monitor_log"
   : >"$log1"
   set +e
+  # QEMU output is intentionally polled while this pipeline appends to the log.
+  # shellcheck disable=SC2094
   (
     sleep "$login_delay_s"
     printf '\r'
@@ -109,6 +118,7 @@ run_phase1_until_kill_marker() {
       printf '%s\r' "$line"
       sleep "$command_delay_s"
       if [ "$line" = "echo ARGOSFS_WAIT_CRASH_HOTPLUG" ]; then
+        argosfs_qemu_wait_log_marker "$log1" ARGOSFS_WAIT_CRASH_HOTPLUG 180
         for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
         idx=0
         for disk in "${disks[@]}"; do qemu_device_add "$idx" "$disk"; idx=$((idx + 1)); done
@@ -136,6 +146,8 @@ run_phase1_until_kill_marker() {
 run_phase2() {
   argosfs_qemu_build_args
   set +e
+  # QEMU output is intentionally polled while this pipeline appends to the log.
+  # shellcheck disable=SC2094
   (
     sleep "$login_delay_s"
     printf '\r'
