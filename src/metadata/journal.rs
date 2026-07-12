@@ -5,7 +5,7 @@ use crate::types::{
 use crate::util::{append_json_line, atomic_write, now_f64, read_to_vec, sha256_hex, FileLock};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,40 @@ const COMPAT_META: &str = "meta.json";
 
 thread_local! {
     static THREAD_CRASH_POINT: RefCell<Option<String>> = const { RefCell::new(None) };
+    static THREAD_CHECKPOINT_INTERVAL: Cell<Option<u64>> = const { Cell::new(None) };
+    static THREAD_COMPACTION_DISABLED: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+pub struct ThreadCrashPointGuard {
+    previous: Option<String>,
+}
+
+impl Drop for ThreadCrashPointGuard {
+    fn drop(&mut self) {
+        THREAD_CRASH_POINT.with(|value| {
+            *value.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+pub struct ThreadCheckpointIntervalGuard {
+    previous: Option<u64>,
+}
+
+impl Drop for ThreadCheckpointIntervalGuard {
+    fn drop(&mut self) {
+        THREAD_CHECKPOINT_INTERVAL.with(|value| value.set(self.previous));
+    }
+}
+
+pub struct ThreadCompactionGuard {
+    previous: Option<bool>,
+}
+
+impl Drop for ThreadCompactionGuard {
+    fn drop(&mut self) {
+        THREAD_COMPACTION_DISABLED.with(|value| value.set(self.previous));
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -433,6 +467,21 @@ pub fn set_thread_crash_point(point: Option<&str>) {
     });
 }
 
+pub fn thread_crash_point(point: &str) -> ThreadCrashPointGuard {
+    let previous = THREAD_CRASH_POINT.with(|value| value.replace(Some(point.to_string())));
+    ThreadCrashPointGuard { previous }
+}
+
+pub fn thread_checkpoint_interval(interval: u64) -> ThreadCheckpointIntervalGuard {
+    let previous = THREAD_CHECKPOINT_INTERVAL.with(|value| value.replace(Some(interval.max(1))));
+    ThreadCheckpointIntervalGuard { previous }
+}
+
+pub fn thread_journal_compaction_disabled(disabled: bool) -> ThreadCompactionGuard {
+    let previous = THREAD_COMPACTION_DISABLED.with(|value| value.replace(Some(disabled)));
+    ThreadCompactionGuard { previous }
+}
+
 fn write_metadata_copies_with_injection(root: &Path, meta: &Metadata) -> Result<()> {
     let system = root.join(".argosfs");
     let bytes = serde_json::to_vec_pretty(meta)?;
@@ -612,9 +661,13 @@ fn valid_journal_chain_records(text: &str) -> Result<Vec<JournalRecord>> {
 }
 
 fn journal_compaction_disabled() -> bool {
-    std::env::var(JOURNAL_COMPACTION_ENV)
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+    THREAD_COMPACTION_DISABLED
+        .with(|value| value.get())
+        .unwrap_or_else(|| {
+            std::env::var(JOURNAL_COMPACTION_ENV)
+                .ok()
+                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        })
 }
 
 fn read_metadata_candidates(root: &Path) -> Vec<MetadataCandidate> {
@@ -788,11 +841,15 @@ fn should_write_checkpoint(root: &Path, txid: u64) -> Result<bool> {
 }
 
 pub fn checkpoint_interval_txids() -> u64 {
-    std::env::var(CHECKPOINT_INTERVAL_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_CHECKPOINT_INTERVAL_TXIDS)
+    THREAD_CHECKPOINT_INTERVAL
+        .with(|value| value.get())
+        .unwrap_or_else(|| {
+            std::env::var(CHECKPOINT_INTERVAL_ENV)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_CHECKPOINT_INTERVAL_TXIDS)
+        })
 }
 
 fn has_valid_checkpoint(root: &Path) -> Result<bool> {

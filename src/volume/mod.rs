@@ -20,6 +20,7 @@ use crate::util::{
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -28,6 +29,31 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
+
+thread_local! {
+    static THREAD_BULK_IMPORT_MODE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+pub struct BulkImportModeGuard {
+    previous: Option<bool>,
+}
+
+impl Drop for BulkImportModeGuard {
+    fn drop(&mut self) {
+        THREAD_BULK_IMPORT_MODE.with(|value| value.set(self.previous));
+    }
+}
+
+pub fn bulk_import_scope(enabled: bool) -> BulkImportModeGuard {
+    let previous = THREAD_BULK_IMPORT_MODE.with(|value| value.replace(Some(enabled)));
+    BulkImportModeGuard { previous }
+}
+
+fn bulk_import_enabled() -> bool {
+    THREAD_BULK_IMPORT_MODE
+        .with(|value| value.get())
+        .unwrap_or_else(|| std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some())
+}
 
 const ROOT_INO: InodeId = 1;
 const NON_UTF8_NAME_PREFIX: &str = ".argosfs-name-nonutf8-v3:";
@@ -482,9 +508,7 @@ impl ArgosFs {
         let mut meta = self.meta.write();
         if meta.backend != BackendKind::Host {
             self.ensure_block_backend_writable_locked(&meta)?;
-            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
-                || meta.config.defer_metadata_commit
-            {
+            if bulk_import_enabled() || meta.config.defer_metadata_commit {
                 let previous_meta_hash = meta.integrity.meta_hash.clone();
                 journal::prepare_metadata_integrity_with_previous(&mut meta, previous_meta_hash)?;
             }
@@ -1348,8 +1372,7 @@ impl ArgosFs {
     ) -> Result<()> {
         self.ensure_block_backend_writable_locked(meta)?;
         if meta.backend != BackendKind::Host
-            && (std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some()
-                || meta.config.defer_metadata_commit)
+            && (bulk_import_enabled() || meta.config.defer_metadata_commit)
         {
             meta.txid += 1;
             meta.updated_at = now_f64();
@@ -1365,7 +1388,7 @@ impl ArgosFs {
         meta.updated_at = now_f64();
         if meta.backend != BackendKind::Host {
             journal::prepare_metadata_integrity_with_previous(meta, previous_meta_hash.clone())?;
-            if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+            if bulk_import_enabled() {
                 return Ok(());
             }
             let superblocks = self.active_superblocks_locked(meta)?;

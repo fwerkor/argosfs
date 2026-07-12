@@ -37,17 +37,11 @@ fn raw_journal_replay_chains_from_bulk_checkpoint_for_rootfs_writes() {
         ArgosFs::create_loop(&images, config(1, 0), 32 * 1024 * 1024, "capos-root", false).unwrap();
     create_rootfs_mountpoints(&fs);
 
-    let previous_bulk = std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT");
-    std::env::set_var("ARGOSFS_BULK_IMPORT_COMMIT", "1");
+    let _bulk_import = argosfs::volume::bulk_import_scope(true);
     fs.mkdir("/sbin", 0o755).unwrap();
     fs.write_file("/sbin/init", b"#!/bin/sh\nexit 0\n", 0o755)
         .unwrap();
     fs.sync().unwrap();
-    if let Some(value) = previous_bulk {
-        std::env::set_var("ARGOSFS_BULK_IMPORT_COMMIT", value);
-    } else {
-        std::env::remove_var("ARGOSFS_BULK_IMPORT_COMMIT");
-    }
 
     let created = fs
         .create_file_at_with_owner(1, OsStr::new("etc-test"), 0o644, 0, 0)
@@ -773,7 +767,7 @@ fn raw_deferred_data_flush_requires_batched_metadata_commit() {
 #[test]
 fn raw_hot_file_transactions_use_metadata_deltas() {
     let _guard = env_lock();
-    std::env::set_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS", "1000");
+    let _interval = journal::thread_checkpoint_interval(1000);
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
     let mut cfg = config(1, 0);
@@ -801,7 +795,6 @@ fn raw_hot_file_transactions_use_metadata_deltas() {
     assert!(hot_records
         .iter()
         .all(|record| record.get("metadata_delta").is_some()));
-    std::env::remove_var("ARGOSFS_CHECKPOINT_INTERVAL_TXIDS");
 }
 
 #[test]
@@ -1081,14 +1074,11 @@ fn failed_raw_commit_restores_in_memory_metadata_before_returning() {
     fs.write_file("/atomic-value", b"old", 0o644).unwrap();
     fs.sync().unwrap();
 
-    std::env::set_var(
-        "ARGOSFS_CRASH_POINT",
-        argosfs::types::FaultPoint::AfterPartialJournalFanout.as_str(),
-    );
+    let _crash =
+        journal::thread_crash_point(argosfs::types::FaultPoint::AfterPartialJournalFanout.as_str());
     let err = fs
         .write_file("/atomic-value", b"must-not-survive", 0o644)
         .unwrap_err();
-    std::env::remove_var("ARGOSFS_CRASH_POINT");
     assert!(matches!(err, ArgosError::InjectedCrash(_)));
     assert_eq!(fs.read_file("/atomic-value", false).unwrap(), b"old");
 

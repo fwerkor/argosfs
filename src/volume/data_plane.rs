@@ -858,9 +858,7 @@ impl ArgosFs {
                 journal::inject_crash(FaultPoint::BeforeDataWrite.as_str())?;
                 self.backend_write_at_locked(meta, disk_id, extent.offset, data)?;
                 journal::inject_crash(FaultPoint::AfterDataWriteBeforeFlush.as_str())?;
-                if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_none()
-                    && !meta.config.defer_data_flush
-                {
+                if !bulk_import_enabled() && !meta.config.defer_data_flush {
                     self.backend_flush_locked(meta, disk_id)?;
                     journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
                 }
@@ -968,7 +966,7 @@ impl ArgosFs {
             }
         }
         let mut scored = Vec::new();
-        let local_numa = if std::env::var_os("ARGOSFS_BULK_IMPORT_COMMIT").is_some() {
+        let local_numa = if bulk_import_enabled() {
             None
         } else {
             meta.config
