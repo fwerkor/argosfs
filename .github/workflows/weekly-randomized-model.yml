@@ -54,6 +54,9 @@ jobs:
             --manifest "$SEED_MANIFEST" \
             --github-output "$GITHUB_OUTPUT"
           cat "$SEED_MANIFEST"
+
+      - name: Summarize seed matrix
+        run: |
           {
             echo "### Weekly randomized seed matrix"
             echo
@@ -236,7 +239,7 @@ jobs:
           - Workflow: $GITHUB_WORKFLOW
           - Run ID: $GITHUB_RUN_ID
 
-          The workflow includes fresh randomized-model shards on x86_64 and arm64, mandatory mounted multi-user POSIX checks, real pjdfstest execution, and raw block EIO/corruption injection. Download `weekly-random-seed-manifest` for the complete generated seed set. Each randomized shard artifact contains operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in `logs/metadata.json`.
+          The workflow includes fresh randomized-model shards on x86_64 and arm64, mandatory mounted multi-user POSIX checks, real pjdfstest execution, and raw block EIO/corruption injection. Download the weekly-random-seed-manifest artifact for the complete generated seed set. Each randomized shard artifact contains operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in logs/metadata.json.
           EOF
           )"
           if [ -n "$existing" ]; then
