@@ -224,10 +224,16 @@ impl ArgosFs {
                 created_at,
             },
         );
+        let mut bootstrap_metadata = meta.clone();
+        let previous_meta_hash = bootstrap_metadata.integrity.meta_hash.clone();
+        journal::prepare_metadata_integrity_with_previous(
+            &mut bootstrap_metadata,
+            previous_meta_hash,
+        )?;
         raw_store::initialize_pool(
             Arc::new(new_backend_with_id),
             std::slice::from_ref(&sb),
-            &mut meta,
+            &mut bootstrap_metadata,
             true,
         )?;
         self.commit_locked(

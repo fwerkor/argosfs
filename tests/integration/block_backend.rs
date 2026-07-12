@@ -142,6 +142,9 @@ fn reshape_single_to_redundant_resume_keeps_multilayout_readable() {
     drop(fs);
 
     let resumed = ArgosFs::open_loop(&images, true).unwrap();
+    let recovery = resumed.transaction_report().unwrap();
+    assert_eq!(recovery.invalid_entries, 0, "{:#?}", recovery.errors);
+    assert!(recovery.errors.is_empty(), "{:#?}", recovery.errors);
     let done = resumed.reshape_layout(1, 1, None).unwrap();
     assert!(done.complete);
     assert_eq!(done.remaining_files, 0);
@@ -1206,4 +1209,65 @@ fn raw_mkfs_rejects_luks_and_unknown_nonzero_data_without_force() {
     )
     .unwrap();
     drop(forced);
+}
+
+#[test]
+fn raw_reshape_delta_post_journal_crash_helper() {
+    let Some(root) = std::env::var_os("ARGOSFS_TEST_RESHAPE_DELTA_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let images = vec![root.join("disk0.img"), root.join("disk1.img")];
+    let fs = ArgosFs::open_loop(&images, true).unwrap();
+    std::env::set_var(
+        "ARGOSFS_CRASH_POINT",
+        argosfs::types::FaultPoint::AfterJournalCommitBeforeMetadataCommit.as_str(),
+    );
+    std::env::set_var("ARGOSFS_CRASH_ABORT", "1");
+    let _ = fs.reshape_layout(1, 1, Some(1));
+    panic!("post-journal reshape crash point did not abort");
+}
+
+#[test]
+fn raw_reshape_replay_uses_only_durable_delta_bases() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let mut images = vec![tmp.path().join("disk0.img")];
+    let fs = ArgosFs::create_loop(
+        &images,
+        config(1, 0),
+        32 * 1024 * 1024,
+        "reshape-delta",
+        false,
+    )
+    .unwrap();
+    let a_payload = vec![b'a'; 20 * 1024];
+    let b_payload = vec![b'b'; 20 * 1024];
+    fs.write_file("/a", &a_payload, 0o644).unwrap();
+    fs.write_file("/b", &b_payload, 0o644).unwrap();
+    let new_image = tmp.path().join("disk1.img");
+    fs.add_block_device(new_image.clone(), 32 * 1024 * 1024, false)
+        .unwrap();
+    images.push(new_image);
+    fs.reshape_layout(1, 1, Some(0)).unwrap();
+    assert_eq!(fs.read_file("/a", true).unwrap(), a_payload.as_slice());
+    fs.mark_clean_unmount().unwrap();
+    drop(fs);
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("block_backend::raw_reshape_delta_post_journal_crash_helper")
+        .arg("--nocapture")
+        .env("ARGOSFS_TEST_RESHAPE_DELTA_ROOT", tmp.path())
+        .status()
+        .unwrap();
+    assert!(!status.success());
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    let report = reopened.transaction_report().unwrap();
+    assert_eq!(report.invalid_entries, 0, "{:#?}", report.errors);
+    assert!(report.replayed);
+    assert_eq!(reopened.metadata_snapshot().txid, 7);
+    assert_eq!(reopened.read_file("/a", false).unwrap(), a_payload);
+    assert_eq!(reopened.read_file("/b", false).unwrap(), b_payload);
 }
