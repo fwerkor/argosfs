@@ -88,6 +88,7 @@ trap cleanup EXIT INT TERM
 
 cargo build --manifest-path "$repo/Cargo.toml" --bin argosfs --locked
 argosfs="$repo/target/debug/argosfs"
+argosfs_sudo=(sudo env "ARGOSFS_BLOCK_CACHE_DIR=$work/cache" "$argosfs")
 run_tag="${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-1}-$profile"
 run_tag="$(printf '%s' "$run_tag" | tr -c '[:alnum:]_-' '-')"
 
@@ -140,14 +141,17 @@ for index in range(192):
 (root / "sentinel.txt").write_text("ArgosFS FUSE block fault sentinel\n", encoding="utf-8")
 PY
 
-sudo "$argosfs" mkfs --backend raw --devices "$devs" --k 3 --m 2 --chunk-size 65536 --compression zstd --force --pool-name "fuse-fault-$profile" >"$artifacts/logs/mkfs.json"
-sudo "$argosfs" import-tree --backend raw --devices "$devs" "$work/src" /
-sudo "$argosfs" export-tree --backend raw --devices "$devs" "$artifacts/exports/baseline"
+"${argosfs_sudo[@]}" mkfs --backend raw --devices "$devs" --k 3 --m 2 --chunk-size 65536 --compression zstd --force --pool-name "fuse-fault-$profile" >"$artifacts/logs/mkfs.json"
+"${argosfs_sudo[@]}" import-tree --backend raw --devices "$devs" "$work/src" /
+"${argosfs_sudo[@]}" export-tree --backend raw --devices "$devs" "$artifacts/exports/baseline"
 diff -qr "$work/src" "$artifacts/exports/baseline" >"$artifacts/logs/baseline.diff"
+# Baseline export reads every block. Remove its L2 cache so fault profiles must
+# fetch shards from the device-mapper targets after injection.
+sudo rm -rf "$work/cache"
 
 start_mount() {
   local devices="$1" mode="$2" extra_option="${3:-}"
-  local command=(sudo "$argosfs" mount-root --backend raw --devices "$devices" --target "$work/mnt" --mode "$mode" --foreground -o default_permissions)
+  local command=("${argosfs_sudo[@]}" mount-root --backend raw --devices "$devices" --target "$work/mnt" --mode "$mode" --foreground -o default_permissions)
   if [ -n "$extra_option" ]; then
     command+=(-o "$extra_option")
   fi
@@ -225,10 +229,11 @@ PY
 }
 
 final_offline_check() {
-  sudo "$argosfs" fsck --backend raw --devices "$devs" --repair --remove-orphans >"$artifacts/logs/fsck-final.json"
-  sudo "$argosfs" scrub --backend raw --devices "$devs" >"$artifacts/logs/scrub-final.json"
-  sudo "$argosfs" verify-journal --backend raw --devices "$devs" >"$artifacts/logs/journal-final.json"
-  sudo "$argosfs" export-tree --backend raw --devices "$devs" "$artifacts/exports/final"
+  sudo rm -rf "$work/cache"
+  "${argosfs_sudo[@]}" fsck --backend raw --devices "$devs" --repair --remove-orphans >"$artifacts/logs/fsck-final.json"
+  "${argosfs_sudo[@]}" scrub --backend raw --devices "$devs" >"$artifacts/logs/scrub-final.json"
+  "${argosfs_sudo[@]}" verify-journal --backend raw --devices "$devs" >"$artifacts/logs/journal-final.json"
+  "${argosfs_sudo[@]}" export-tree --backend raw --devices "$devs" "$artifacts/exports/final"
   diff -qr "$work/src" "$artifacts/exports/final" >"$artifacts/logs/final.diff"
 }
 
@@ -265,7 +270,7 @@ case "$profile" in
     ;;
 
   corruption)
-    sudo "$argosfs" inspect-device --backend raw "${mappers[0]}" >"$artifacts/logs/inspect-corruption-target.json"
+    "${argosfs_sudo[@]}" inspect-device --backend raw "${mappers[0]}" >"$artifacts/logs/inspect-corruption-target.json"
     corrupt_offset="$(python3 - "$artifacts/logs/inspect-corruption-target.json" <<'PY'
 import json
 import sys
@@ -284,7 +289,8 @@ PY
     start_mount "$devs" rw
     verify_all_files
     stop_mount
-    sudo "$argosfs" scrub --backend raw --devices "$devs" >"$artifacts/logs/scrub-after-corruption.json"
+    sudo rm -rf "$work/cache"
+    "${argosfs_sudo[@]}" scrub --backend raw --devices "$devs" >"$artifacts/logs/scrub-after-corruption.json"
     python3 - "$artifacts/logs/scrub-after-corruption.json" <<'PY'
 import json
 import sys
@@ -300,8 +306,8 @@ PY
   parity-limit)
     minimum="${mappers[0]},${mappers[2]},${mappers[4]}"
     below_minimum="${mappers[0]},${mappers[2]}"
-    sudo "$argosfs" preflight-root --backend raw --devices "$minimum" --mode degraded-ro >"$artifacts/logs/preflight-at-limit.json"
-    if sudo "$argosfs" preflight-root --backend raw --devices "$below_minimum" --mode degraded-ro >"$artifacts/logs/preflight-below-limit.log" 2>&1; then
+    "${argosfs_sudo[@]}" preflight-root --backend raw --devices "$minimum" --mode degraded-ro >"$artifacts/logs/preflight-at-limit.json"
+    if "${argosfs_sudo[@]}" preflight-root --backend raw --devices "$below_minimum" --mode degraded-ro >"$artifacts/logs/preflight-below-limit.log" 2>&1; then
       echo "degraded root preflight unexpectedly accepted fewer than k devices" >&2
       exit 1
     fi

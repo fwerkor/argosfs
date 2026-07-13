@@ -572,7 +572,7 @@ def main() -> int:
         for op_index in range(1, args.ops + 1):
             event = apply_operation(reference, args.mountpoint, rng, op_index, args.max_file_size)
             write_jsonl(operation_log, event)
-            if op_index % args.checkpoint_interval == 0:
+            if op_index % args.checkpoint_interval == 0 and op_index != args.ops:
                 checkpoint(args, mount, reference, op_index, final=False)
         checkpoint(args, mount, reference, args.ops, final=True)
     except Exception as error:  # noqa: BLE001
