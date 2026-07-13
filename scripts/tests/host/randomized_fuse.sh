@@ -16,7 +16,9 @@ fail_or_skip() {
 }
 
 [ -e /dev/fuse ] || fail_or_skip "/dev/fuse is unavailable"
-[ -r /dev/fuse ] && [ -w /dev/fuse ] || fail_or_skip "/dev/fuse is not readable and writable"
+if [ ! -r /dev/fuse ] || [ ! -w /dev/fuse ]; then
+  fail_or_skip "/dev/fuse is not readable and writable"
+fi
 grep -q 'nodev[[:space:]]\+fuse' /proc/filesystems 2>/dev/null || fail_or_skip "kernel FUSE support is unavailable"
 command -v mountpoint >/dev/null 2>&1 || fail_or_skip "mountpoint(1) is unavailable"
 if command -v fusermount3 >/dev/null 2>&1; then
