@@ -153,7 +153,7 @@ jobs:
 
       - name: Run mandatory cross-user permission checks
         env:
-          ARGOSFS_COMPAT_WORKDIR: ${{ runner.temp }}/weekly-mounted-permissions
+          ARGOSFS_COMPAT_WORKDIR: /tmp/argosfs-weekly-mounted-permissions-${{ github.run_id }}-${{ github.run_attempt }}
           ARGOSFS_COMPAT_KEEP_WORKDIR: "1"
         run: scripts/tests/host/permission_compat.sh
 
@@ -171,12 +171,13 @@ jobs:
         with:
           name: weekly-mounted-posix-compat
           path: |
-            ${{ runner.temp }}/weekly-mounted-permissions
+            /tmp/argosfs-weekly-mounted-permissions-${{ github.run_id }}-${{ github.run_attempt }}
             ${{ runner.temp }}/weekly-pjdfstest
             ${{ runner.temp }}/weekly-pjdfstest.jsonl
             ${{ runner.temp }}/weekly-pjdfstest.log
             ${{ runner.temp }}/weekly-pjdfstest.build.log
           if-no-files-found: error
+          include-hidden-files: true
 
   block-fault-injection:
     name: Raw block EIO and corruption injection
