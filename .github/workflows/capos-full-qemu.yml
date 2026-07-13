@@ -19,9 +19,6 @@ on:
         description: Run QEMU boot/full guest/hotplug/reboot/stress tests after image build
         required: false
         default: "true"
-  schedule:
-    - cron: "30 18 * * 0"
-
 permissions:
   contents: read
 
