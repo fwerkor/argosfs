@@ -28,7 +28,12 @@ sudo dmsetup version >"$artifacts/logs/dmsetup-version.txt" 2>&1 || fail_or_skip
 cargo build --manifest-path "$repo/Cargo.toml" --bin argosfs --locked
 argosfs="$repo/target/debug/argosfs"
 work="$(mktemp -d "${TMPDIR:-/tmp}/argosfs-block-fault.XXXXXX")"
-mkdir -p "$work/src/data"
+mkdir -p \
+  "$work/src/data" \
+  "$work/src/dev" \
+  "$work/src/proc" \
+  "$work/src/run" \
+  "$work/src/sys"
 loops=()
 mapper_names=()
 mappers=()
