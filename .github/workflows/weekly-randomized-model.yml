@@ -2,17 +2,30 @@ name: Weekly high-intensity chaos CI
 
 on:
   schedule:
-    - cron: "20 19 * * 6"
+    # Wednesday 03:00 Asia/Shanghai (UTC+8).
+    - cron: "0 19 * * 2"
   workflow_dispatch:
     inputs:
       ops:
-        description: Number of randomized operations per seed
+        description: Number of core randomized operations per seed
         required: false
-        default: "1200"
+        default: "1500"
       seed_count:
-        description: Number of fresh random seeds when replay seeds are not supplied
+        description: Number of fresh core-model seeds
         required: false
         default: "12"
+      fuse_ops:
+        description: Number of mounted FUSE randomized operations per seed
+        required: false
+        default: "1200"
+      fuse_seed_count:
+        description: Number of seeds used by the mounted FUSE matrix
+        required: false
+        default: "6"
+      fault_seed_count:
+        description: Number of seeds used for every FUSE block-fault profile
+        required: false
+        default: "2"
       seeds:
         description: Optional comma-separated replay seeds; leave empty for fresh random seeds
         required: false
@@ -21,6 +34,10 @@ on:
         description: Maximum generated file size in bytes
         required: false
         default: "131072"
+      qemu_stress_seconds:
+        description: Rootfs stress duration inside each QEMU architecture
+        required: false
+        default: "3600"
 
 permissions:
   contents: read
@@ -28,24 +45,29 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  ARGOSFS_CAPOS_REF: 168f01fc44f627ab07f23dd9590453f0ba5fe7fc
 
 jobs:
   prepare-matrix:
-    name: Prepare randomized seed matrix
+    name: Prepare randomized seed matrices
     runs-on: ubuntu-24.04
     outputs:
       seeds: ${{ steps.seeds.outputs.seeds }}
+      fuse_seeds: ${{ steps.seeds.outputs.fuse_seeds }}
+      fault_seeds: ${{ steps.seeds.outputs.fault_seeds }}
       seed_source: ${{ steps.seeds.outputs.source }}
       seed_count: ${{ steps.seeds.outputs.count }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Generate and record seed matrix
+      - name: Generate and record seed matrices
         id: seeds
         env:
           REQUESTED_SEEDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seeds || '' }}
           REQUESTED_SEED_COUNT: ${{ github.event_name == 'workflow_dispatch' && inputs.seed_count || '12' }}
+          REQUESTED_FUSE_SEED_COUNT: ${{ github.event_name == 'workflow_dispatch' && inputs.fuse_seed_count || '6' }}
+          REQUESTED_FAULT_SEED_COUNT: ${{ github.event_name == 'workflow_dispatch' && inputs.fault_seed_count || '2' }}
           SEED_MANIFEST: ${{ runner.temp }}/weekly-random-seeds.json
         run: |
           python3 scripts/ci/generate-random-seeds.py \
@@ -53,16 +75,44 @@ jobs:
             --seeds "$REQUESTED_SEEDS" \
             --manifest "$SEED_MANIFEST" \
             --github-output "$GITHUB_OUTPUT"
+          python3 - "$SEED_MANIFEST" "$REQUESTED_FUSE_SEED_COUNT" "$REQUESTED_FAULT_SEED_COUNT" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          seeds = manifest["seeds"]
+          fuse_count = int(sys.argv[2])
+          fault_count = int(sys.argv[3])
+          if fuse_count < 1 or fault_count < 1:
+              raise SystemExit("FUSE and fault seed counts must be positive")
+          fuse_seeds = seeds[: min(fuse_count, len(seeds))]
+          fault_seeds = seeds[: min(fault_count, len(seeds))]
+          with Path(sys.argv[4]).open("a", encoding="utf-8") as output:
+              output.write(f"fuse_seeds={json.dumps(fuse_seeds, separators=(',', ':'))}\n")
+              output.write(f"fault_seeds={json.dumps(fault_seeds, separators=(',', ':'))}\n")
+          manifest["matrices"] = {
+              "core": seeds,
+              "fuse": fuse_seeds,
+              "fuse_block_fault": fault_seeds,
+          }
+          Path(sys.argv[1]).write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
           cat "$SEED_MANIFEST"
 
-      - name: Summarize seed matrix
+      - name: Summarize weekly matrices
         run: |
           {
-            echo "### Weekly randomized seed matrix"
+            echo "### Weekly four-matrix chaos run"
             echo
-            echo "- Source: ${{ steps.seeds.outputs.source }}"
-            echo "- Count: ${{ steps.seeds.outputs.count }}"
-            echo "- Manifest artifact: weekly-random-seed-manifest"
+            echo "- Schedule: Wednesday 03:00 Asia/Shanghai"
+            echo "- Seed source: ${{ steps.seeds.outputs.source }}"
+            echo "- Core seeds: ${{ steps.seeds.outputs.seeds }}"
+            echo "- FUSE seeds: ${{ steps.seeds.outputs.fuse_seeds }}"
+            echo "- FUSE block-fault seeds: ${{ steps.seeds.outputs.fault_seeds }}"
+            echo "- QEMU architectures: x86_64, arm64"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload seed manifest
@@ -72,11 +122,11 @@ jobs:
           path: ${{ runner.temp }}/weekly-random-seeds.json
           if-no-files-found: error
 
-  randomized-model-stress:
-    name: Randomized model stress (${{ matrix.arch }}, ${{ matrix.seed }})
+  core-randomized-matrix:
+    name: Core model (${{ matrix.arch }}, ${{ matrix.seed }})
     needs: prepare-matrix
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 210
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
@@ -102,13 +152,13 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: weekly-randomized-model-${{ matrix.arch }}
+          key: weekly-core-random-${{ matrix.arch }}
 
-      - name: Run high-intensity randomized model stress
+      - name: Run high-intensity core reference model
         env:
-          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}-${{ matrix.seed }}
-          ARGOSFS_RANDOM_MODEL_OPS: ${{ github.event_name == 'workflow_dispatch' && inputs.ops || '1200' }}
-          ARGOSFS_RANDOM_MODEL_CHECK_INTERVAL: "100"
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-core-${{ matrix.arch }}-${{ matrix.seed }}
+          ARGOSFS_RANDOM_MODEL_OPS: ${{ github.event_name == 'workflow_dispatch' && inputs.ops || '1500' }}
+          ARGOSFS_RANDOM_MODEL_CHECK_INTERVAL: "150"
           ARGOSFS_RANDOM_MODEL_MAX_FILE_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.max_file_size || '131072' }}
           ARGOSFS_RANDOM_MODEL_SEEDS: ${{ matrix.seed }}
           ARGOSFS_RANDOM_MODEL_DISKS: "6"
@@ -117,23 +167,43 @@ jobs:
           ARGOSFS_RANDOM_MODEL_CHUNK_SIZE: "65536"
         run: scripts/tests/host/randomized_model.sh
 
-      - name: Upload randomized model artifacts
+      - name: Upload core-model artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: weekly-randomized-model-${{ matrix.arch }}-${{ matrix.seed }}
-          path: ${{ runner.temp }}/weekly-randomized-model-${{ matrix.arch }}-${{ matrix.seed }}
+          name: weekly-core-${{ matrix.arch }}-${{ matrix.seed }}
+          path: ${{ runner.temp }}/weekly-core-${{ matrix.arch }}-${{ matrix.seed }}
           if-no-files-found: ignore
 
-  mounted-posix-compat:
-    name: Mounted multi-user POSIX compatibility
-    runs-on: ubuntu-24.04
-    timeout-minutes: 75
+  fuse-posix-matrix:
+    name: FUSE POSIX (${{ matrix.mode }}, ${{ matrix.arch }}, ${{ matrix.seed }})
+    needs: prepare-matrix
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+        mode:
+          - randomized
+        seed: ${{ fromJSON(needs.prepare-matrix.outputs.fuse_seeds) }}
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+          - runner: ubuntu-24.04
+            arch: x86_64
+            mode: standards-baseline
+            seed: baseline
     steps:
       - name: Checkout ArgosFS
         uses: actions/checkout@v7
 
       - name: Checkout pjdfstest
+        if: matrix.mode == 'standards-baseline'
         uses: actions/checkout@v7
         with:
           repository: pjd/pjdfstest
@@ -146,18 +216,37 @@ jobs:
       - name: Install Rust toolchain
         run: scripts/ci/install-rust.sh stable
 
+      - name: Prepare FUSE access
+        run: |
+          sudo modprobe fuse 2>/dev/null || true
+          if [ -e /dev/fuse ]; then sudo chmod 0666 /dev/fuse; fi
+          ls -l /dev/fuse
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: weekly-mounted-posix
+          key: weekly-fuse-${{ matrix.mode }}-${{ matrix.arch }}
+
+      - name: Run mounted randomized POSIX model
+        if: matrix.mode == 'randomized'
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-fuse-${{ matrix.arch }}-${{ matrix.seed }}
+          ARGOSFS_REQUIRE_FUSE_RANDOM: "1"
+          ARGOSFS_FUSE_RANDOM_SEED: ${{ matrix.seed }}
+          ARGOSFS_FUSE_RANDOM_OPS: ${{ github.event_name == 'workflow_dispatch' && inputs.fuse_ops || '1200' }}
+          ARGOSFS_FUSE_RANDOM_CHECK_INTERVAL: "200"
+          ARGOSFS_FUSE_RANDOM_MAX_FILE_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.max_file_size || '131072' }}
+        run: scripts/tests/host/randomized_fuse.sh
 
       - name: Run mandatory cross-user permission checks
+        if: matrix.mode == 'standards-baseline'
         env:
-          ARGOSFS_COMPAT_WORKDIR: /tmp/argosfs-weekly-mounted-permissions-${{ github.run_id }}-${{ github.run_attempt }}
+          ARGOSFS_COMPAT_WORKDIR: ${{ runner.temp }}/weekly-mounted-permissions
           ARGOSFS_COMPAT_KEEP_WORKDIR: "1"
         run: scripts/tests/host/permission_compat.sh
 
       - name: Run mandatory pjdfstest subset
+        if: matrix.mode == 'standards-baseline'
         env:
           PJDFSTEST_ROOT: ${{ github.workspace }}/external/pjdfstest
           ARGOSFS_COMPAT_WORKDIR: ${{ runner.temp }}/weekly-pjdfstest
@@ -165,25 +254,37 @@ jobs:
           ARGOSFS_PJDFSTEST_OUT: ${{ runner.temp }}/weekly-pjdfstest.jsonl
         run: scripts/tests/host/pjdfstest_compat.sh "$RUNNER_TEMP/weekly-pjdfstest.jsonl"
 
-      - name: Upload mounted POSIX artifacts
+      - name: Upload FUSE matrix artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: weekly-mounted-posix-compat
+          name: weekly-fuse-${{ matrix.mode }}-${{ matrix.arch }}-${{ matrix.seed }}
           path: |
-            /tmp/argosfs-weekly-mounted-permissions-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ runner.temp }}/weekly-fuse-${{ matrix.arch }}-${{ matrix.seed }}
+            ${{ runner.temp }}/weekly-mounted-permissions
             ${{ runner.temp }}/weekly-pjdfstest
             ${{ runner.temp }}/weekly-pjdfstest.jsonl
             ${{ runner.temp }}/weekly-pjdfstest.log
             ${{ runner.temp }}/weekly-pjdfstest.build.log
-          if-no-files-found: error
-          include-hidden-files: true
+          if-no-files-found: ignore
 
-  block-fault-injection:
-    name: Raw block EIO and corruption injection
+  fuse-block-fault-matrix:
+    name: FUSE/storage fault (${{ matrix.profile }}, ${{ matrix.seed }})
     needs: prepare-matrix
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 210
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - eio-read
+          - eio-write
+          - corruption
+          - parity-limit
+        seed: ${{ fromJSON(needs.prepare-matrix.outputs.fault_seeds) }}
+        include:
+          - profile: raw-cli-baseline
+            seed: baseline
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -194,34 +295,317 @@ jobs:
       - name: Install Rust toolchain
         run: scripts/ci/install-rust.sh stable
 
+      - name: Prepare privileged storage test devices
+        run: |
+          sudo modprobe fuse 2>/dev/null || true
+          sudo modprobe loop 2>/dev/null || true
+          sudo modprobe dm_mod 2>/dev/null || true
+          if [ -e /dev/fuse ]; then sudo chmod 0666 /dev/fuse; fi
+          test -e /dev/fuse
+          test -e /dev/loop-control
+          test -e /dev/mapper/control
+          sudo dmsetup version
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: weekly-block-fault-injection
+          key: weekly-fuse-block-${{ matrix.profile }}
 
-      - name: Inject block EIO and raw corruption
+      - name: Run FUSE block-fault profile
+        if: matrix.profile != 'raw-cli-baseline'
         env:
-          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-block-fault-injection
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-fuse-block-${{ matrix.profile }}-${{ matrix.seed }}
+          ARGOSFS_REQUIRE_FUSE_BLOCK_FAULTS: "1"
+          ARGOSFS_FUSE_FAULT_PROFILE: ${{ matrix.profile }}
+          ARGOSFS_FUSE_FAULT_SEED: ${{ matrix.seed }}
+        run: scripts/tests/host/fuse_block_fault.sh "${{ matrix.profile }}"
+
+      - name: Run direct raw EIO and corruption baseline
+        if: matrix.profile == 'raw-cli-baseline'
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-raw-cli-baseline
           ARGOSFS_REQUIRE_BLOCK_FAULTS: "1"
           ARGOSFS_BLOCK_FAULT_SEED: ${{ fromJSON(needs.prepare-matrix.outputs.seeds)[0] }}
         run: scripts/tests/host/block_fault_injection.sh
 
-      - name: Upload block fault artifacts
+      - name: Upload FUSE/storage fault artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: weekly-block-fault-injection
-          path: ${{ runner.temp }}/weekly-block-fault-injection
+          name: weekly-fuse-block-${{ matrix.profile }}-${{ matrix.seed }}
+          path: |
+            ${{ runner.temp }}/weekly-fuse-block-${{ matrix.profile }}-${{ matrix.seed }}
+            ${{ runner.temp }}/weekly-raw-cli-baseline
+          if-no-files-found: ignore
+
+  qemu-image-build:
+    name: Weekly CapOS image (${{ matrix.arch }})
+    needs: prepare-matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            capos_target: x86_64
+            make_jobs: "2"
+          - arch: arm64
+            capos_target: armsr_armv8
+            make_jobs: "1"
+    steps:
+      - name: Checkout ArgosFS
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        env:
+          ARGOSFS_CI_QEMU_ARCH: ${{ matrix.arch }}
+        run: scripts/ci/install-deps.sh
+
+      - name: Free runner disk space
+        run: |
+          set -euxo pipefail
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/local/share/chromium \
+            /opt/ghc \
+            /opt/az \
+            /opt/google-cloud-cli \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/node \
+            /opt/hostedtoolcache/Python \
+            /opt/microsoft \
+            /usr/local/.ghcup || true
+          docker system prune -af --volumes || true
+          sudo apt-get clean
+          df -h
+
+      - name: Probe QEMU host prerequisites
+        env:
+          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          source scripts/qemu/lib/common.sh
+          argosfs_qemu_select_arch
+          argosfs_qemu_require_binary
+          "$qemu_bin" --version
+          if [ "$arch" = "arm64" ]; then
+            firmware="$(argosfs_qemu_find_arm64_uefi || true)"
+            test -n "$firmware"
+            echo "AArch64 UEFI firmware: $firmware"
+          fi
+
+      - name: Install Rust toolchain
+        run: scripts/ci/install-rust.sh stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: weekly-capos-${{ matrix.arch }}
+
+      - name: Cache CapOS downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/capos-dl
+          key: weekly-capos-dl-${{ matrix.capos_target }}-${{ github.run_id }}
+          restore-keys: |
+            weekly-capos-dl-${{ matrix.capos_target }}-
+            capos-dl-${{ matrix.capos_target }}-
+            capos-dl-
+
+      - name: Build full CapOS ArgosFS image
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-capos-${{ matrix.arch }}
+          ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
+          ARGOSFS_CAPOS_BUILD_TARGET: ${{ matrix.capos_target }}
+          ARGOSFS_CAPOS_MAKE_JOBS: ${{ matrix.make_jobs }}
+          ARGOSFS_CAPOS_IMAGE_MAKE_TARGET: world
+          ARGOSFS_CAPOS_MAKE_V: s
+          ARGOSFS_CAPOS_LOG_STDOUT: periodic
+          ARGOSFS_CI_LOG_INTERVAL_S: "120"
+          ARGOSFS_CI_LOG_TAIL_LINES: "35"
+          ARGOSFS_CAPOS_DL_DIR: ${{ runner.temp }}/capos-dl
+          ARGOSFS_CI_LIGHT_RUST_PROFILE: "1"
+          CAPOS_REF: ${{ env.ARGOSFS_CAPOS_REF }}
+        run: scripts/qemu/build_capos_image.sh
+
+      - name: Pack QEMU bundle
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-capos-${{ matrix.arch }}
+        run: scripts/ci/pack-qemu-bundle.sh
+
+      - name: Upload weekly QEMU bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-capos-qemu-bundle-${{ matrix.arch }}
+          path: ${{ runner.temp }}/weekly-capos-${{ matrix.arch }}/qemu-bundle
           if-no-files-found: error
+
+      - name: Upload CapOS build logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-capos-build-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/weekly-capos-${{ matrix.arch }}/qemu
+            ${{ runner.temp }}/weekly-capos-${{ matrix.arch }}/capos-commit
+            ${{ runner.temp }}/weekly-capos-${{ matrix.arch }}/capos-*.log
+            ${{ runner.temp }}/weekly-capos-${{ matrix.arch }}/capos-config-*
+          if-no-files-found: ignore
+
+  qemu-chaos-matrix:
+    name: QEMU chaos (${{ matrix.suite }}, ${{ matrix.arch }})
+    needs: qemu-image-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.job_timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            suite: rootfs-stress
+            script: scripts/qemu/rootfs_stress.sh
+            qemu_timeout: "4800"
+            stress_workers: "10"
+            chaos_files: ""
+            chaos_workers: ""
+            job_timeout: 95
+          - arch: arm64
+            suite: rootfs-stress
+            script: scripts/qemu/rootfs_stress.sh
+            qemu_timeout: "5400"
+            stress_workers: "8"
+            chaos_files: ""
+            chaos_workers: ""
+            job_timeout: 110
+          - arch: x86_64
+            suite: block-lifecycle-stress
+            script: scripts/qemu/block_lifecycle_stress.sh
+            qemu_timeout: "2400"
+            stress_workers: ""
+            chaos_files: ""
+            chaos_workers: ""
+            job_timeout: 55
+          - arch: arm64
+            suite: block-lifecycle-stress
+            script: scripts/qemu/block_lifecycle_stress.sh
+            qemu_timeout: "3000"
+            stress_workers: ""
+            chaos_files: ""
+            chaos_workers: ""
+            job_timeout: 65
+          - arch: x86_64
+            suite: crash-recovery
+            script: scripts/qemu/crash_recovery.sh
+            qemu_timeout: "2400"
+            stress_workers: ""
+            chaos_files: ""
+            chaos_workers: ""
+            job_timeout: 60
+          - arch: arm64
+            suite: crash-recovery
+            script: scripts/qemu/crash_recovery.sh
+            qemu_timeout: "3000"
+            stress_workers: ""
+            chaos_files: ""
+            chaos_workers: ""
+            job_timeout: 75
+          - arch: x86_64
+            suite: mixed-chaos
+            script: scripts/qemu/mixed_chaos.sh
+            qemu_timeout: "4800"
+            stress_workers: ""
+            chaos_files: "320"
+            chaos_workers: "10"
+            job_timeout: 100
+          - arch: arm64
+            suite: mixed-chaos
+            script: scripts/qemu/mixed_chaos.sh
+            qemu_timeout: "5400"
+            stress_workers: ""
+            chaos_files: "280"
+            chaos_workers: "8"
+            job_timeout: 115
+    steps:
+      - name: Checkout ArgosFS
+        uses: actions/checkout@v7
+
+      - name: Install QEMU test dependencies
+        env:
+          ARGOSFS_CI_QEMU_ARCH: ${{ matrix.arch }}
+        run: scripts/ci/install-deps.sh
+
+      - name: Download QEMU bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: weekly-capos-qemu-bundle-${{ matrix.arch }}
+          path: ${{ runner.temp }}/weekly-capos-qemu-bundle-${{ matrix.arch }}
+
+      - name: Prepare mutable QEMU image
+        env:
+          ARGOSFS_QEMU_BUNDLE_DIR: ${{ runner.temp }}/weekly-capos-qemu-bundle-${{ matrix.arch }}
+          ARGOSFS_QEMU_WORKDIR: ${{ runner.temp }}/weekly-qemu-work-${{ matrix.arch }}-${{ matrix.suite }}
+        run: scripts/ci/prepare-qemu-test-env.sh
+
+      - name: Run high-intensity QEMU chaos suite
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-qemu-${{ matrix.arch }}-${{ matrix.suite }}
+          ARGOSFS_QEMU_MEM: "1536"
+          ARGOSFS_QEMU_TIMEOUT: ${{ matrix.qemu_timeout }}
+          ARGOSFS_QEMU_STRESS_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.qemu_stress_seconds || '3600' }}
+          ARGOSFS_QEMU_STRESS_WORKERS: ${{ matrix.stress_workers }}
+          ARGOSFS_QEMU_CHAOS_FILES: ${{ matrix.chaos_files }}
+          ARGOSFS_QEMU_CHAOS_WORKERS: ${{ matrix.chaos_workers }}
+        run: ${{ matrix.script }}
+
+      - name: Upload QEMU chaos artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: weekly-qemu-${{ matrix.arch }}-${{ matrix.suite }}
+          path: ${{ runner.temp }}/weekly-qemu-${{ matrix.arch }}-${{ matrix.suite }}
+          if-no-files-found: ignore
+
+  weekly-required:
+    name: Weekly four-matrix gate
+    runs-on: ubuntu-24.04
+    needs:
+      - prepare-matrix
+      - core-randomized-matrix
+      - fuse-posix-matrix
+      - fuse-block-fault-matrix
+      - qemu-image-build
+      - qemu-chaos-matrix
+    if: always()
+    steps:
+      - name: Verify all weekly matrices
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {
+              name: result["result"]
+              for name, result in needs.items()
+              if result["result"] != "success"
+          }
+          if failed:
+              raise SystemExit(f"weekly four-matrix gates did not all pass: {failed}")
+          print("weekly core, FUSE, storage-fault, and QEMU matrices passed")
+          PY
 
   open-issue-on-failure:
     name: Open issue on weekly failure
     needs:
       - prepare-matrix
-      - randomized-model-stress
-      - mounted-posix-compat
-      - block-fault-injection
-    if: ${{ always() && github.event_name == 'schedule' && (needs.prepare-matrix.result != 'success' || needs.randomized-model-stress.result != 'success' || needs.mounted-posix-compat.result != 'success' || needs.block-fault-injection.result != 'success') }}
+      - weekly-required
+    if: ${{ always() && github.event_name == 'schedule' && needs.weekly-required.result != 'success' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Open or update failure issue
@@ -230,19 +614,23 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HEAD_SHA: ${{ github.sha }}
-          TITLE: Weekly high-intensity chaos CI failure
+          TITLE: Weekly four-matrix chaos CI failure
+          SEEDS: ${{ needs.prepare-matrix.outputs.seeds }}
+          FUSE_SEEDS: ${{ needs.prepare-matrix.outputs.fuse_seeds }}
+          FAULT_SEEDS: ${{ needs.prepare-matrix.outputs.fault_seeds }}
         run: |
           set -euo pipefail
           existing="$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
           body="$(cat <<EOF
-          Weekly high-intensity chaos CI failed or was cancelled.
+          Weekly four-matrix chaos CI failed or was cancelled.
 
           - Run: $RUN_URL
           - Commit: $HEAD_SHA
-          - Workflow: $GITHUB_WORKFLOW
-          - Run ID: $GITHUB_RUN_ID
+          - Core seeds: $SEEDS
+          - FUSE seeds: $FUSE_SEEDS
+          - FUSE block-fault seeds: $FAULT_SEEDS
 
-          The workflow includes fresh randomized-model shards on x86_64 and arm64, mandatory mounted multi-user POSIX checks, real pjdfstest execution, and raw block EIO/corruption injection. Download the weekly-random-seed-manifest artifact for the complete generated seed set. Each randomized shard artifact contains operation logs, command logs, metadata, and exported-tree checkpoints. Reproduce with the seed and environment values recorded in logs/metadata.json.
+          The required gate covers the direct core reference model on x86_64 and arm64, mounted FUSE randomized/POSIX compatibility, FUSE plus real device-mapper faults, and full CapOS QEMU chaos on x86_64 and arm64. Download the seed manifest and the failing shard artifacts for exact replay parameters and logs.
           EOF
           )"
           if [ -n "$existing" ]; then
