@@ -128,6 +128,8 @@ import random
 import sys
 root = Path(sys.argv[1])
 rng = random.Random(int(sys.argv[2], 0))
+for directory in ("dev", "proc", "run", "sys"):
+    (root / directory).mkdir(parents=True, exist_ok=True)
 (root / "data").mkdir(parents=True, exist_ok=True)
 for index in range(192):
     size = 4096 + rng.randrange(192 * 1024)
