@@ -160,10 +160,11 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: weekly-core-random-${{ matrix.arch }}
+          key: weekly-core-random-${{ matrix.arch }}-release
 
       - name: Run high-intensity core reference model
         env:
+          ARGOSFS_CARGO_PROFILE: release
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-core-${{ matrix.arch }}-${{ matrix.seed }}
           ARGOSFS_RANDOM_MODEL_OPS: ${{ matrix.arch == 'arm64' && (github.event_name == 'workflow_dispatch' && inputs.arm64_ops || matrix.default_ops) || (github.event_name == 'workflow_dispatch' && inputs.ops || matrix.default_ops) }}
           ARGOSFS_RANDOM_MODEL_CHECK_INTERVAL: "150"
@@ -233,11 +234,12 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: weekly-fuse-${{ matrix.mode }}-${{ matrix.arch }}
+          key: weekly-fuse-${{ matrix.mode }}-${{ matrix.arch }}-release
 
       - name: Run mounted randomized POSIX model
         if: matrix.mode == 'randomized'
         env:
+          ARGOSFS_CARGO_PROFILE: release
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-fuse-${{ matrix.arch }}-${{ matrix.seed }}
           ARGOSFS_REQUIRE_FUSE_RANDOM: "1"
           ARGOSFS_FUSE_RANDOM_SEED: ${{ matrix.seed }}
