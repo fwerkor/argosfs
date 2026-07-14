@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn verify_journal_cli_supports_loop_backend() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 3);
+    let fs = ArgosFs::create_loop(
+        &images,
+        config(2, 1),
+        32 * 1024 * 1024,
+        "verify-journal-cli",
+        false,
+    )
+    .unwrap();
+    fs.write_file("/payload", b"journal cli block backend", 0o644)
+        .unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let image_list = images
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(",");
+    let output = Command::new(argosfs_binary())
+        .args([
+            "verify-journal",
+            "--backend",
+            "loop",
+            "--images",
+            &image_list,
+            "--pool",
+            "verify-journal-cli",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "verify-journal failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["invalid_entries"], 0);
+    assert_eq!(report["double_write_mismatches"], 0);
+}
+
+#[test]
 fn single_device_loop_rootfs_smoke_import_export() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
