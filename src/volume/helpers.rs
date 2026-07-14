@@ -150,6 +150,18 @@ pub(super) fn validate_commit_policy(config: &VolumeConfig) -> Result<()> {
             "defer-data-flush requires defer-metadata-commit".to_string(),
         ));
     }
+    if config.defer_metadata_commit && config.deferred_commit_interval_ms == 0 {
+        return Err(ArgosError::Invalid(
+            "deferred-commit-interval-ms must be positive when metadata commits are deferred"
+                .to_string(),
+        ));
+    }
+    if config.defer_metadata_commit && config.deferred_commit_max_transactions == 0 {
+        return Err(ArgosError::Invalid(
+            "deferred-commit-max-transactions must be positive when metadata commits are deferred"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 

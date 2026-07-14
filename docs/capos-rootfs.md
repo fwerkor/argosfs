@@ -23,13 +23,21 @@ CapOS root tree with build-time batching enabled by default:
 
 ```bash
 argosfs mkfs --backend loop --images disk0.img --k 1 --m 0 \
-  --defer-journal-flush --defer-metadata-commit --defer-data-flush
+  --defer-journal-flush --defer-metadata-commit --defer-data-flush \
+  --deferred-commit-interval-ms 5000 \
+  --deferred-commit-max-transactions 128
 argosfs import-tree --backend loop --images disk0.img ROOT /
 ```
 
-These acceleration flags are used while constructing the immutable image. The
-resulting rootfs still goes through the normal preflight/fsck boundary before it
-is mounted as a runtime root filesystem.
+Bulk import commits once after the prepared tree has been copied. At runtime,
+the same volume uses bounded group commit rather than an unbounded in-memory
+batch: the FUSE frontend commits at least every five seconds or 128 metadata
+transactions, whichever comes first. Application `fsync`/`fdatasync` and
+synchronous opens remain immediate durability boundaries. Replaced extents are
+not reused until their replacement metadata is durable.
+
+The resulting rootfs still goes through the normal preflight/fsck boundary
+before it is mounted.
 
 The single-device image can evolve online into redundant layouts as devices are
 added:

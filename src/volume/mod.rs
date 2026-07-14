@@ -28,6 +28,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 thread_local! {
@@ -78,6 +79,27 @@ pub use autopilot::{AutopilotConfig, ReshapeReport};
 use helpers::*;
 use namespace::*;
 
+#[derive(Clone, Debug)]
+struct DeferredCommitState {
+    durable_metadata: Option<Metadata>,
+    dirty_transactions: u64,
+    dirty_since: Option<Instant>,
+    pending_reclaims: Vec<FileBlock>,
+    last_error: Option<String>,
+}
+
+impl DeferredCommitState {
+    fn new(meta: &Metadata) -> Self {
+        Self {
+            durable_metadata: (meta.backend != BackendKind::Host).then(|| meta.clone()),
+            dirty_transactions: 0,
+            dirty_since: None,
+            pending_reclaims: Vec::new(),
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ArgosFs {
     root: Arc<PathBuf>,
@@ -85,6 +107,7 @@ pub struct ArgosFs {
     backend_writable: bool,
     raw_superblocks: Arc<Vec<RawSuperblock>>,
     meta: Arc<RwLock<Metadata>>,
+    deferred_commit: Arc<Mutex<DeferredCommitState>>,
     dirty_host_shards: Arc<Mutex<BTreeSet<PathBuf>>>,
     inode_locks: Arc<Mutex<BTreeMap<InodeId, Arc<Mutex<()>>>>>,
     cache: Arc<BlockCache>,
@@ -292,6 +315,7 @@ impl ArgosFs {
             backend_writable: true,
             raw_superblocks: Arc::new(Vec::new()),
             root: Arc::new(root),
+            deferred_commit: Arc::new(Mutex::new(DeferredCommitState::new(&meta))),
             meta: Arc::new(RwLock::new(meta)),
             dirty_host_shards: Arc::new(Mutex::new(BTreeSet::new())),
             inode_locks: Arc::new(Mutex::new(BTreeMap::new())),
@@ -483,6 +507,7 @@ impl ArgosFs {
             backend,
             backend_writable,
             raw_superblocks: Arc::new(superblocks),
+            deferred_commit: Arc::new(Mutex::new(DeferredCommitState::new(&meta))),
             meta: Arc::new(RwLock::new(meta)),
             dirty_host_shards: Arc::new(Mutex::new(BTreeSet::new())),
             inode_locks: Arc::new(Mutex::new(BTreeMap::new())),
@@ -508,13 +533,29 @@ impl ArgosFs {
         journal::scan(&self.root)
     }
 
+    pub fn deferred_commit_interval(&self) -> Option<Duration> {
+        let meta = self.meta.read();
+        (self.backend_writable
+            && meta.backend != BackendKind::Host
+            && meta.config.defer_metadata_commit)
+            .then(|| Duration::from_millis(meta.config.deferred_commit_interval_ms))
+    }
+
+    pub fn sync_deferred_if_dirty(&self) -> Result<bool> {
+        if !self.backend_writable || self.deferred_commit.lock().dirty_transactions == 0 {
+            return Ok(false);
+        }
+        self.sync()?;
+        Ok(true)
+    }
+
     pub fn sync(&self) -> Result<()> {
         let mut meta = self.meta.write();
         if meta.backend != BackendKind::Host {
             self.ensure_block_backend_writable_locked(&meta)?;
             if bulk_import_enabled() || meta.config.defer_metadata_commit {
-                let previous_meta_hash = meta.integrity.meta_hash.clone();
-                journal::prepare_metadata_integrity_with_previous(&mut meta, previous_meta_hash)?;
+                self.commit_deferred_locked(&mut meta, bulk_import_enabled())?;
+                return Ok(());
             }
             let superblocks = self.active_superblocks_locked(&meta)?;
             let backend = self.active_block_backend_locked(&meta, true)?;
@@ -553,6 +594,10 @@ impl ArgosFs {
         self.ensure_block_backend_writable_locked(&meta)?;
         let superblocks = self.active_superblocks_locked(&meta)?;
         let backend = self.active_block_backend_locked(&meta, true)?;
+        if meta.config.defer_metadata_commit {
+            raw_store::write_metadata_copies(&backend, &superblocks, &meta)?;
+            backend.flush_all()?;
+        }
         raw_store::write_superblock_clean_state(&backend, &superblocks, true)?;
         backend.flush_all()
     }
@@ -836,7 +881,6 @@ impl ArgosFs {
         } else {
             file_type | (mode & 0o7777)
         };
-        let is_regular_file = kind == NodeKind::File && rdev == 0;
         let inode = Inode {
             id: ino,
             kind,
@@ -873,10 +917,6 @@ impl ArgosFs {
             .entries
             .insert(name.to_string(), ino);
         self.touch_inode_locked(meta, parent, true, true);
-        if meta.backend != BackendKind::Host && meta.config.defer_metadata_commit && is_regular_file
-        {
-            return Ok(ino);
-        }
         if let Err(err) = self.commit_locked_with_previous(
             meta,
             rollback.as_ref(),
@@ -1359,6 +1399,104 @@ impl ArgosFs {
         )
     }
 
+    fn note_deferred_transaction_locked(&self, meta: &mut Metadata) -> Result<()> {
+        let should_commit = {
+            let mut state = self.deferred_commit.lock();
+            if state.dirty_transactions == 0 {
+                state.dirty_since = Some(Instant::now());
+            }
+            state.dirty_transactions = state.dirty_transactions.saturating_add(1);
+            let age_due = state.dirty_since.is_some_and(|since| {
+                since.elapsed() >= Duration::from_millis(meta.config.deferred_commit_interval_ms)
+            });
+            !bulk_import_enabled()
+                && (state.dirty_transactions >= meta.config.deferred_commit_max_transactions
+                    || age_due)
+        };
+        if should_commit {
+            self.commit_deferred_locked(meta, false)?;
+        }
+        Ok(())
+    }
+
+    fn commit_deferred_locked(&self, meta: &mut Metadata, checkpoint: bool) -> Result<bool> {
+        self.ensure_block_backend_writable_locked(meta)?;
+        let mut state = self.deferred_commit.lock();
+        if state.dirty_transactions == 0 && state.pending_reclaims.is_empty() {
+            return Ok(false);
+        }
+
+        let previous = state
+            .durable_metadata
+            .clone()
+            .unwrap_or_else(|| meta.clone());
+        let before_commit = meta.clone();
+        let dirty_transactions = state.dirty_transactions;
+        let previous_meta_hash = if previous.integrity.meta_hash.is_empty() {
+            journal::canonical_metadata_hash(&previous)?
+        } else {
+            previous.integrity.meta_hash.clone()
+        };
+
+        let result = (|| -> Result<()> {
+            for block in &state.pending_reclaims {
+                self.account_blocks_locked(meta, std::slice::from_ref(block), false);
+                self.delete_blocks_locked(meta, std::slice::from_ref(block));
+            }
+            journal::prepare_metadata_integrity_with_previous(meta, previous_meta_hash.clone())?;
+            let superblocks = self.active_superblocks_locked(meta)?;
+            let backend = self.active_block_backend_locked(meta, true)?;
+            if meta.config.defer_data_flush || bulk_import_enabled() {
+                backend.flush_all()?;
+                journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
+            }
+            if checkpoint {
+                raw_store::write_metadata_copies(&backend, &superblocks, meta)?;
+            } else {
+                raw_store::append_transaction_with_previous(
+                    &backend,
+                    &superblocks,
+                    meta,
+                    Some(&previous),
+                    "group-commit",
+                    json!({
+                        "transactions": dirty_transactions,
+                        "previous_txid": previous.txid,
+                        "txid": meta.txid,
+                    }),
+                )?;
+            }
+            backend.flush_all()
+        })();
+
+        match result {
+            Ok(()) => {
+                state.durable_metadata = Some(meta.clone());
+                state.dirty_transactions = 0;
+                state.dirty_since = None;
+                state.pending_reclaims.clear();
+                state.last_error = None;
+                Ok(true)
+            }
+            Err(err)
+                if !meta.config.defer_journal_flush
+                    && Self::transaction_error_is_committed(&err) =>
+            {
+                state.durable_metadata = Some(meta.clone());
+                state.dirty_transactions = 0;
+                state.dirty_since = None;
+                state.pending_reclaims.clear();
+                state.last_error = Some(err.to_string());
+                Err(err)
+            }
+            Err(err) => {
+                *meta = before_commit;
+                state.last_error = Some(err.to_string());
+                Err(err)
+            }
+        }
+    }
+
     fn commit_locked(
         &self,
         meta: &mut Metadata,
@@ -1381,6 +1519,7 @@ impl ArgosFs {
         {
             meta.txid += 1;
             meta.updated_at = now_f64();
+            self.note_deferred_transaction_locked(meta)?;
             return Ok(());
         }
         let previous_meta_hash = if meta.integrity.meta_hash.is_empty() {
