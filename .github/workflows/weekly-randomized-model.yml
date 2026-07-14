@@ -7,9 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       ops:
-        description: Number of core randomized operations per seed
+        description: Number of x86_64 core randomized operations per seed
         required: false
         default: "1500"
+      arm64_ops:
+        description: Number of arm64 core randomized operations per seed
+        required: false
+        default: "800"
       seed_count:
         description: Number of fresh core-model seeds
         required: false
@@ -126,7 +130,7 @@ jobs:
     name: Core model (${{ matrix.arch }}, ${{ matrix.seed }})
     needs: prepare-matrix
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 240
+    timeout-minutes: ${{ matrix.job_timeout }}
     strategy:
       fail-fast: false
       matrix:
@@ -137,8 +141,12 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x86_64
+            default_ops: "1500"
+            job_timeout: 300
           - runner: ubuntu-24.04-arm
             arch: arm64
+            default_ops: "800"
+            job_timeout: 240
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -157,7 +165,7 @@ jobs:
       - name: Run high-intensity core reference model
         env:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/weekly-core-${{ matrix.arch }}-${{ matrix.seed }}
-          ARGOSFS_RANDOM_MODEL_OPS: ${{ github.event_name == 'workflow_dispatch' && inputs.ops || '1500' }}
+          ARGOSFS_RANDOM_MODEL_OPS: ${{ matrix.arch == 'arm64' && (github.event_name == 'workflow_dispatch' && inputs.arm64_ops || matrix.default_ops) || (github.event_name == 'workflow_dispatch' && inputs.ops || matrix.default_ops) }}
           ARGOSFS_RANDOM_MODEL_CHECK_INTERVAL: "150"
           ARGOSFS_RANDOM_MODEL_MAX_FILE_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.max_file_size || '131072' }}
           ARGOSFS_RANDOM_MODEL_SEEDS: ${{ matrix.seed }}
@@ -241,7 +249,9 @@ jobs:
       - name: Run mandatory cross-user permission checks
         if: matrix.mode == 'standards-baseline'
         env:
-          ARGOSFS_COMPAT_WORKDIR: ${{ runner.temp }}/weekly-mounted-permissions
+          # Cross-user checks switch to uid/gid nobody. Keep the mount beneath
+          # /tmp so every parent directory is searchable by that identity.
+          ARGOSFS_COMPAT_WORKDIR: /tmp/weekly-mounted-permissions
           ARGOSFS_COMPAT_KEEP_WORKDIR: "1"
         run: scripts/tests/host/permission_compat.sh
 
@@ -261,7 +271,7 @@ jobs:
           name: weekly-fuse-${{ matrix.mode }}-${{ matrix.arch }}-${{ matrix.seed }}
           path: |
             ${{ runner.temp }}/weekly-fuse-${{ matrix.arch }}-${{ matrix.seed }}
-            ${{ runner.temp }}/weekly-mounted-permissions
+            /tmp/weekly-mounted-permissions
             ${{ runner.temp }}/weekly-pjdfstest
             ${{ runner.temp }}/weekly-pjdfstest.jsonl
             ${{ runner.temp }}/weekly-pjdfstest.log

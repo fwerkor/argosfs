@@ -726,8 +726,16 @@ pub fn run() -> Result<()> {
             let acl = fs.get_nfs4_acl_path(&path)?.unwrap_or_default();
             println!("{}", acl::nfs4_to_json(&acl)?);
         }
-        Command::VerifyJournal { root } => {
-            let report = ArgosFs::audit_transactions(root)?;
+        Command::VerifyJournal {
+            root,
+            backend,
+            images,
+            devices,
+            pool,
+        } => {
+            let fs = open_backend(root, backend, images, devices, false)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
+            let report = fs.transaction_report()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if report.invalid_entries > 0 || report.double_write_mismatches > 0 {
                 bail!(

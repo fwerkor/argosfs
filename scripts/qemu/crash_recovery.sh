@@ -16,8 +16,7 @@ commands1="$artifacts/qemu-crash-recovery-phase1.commands"
 commands2="$artifacts/qemu-crash-recovery-phase2.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-1800}"
-login_delay_s="${ARGOSFS_QEMU_CRASH_LOGIN_DELAY:-140}"
-login_delay_s="$(argosfs_qemu_adjust_login_delay "$login_delay_s")"
+console_timeout_s="${ARGOSFS_QEMU_CRASH_CONSOLE_TIMEOUT:-420}"
 command_delay_s="${ARGOSFS_QEMU_CRASH_COMMAND_DELAY:-1}"
 done_marker="ARGOSFS_QEMU_CRASH_RECOVERY_DONE"
 
@@ -88,6 +87,22 @@ echo ARGOSFS_QEMU_CRASH_RECOVERY_DONE
 poweroff -f || reboot -f || halt -f
 CMDS
 
+wait_for_console_prompt() {
+  local log="$1" deadline=$((SECONDS + console_timeout_s))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if grep -Eiq "$reject" "$log" 2>/dev/null; then
+      echo "QEMU crash recovery rejected while waiting for the console: $reject" >&2
+      return 2
+    fi
+    if grep -Fq 'Please press Enter to activate this console.' "$log" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timed out waiting for the QEMU console prompt in $log" >&2
+  return 1
+}
+
 qemu_device_add() {
   local idx="$1" path="$2"
   local bus_arg rom_arg
@@ -111,11 +126,11 @@ run_phase1_until_kill_marker() {
   # QEMU output is intentionally polled while this pipeline appends to the log.
   # shellcheck disable=SC2094
   (
-    sleep "$login_delay_s"
+    wait_for_console_prompt "$log1" || exit $?
     printf '\r'
     sleep "$command_delay_s"
     while IFS= read -r line; do
-      printf '%s\r' "$line"
+      printf '%s\r' "$line" || exit 0
       sleep "$command_delay_s"
       if [ "$line" = "echo ARGOSFS_WAIT_CRASH_HOTPLUG" ]; then
         argosfs_qemu_wait_log_marker "$log1" ARGOSFS_WAIT_CRASH_HOTPLUG 180
@@ -149,11 +164,11 @@ run_phase2() {
   # QEMU output is intentionally polled while this pipeline appends to the log.
   # shellcheck disable=SC2094
   (
-    sleep "$login_delay_s"
+    wait_for_console_prompt "$log2" || exit $?
     printf '\r'
     sleep "$command_delay_s"
     while IFS= read -r line; do
-      printf '%s\r' "$line"
+      printf '%s\r' "$line" || exit 0
       sleep "$command_delay_s"
     done <"$commands2"
   ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log2" 2>&1

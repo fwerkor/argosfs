@@ -331,7 +331,13 @@ def apply_operation(
 
     elif operation == "chmod" and (files or len(dirs) > 1):
         rel = rng.choice(files + [path for path in dirs if path != "."])
-        mode = rng.choice([0o600, 0o640, 0o644, 0o700, 0o750, 0o755, 0o775])
+        if rel in files:
+            mode = rng.choice([0o600, 0o640, 0o644, 0o660, 0o664])
+        else:
+            # Directories must remain searchable by the test process. Applying
+            # regular-file modes such as 0644 makes later reference-tree walks
+            # fail before the corresponding ArgosFS operation is exercised.
+            mode = rng.choice([0o700, 0o750, 0o755, 0o770, 0o775])
         apply_both(reference, mounted, lambda root: os.chmod(root / rel, mode))
         event.update(path=rel, mode=oct(mode))
 
@@ -370,7 +376,12 @@ def apply_operation(
         rel = rng.choice(files + [path for path in dirs if path != "."])
         left = os.lstat(reference / rel)
         right = os.lstat(mounted / rel)
-        if stat.S_IFMT(left.st_mode) != stat.S_IFMT(right.st_mode) or left.st_size != right.st_size:
+        same_type = stat.S_IFMT(left.st_mode) == stat.S_IFMT(right.st_mode)
+        same_file_size = not stat.S_ISREG(left.st_mode) or left.st_size == right.st_size
+        # POSIX does not require directory st_size to match across filesystem
+        # implementations. Host filesystems and FUSE commonly report different
+        # directory sizes for identical directory contents.
+        if not same_type or not same_file_size:
             raise AssertionError(f"stat mismatch: {rel}")
         list(os.scandir(mounted / rng.choice(dirs)))
         event.update(path=rel)

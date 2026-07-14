@@ -277,20 +277,29 @@ case "$profile" in
 import json
 import sys
 superblock = json.load(open(sys.argv[1]))["superblock"]
-print(int(superblock["data"]["offset"]) + 4096)
+print(int(superblock["data"]["offset"]))
 PY
 )"
-    python3 - "$work/corruption.bin" "$seed" <<'PY'
-from pathlib import Path
-import random
+    sudo blockdev --flushbufs "${mappers[0]}" || true
+    sudo python3 - "${mappers[0]}" "$corrupt_offset" >"$artifacts/logs/corruption-injection.json" <<'PY'
+import json
+import os
 import sys
-rng = random.Random(int(sys.argv[2], 0) ^ 0xF053C0DE)
-Path(sys.argv[1]).write_bytes(rng.randbytes(4096))
+
+path = sys.argv[1]
+offset = int(sys.argv[2])
+with open(path, "r+b", buffering=0) as stream:
+    stream.seek(offset)
+    original = stream.read(1)
+    if len(original) != 1:
+        raise SystemExit(f"failed to read corruption target at offset {offset}")
+    replacement = bytes([original[0] ^ 0xFF])
+    stream.seek(offset)
+    stream.write(replacement)
+    os.fsync(stream.fileno())
+print(json.dumps({"offset": offset, "before": original.hex(), "after": replacement.hex()}))
 PY
-    sudo dd if="$work/corruption.bin" of="${mappers[0]}" bs=1 seek="$corrupt_offset" count=4096 conv=notrunc,fsync status=none
-    start_mount "$devs" rw
-    verify_all_files
-    stop_mount
+    sudo blockdev --flushbufs "${mappers[0]}" || true
     sudo rm -rf "$work/cache"
     "${argosfs_sudo[@]}" scrub --backend raw --devices "$devs" >"$artifacts/logs/scrub-after-corruption.json"
     python3 - "$artifacts/logs/scrub-after-corruption.json" <<'PY'
@@ -302,6 +311,9 @@ if report.get("damaged_files", 0) < 1 or report.get("repaired_files", 0) < 1:
 if report.get("unrecoverable_files", 0) != 0:
     raise SystemExit(f"single-device corruption became unrecoverable: {report}")
 PY
+    start_mount "$devs" rw
+    verify_all_files
+    stop_mount
     final_offline_check
     ;;
 
