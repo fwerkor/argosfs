@@ -6,8 +6,21 @@ artifacts_root="${ARGOSFS_TEST_ARTIFACTS:-$repo/target/argosfs-test-artifacts/ra
 rm -rf "$artifacts_root"
 mkdir -p "$artifacts_root"
 
-cargo build --manifest-path "$repo/Cargo.toml" --bin argosfs --locked
-argosfs="$repo/target/debug/argosfs"
+profile="${ARGOSFS_CARGO_PROFILE:-debug}"
+case "$profile" in
+  debug)
+    profile_args=()
+    ;;
+  release)
+    profile_args=(--release)
+    ;;
+  *)
+    echo "ERROR: ARGOSFS_CARGO_PROFILE must be debug or release, got: $profile" >&2
+    exit 2
+    ;;
+esac
+cargo build --manifest-path "$repo/Cargo.toml" --bin argosfs --locked "${profile_args[@]}"
+argosfs="$repo/target/$profile/argosfs"
 
 ops="${ARGOSFS_RANDOM_MODEL_OPS:-250}"
 check_interval="${ARGOSFS_RANDOM_MODEL_CHECK_INTERVAL:-50}"

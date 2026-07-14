@@ -29,8 +29,21 @@ else
   fail_or_skip "fusermount3/fusermount is unavailable"
 fi
 
-cargo build --manifest-path "$repo/Cargo.toml" --bin argosfs --locked
-argosfs="$repo/target/debug/argosfs"
+profile="${ARGOSFS_CARGO_PROFILE:-debug}"
+case "$profile" in
+  debug)
+    profile_args=()
+    ;;
+  release)
+    profile_args=(--release)
+    ;;
+  *)
+    echo "ERROR: ARGOSFS_CARGO_PROFILE must be debug or release, got: $profile" >&2
+    exit 2
+    ;;
+esac
+cargo build --manifest-path "$repo/Cargo.toml" --bin argosfs --locked "${profile_args[@]}"
+argosfs="$repo/target/$profile/argosfs"
 
 python3 "$repo/scripts/tests/host/randomized_fuse.py" \
   --argosfs "$argosfs" \
@@ -39,4 +52,5 @@ python3 "$repo/scripts/tests/host/randomized_fuse.py" \
   --ops "${ARGOSFS_FUSE_RANDOM_OPS:-1000}" \
   --checkpoint-interval "${ARGOSFS_FUSE_RANDOM_CHECK_INTERVAL:-200}" \
   --max-file-size "${ARGOSFS_FUSE_RANDOM_MAX_FILE_SIZE:-131072}" \
+  --parallel-timeout "${ARGOSFS_FUSE_RANDOM_PARALLEL_TIMEOUT:-90}" \
   --fusermount "$fusermount"

@@ -199,7 +199,13 @@ def concurrent_worker(root: Path, rel_dir: str, worker: int, chunks: list[bytes]
     fsync_parent(final)
 
 
-def concurrent_burst(reference: Path, mounted: Path, op_index: int, rng: random.Random) -> dict[str, object]:
+def concurrent_burst(
+    reference: Path,
+    mounted: Path,
+    op_index: int,
+    rng: random.Random,
+    timeout: float,
+) -> dict[str, object]:
     rel_dir = f"parallel/round-{op_index:06d}"
     worker_chunks: list[list[bytes]] = []
     for worker in range(6):
@@ -209,8 +215,17 @@ def concurrent_burst(reference: Path, mounted: Path, op_index: int, rng: random.
             executor.submit(concurrent_worker, mounted, rel_dir, worker, worker_chunks[worker])
             for worker in range(6)
         ]
-        for future in futures:
-            future.result(timeout=90)
+        for worker, future in enumerate(futures):
+            try:
+                future.result(timeout=timeout)
+            except TimeoutError as error:
+                pending_workers = [
+                    index for index, candidate in enumerate(futures) if not candidate.done()
+                ]
+                raise TimeoutError(
+                    f"parallel burst op={op_index} worker={worker} exceeded "
+                    f"{timeout:.0f}s; pending_workers={pending_workers}"
+                ) from error
     for worker in range(6):
         concurrent_worker(reference, rel_dir, worker, worker_chunks[worker])
     return {"path": rel_dir, "workers": 6, "chunks_per_worker": 12}
@@ -222,6 +237,7 @@ def apply_operation(
     rng: random.Random,
     op_index: int,
     max_file_size: int,
+    parallel_timeout: float,
 ) -> dict[str, object]:
     files = by_kind(reference, "file")
     links = by_kind(reference, "symlink")
@@ -438,7 +454,7 @@ def apply_operation(
             event.update(fallback="no-nonempty-file")
 
     elif operation == "parallel":
-        event.update(concurrent_burst(reference, mounted, op_index, rng))
+        event.update(concurrent_burst(reference, mounted, op_index, rng, parallel_timeout))
 
     elif empty_dirs:
         rel = rng.choice(empty_dirs)
@@ -537,14 +553,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ops", type=int, default=1000)
     parser.add_argument("--checkpoint-interval", type=int, default=200)
     parser.add_argument("--max-file-size", type=int, default=131072)
+    parser.add_argument("--parallel-timeout", type=float, default=90.0)
     parser.add_argument("--fusermount", required=True)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.ops < 1 or args.checkpoint_interval < 1 or args.max_file_size < 1:
-        raise SystemExit("ops, checkpoint interval, and max file size must be positive")
+    if (
+        args.ops < 1
+        or args.checkpoint_interval < 1
+        or args.max_file_size < 1
+        or args.parallel_timeout <= 0
+    ):
+        raise SystemExit(
+            "ops, checkpoint interval, max file size, and parallel timeout must be positive"
+        )
     args.artifacts = args.artifacts.resolve()
     if args.artifacts.exists():
         shutil.rmtree(args.artifacts)
@@ -563,6 +587,7 @@ def main() -> int:
         "ops": args.ops,
         "checkpoint_interval": args.checkpoint_interval,
         "max_file_size": args.max_file_size,
+        "parallel_timeout": args.parallel_timeout,
         "commit": os.environ.get("GITHUB_SHA", "local"),
     }
     (args.artifacts / "logs").mkdir(parents=True, exist_ok=True)
@@ -581,7 +606,14 @@ def main() -> int:
     try:
         mount.start()
         for op_index in range(1, args.ops + 1):
-            event = apply_operation(reference, args.mountpoint, rng, op_index, args.max_file_size)
+            event = apply_operation(
+                reference,
+                args.mountpoint,
+                rng,
+                op_index,
+                args.max_file_size,
+                args.parallel_timeout,
+            )
             write_jsonl(operation_log, event)
             if op_index % args.checkpoint_interval == 0 and op_index != args.ops:
                 checkpoint(args, mount, reference, op_index, final=False)
