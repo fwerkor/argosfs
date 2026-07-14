@@ -175,39 +175,43 @@ The default GitHub Actions workflow splits validation into parallel jobs:
 
 ## Weekly High-Intensity Chaos CI
 
-`Weekly high-intensity chaos CI` runs on Saturday and can also be dispatched
-manually. It contains three independent gates so a failure in one family does
-not hide results from the others:
+`Weekly high-intensity chaos CI` runs every Wednesday at 03:00 in the
+Asia/Shanghai time zone and can also be dispatched manually. One required gate
+combines four large parallel matrices:
 
-- The randomized reference-model matrix generates 12 fresh cryptographic
-  64-bit seeds by default for each run. Every seed runs independently on
-  x86_64 and arm64 with 1,200 operations against a 4+2 volume. The generated
-  seed set, commit, run ID, parameters, operation stream, and exported-tree
-  checkpoints are retained for exact replay. Manual dispatch accepts explicit
-  comma-separated seeds for reproducing a prior failure.
-- The mounted POSIX gate uses a real FUSE mount with
-  `allow_other,default_permissions`. It switches UID and GID to verify owner,
-  group, and other access; directory search permission; setgid inheritance;
-  chown behavior; sticky-directory enforcement; and the configured pjdfstest
-  subset. Missing FUSE or pjdfstest prerequisites fail this gate rather than
-  producing a successful skip.
-- The raw block fault gate creates loop-backed device-mapper devices, injects a
-  real `EIO` target into one member, verifies read-write root preflight failure,
-  performs concurrent degraded exports, restores the device, corrupts a raw
-  data extent, requires scrub reconstruction, and finishes with fsck, journal,
-  and byte-for-byte export checks.
+- The core reference-model matrix generates 12 fresh cryptographic 64-bit seeds
+  by default. Every seed runs independently on x86_64 and arm64 with 1,500
+  direct core operations against a 4+2 volume, periodic fsck/scrub, and exact
+  exported-tree comparison.
+- The mounted FUSE/POSIX matrix runs six seeds on both native architectures with
+  1,200 operations per seed. It exercises ordinary and positioned writes,
+  append, sparse growth, mmap, open-file rename/unlink, hard links, xattrs,
+  fsync, concurrent workers, and periodic clean unmount, offline validation,
+  and remount. The same matrix also retains mandatory cross-user permission and
+  pjdfstest baselines.
+- The FUSE/storage-fault matrix repeats runtime read EIO reconstruction, write
+  error propagation, raw data corruption with scrub repair, and a degraded
+  read-only mount at the exact 3+2 parity limit. A direct raw CLI EIO/corruption
+  baseline remains in this matrix for independent storage-layer diagnosis.
+- The CapOS QEMU chaos matrix builds one image per architecture and runs
+  rootfs stress, block lifecycle stress, crash recovery, and mixed hot-remove,
+  replacement, hard-kill, and reboot recovery suites on x86_64 and arm64. The
+  default rootfs stress phase lasts one hour in each architecture.
 
-A scheduled failure opens or updates an issue. The seed manifest and per-shard
-artifacts provide the exact values needed to replay randomized and block-fault
-runs.
+The generated seed set, commit, run ID, parameters, operation streams, serial
+logs, and consistency checkpoints are retained for replay. Manual dispatch can
+supply explicit seeds and adjust operation counts or QEMU stress duration. A
+scheduled failure opens or updates a single issue for the combined four-matrix
+gate.
 
 
 ## Full CapOS QEMU CI
 
 The heavy `Full CapOS QEMU CI` workflow runs for pull requests, pushes to
-`main`, manual dispatches, and its weekly schedule. The workflow builds
-full CapOS images with ArgosFS as the root filesystem, discovers bootable QEMU
-artifacts, then runs real guest tests instead of artifact-gated skips.
+`main`, and manual dispatches. The workflow builds full CapOS images with
+ArgosFS as the root filesystem, discovers bootable QEMU artifacts, then runs
+real guest tests instead of artifact-gated skips. Scheduled high-intensity QEMU
+coverage is provided by the weekly four-matrix workflow instead.
 
 Default full targets:
 
