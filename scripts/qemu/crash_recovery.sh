@@ -16,7 +16,7 @@ commands1="$artifacts/qemu-crash-recovery-phase1.commands"
 commands2="$artifacts/qemu-crash-recovery-phase2.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-1800}"
-console_timeout_s="${ARGOSFS_QEMU_CRASH_CONSOLE_TIMEOUT:-1200}"
+console_timeout_s="${ARGOSFS_QEMU_CRASH_CONSOLE_TIMEOUT:-600}"
 command_delay_s="${ARGOSFS_QEMU_CRASH_COMMAND_DELAY:-1}"
 done_marker="ARGOSFS_QEMU_CRASH_RECOVERY_DONE"
 
@@ -66,9 +66,9 @@ sync
 echo ARGOSFS_READY_FOR_HOST_KILL
 i=0
 while true; do
-  printf 'dirty root write %s\n' "$i" >"/root/argosfs-hardkill/dirty-$i.txt"
+  slot=$((i % 64))
+  printf 'dirty root write %s\n' "$i" >"/root/argosfs-hardkill/dirty-$slot.txt"
   i=$((i + 1))
-  [ "$i" -lt 100000 ] || i=0
 done
 CMDS
 

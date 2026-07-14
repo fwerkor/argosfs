@@ -16,7 +16,7 @@ commands1="$artifacts/qemu-mixed-chaos-phase1.commands"
 commands2="$artifacts/qemu-mixed-chaos-phase2.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-3000}"
-console_timeout_s="${ARGOSFS_QEMU_CHAOS_CONSOLE_TIMEOUT:-1200}"
+console_timeout_s="${ARGOSFS_QEMU_CHAOS_CONSOLE_TIMEOUT:-600}"
 command_delay_s="${ARGOSFS_QEMU_CHAOS_COMMAND_DELAY:-1}"
 worker_count="${ARGOSFS_QEMU_CHAOS_WORKERS:-6}"
 file_count="${ARGOSFS_QEMU_CHAOS_FILES:-160}"
@@ -131,9 +131,9 @@ sync
 echo ARGOSFS_CHAOS_READY_FOR_HARD_KILL
 round=0
 while true; do
-  printf 'dirty chaos write %s\n' "\$round" >"/root/argosfs-chaos-live/dirty-\$round.txt"
+  slot=\$((round % 64))
+  printf 'dirty chaos write %s\n' "\$round" >"/root/argosfs-chaos-live/dirty-\$slot.txt"
   round=\$((round + 1))
-  [ "\$round" -lt 100000 ] || round=0
 done
 CMDS
 
