@@ -50,30 +50,40 @@ every member device, and readers still accept legacy single-payload checkpoints
 for existing images.
 
 The raw journal region stores length-prefixed JSON transaction records with an
-entry checksum and an internal record hash. Journal records carry full metadata
-snapshots so open can replay a newer committed transaction if checkpoint copies
-are stale. Rw open marks member superblocks dirty. `ArgosFs::sync()` writes
-metadata checkpoints, flushes devices, and marks superblocks clean.
+entry checksum and an internal record hash. Records normally carry metadata
+deltas and periodic full snapshots, so open can replay a newer committed state
+when checkpoint copies are stale. Rw open marks member superblocks dirty. A
+clean unmount writes fresh metadata checkpoint copies before marking the member
+superblocks clean.
 
-By default, each raw journal append is flushed before the metadata transaction
-returns. Volumes created with `--defer-journal-flush` keep syscall-level
-transactions ordered in the journal but defer device flushes until
-`sync`/`fsync`/clean unmount. That mode is intended for rootfs throughput
-experiments and ext4-like delayed commit semantics: a crash may lose the newest
-unflushed transactions, but recovery must keep the pool consistent and replay
-only checksum-valid records.
+By default, data and journal writes are flushed at each metadata transaction.
+Volumes created with `--defer-metadata-commit` instead use bounded group commit:
+ordinary updates are accumulated in memory and persisted as one journal
+transaction after either of these limits is reached:
 
-Volumes created with `--defer-metadata-commit` go further: ordinary metadata
-updates are batched in memory and the next `sync`/`fsync`/clean unmount writes a
-fresh checkpoint. This is a throughput mode for rootfs experiments, not a claim
-that every syscall is individually durable. A crash before the sync boundary may
-roll back to the previous checkpoint; the dirty superblock and checksum-checked
-checkpoint/journal path still make the result auditable.
+- `--deferred-commit-interval-ms` (default `5000` milliseconds); or
+- `--deferred-commit-max-transactions` (default `128` metadata transactions).
 
-`--defer-data-flush` is accepted only together with `--defer-metadata-commit`.
-It defers per-shard data fsyncs until the same sync boundary, preserving the
-ordering rule that a checkpoint should not become durable before the data it
-names. The strict default remains per-transaction data flush plus journal flush.
+The FUSE mount owns the periodic timer, so an idle dirty filesystem cannot
+remain uncommitted beyond the configured interval. A continuously busy
+filesystem is also bounded by the transaction limit. `fsync`, `fdatasync`,
+`O_SYNC`, `O_DSYNC`, explicit `ArgosFs::sync()`, and clean unmount bypass the
+timer and synchronously commit the current group.
+
+`--defer-journal-flush` avoids a separate device flush for every journal append.
+With group commit, the complete group is appended and then flushed once across
+the active members. `--defer-data-flush` is accepted only together with
+`--defer-metadata-commit`; it batches shard flushes but still enforces the
+ordering barrier that all referenced data becomes durable before the group
+journal record is committed.
+
+Raw extents replaced or deleted inside an uncommitted group remain reserved.
+ArgosFS releases them only at the same durability boundary that commits the new
+metadata, preventing a later write from overwriting data still referenced by
+the last durable checkpoint. A crash can therefore lose at most the configured
+group window, while recovery continues to use checksum-valid, quorum-supported
+metadata and journal records. The strict default remains per-transaction data
+and journal durability for volumes that do not opt into deferred commit.
 
 ## Data Extents
 

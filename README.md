@@ -88,6 +88,9 @@ reuse. The data plane uses mature crates rather than hand-rolled primitives:
   (`meta.json`, `meta.primary.json`, and `meta.secondary.json`), hash-checked
   transaction journal snapshots, automatic journal replay, double-write
   mismatch detection, and named metadata snapshots.
+- Bounded raw/loop group commit for rootfs workloads: configurable time and
+  transaction limits, data-before-journal ordering, immediate `fsync`/`O_SYNC`
+  durability, periodic FUSE commits, and crash-safe deferred extent reclamation.
 - RAM + persistent L2 block cache.
 - Health scoring from SMART-like counters plus an `autopilot` planner with
   persistent risk memory, confirmation/cooldown gates, incremental scrub,
