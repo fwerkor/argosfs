@@ -19,7 +19,6 @@ commands="$artifacts/qemu-hotplug.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|I/O error|missing device}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-260}"
 console_timeout_s="${ARGOSFS_QEMU_HOTPLUG_CONSOLE_TIMEOUT:-420}"
-command_delay_s="${ARGOSFS_QEMU_HOTPLUG_COMMAND_DELAY:-1}"
 done_marker="ARGOSFS_QEMU_HOTPLUG_DONE"
 
 cat >"$commands" <<'CMDS'
@@ -66,29 +65,20 @@ set +e
 # shellcheck disable=SC2094
 (
 	argosfs_qemu_wait_console_prompt "$log" 1 "$console_timeout_s" "$reject" "hotplug console prompt" || exit $?
-	printf '\r'
-	sleep "$command_delay_s"
-	while IFS= read -r line; do
-		printf '%s\r' "$line"
-		sleep "$command_delay_s"
-		if [ "$line" = "echo ARGOSFS_WAIT_HOTPLUG" ]; then
-			argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_HOTPLUG 180
-			for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
-			argosfs_qemu_monitor_command "$monitor" \
-				"drive_add 0 if=none,file=$hotplug_disk,format=raw,id=hot0" "$monitor_log"
-			bus_arg="$(argosfs_qemu_hotplug_bus_arg hot 0)"
-			rom_arg=""
-			[ "$arch" != "arm64" ] || rom_arg=",romfile="
-			argosfs_qemu_monitor_command "$monitor" \
-				"device_add virtio-blk-pci,drive=hot0,id=hotdisk0${bus_arg}${rom_arg}" "$monitor_log"
-		fi
-		if [ "$line" = "echo ARGOSFS_WAIT_UNPLUG" ]; then
-			argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_UNPLUG 600
-			argosfs_qemu_monitor_command "$monitor" "device_del hotdisk0" "$monitor_log"
-			sleep 2
-			argosfs_qemu_monitor_command "$monitor" "drive_del hot0" "$monitor_log" "Device '[^']+' not found"
-		fi
-	done <"$commands"
+	argosfs_qemu_stream_script "$commands" 1 /tmp/argosfs-qemu-hotplug.sh "$log"
+	argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_HOTPLUG 180
+	for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
+	argosfs_qemu_monitor_command "$monitor" \
+		"drive_add 0 if=none,file=$hotplug_disk,format=raw,id=hot0" "$monitor_log"
+	bus_arg="$(argosfs_qemu_hotplug_bus_arg hot 0)"
+	rom_arg=""
+	[ "$arch" != "arm64" ] || rom_arg=",romfile="
+	argosfs_qemu_monitor_command "$monitor" \
+		"device_add virtio-blk-pci,drive=hot0,id=hotdisk0${bus_arg}${rom_arg}" "$monitor_log"
+	argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_UNPLUG 600
+	argosfs_qemu_monitor_command "$monitor" "device_del hotdisk0" "$monitor_log"
+	sleep 2
+	argosfs_qemu_monitor_command "$monitor" "drive_del hot0" "$monitor_log" "Device '[^']+' not found"
 ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log" 2>&1
 status=${PIPESTATUS[1]}
 set -e

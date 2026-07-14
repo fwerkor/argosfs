@@ -152,6 +152,61 @@ argosfs_qemu_wait_log_marker() {
 	return 1
 }
 
+argosfs_qemu_stream_script() {
+	local script="$1"
+	local fd="${2:-1}"
+	local remote="${3:-/tmp/argosfs-qemu-script.sh}"
+	local log="${4:-}"
+	local line_delay="${ARGOSFS_QEMU_SCRIPT_LINE_DELAY:-0.01}"
+	local delimiter="ARGOSFS_QEMU_SCRIPT_EOF"
+	local marker_id
+	local shell_marker
+	local upload_marker
+	local deadline
+	local line
+
+	if grep -Fxq "$delimiter" "$script"; then
+		echo "QEMU guest script contains reserved delimiter: $delimiter" >&2
+		return 2
+	fi
+	marker_id="$(printf '%s' "$remote" | cksum | awk '{print $1}')"
+	shell_marker="ARGOSFS_QEMU_SHELL_READY_$marker_id"
+	upload_marker="ARGOSFS_QEMU_UPLOAD_READY_$marker_id"
+
+	printf '\r' >&"$fd"
+	if [ -n "$log" ]; then
+		deadline=$((SECONDS + ${ARGOSFS_QEMU_SHELL_READY_TIMEOUT:-60}))
+		while [ "$SECONDS" -lt "$deadline" ]; do
+			if awk -v marker="$shell_marker" \
+				'{ sub(/\r$/, ""); if ($0 == marker) found = 1 } END { exit !found }' "$log" 2>/dev/null; then
+				break
+			fi
+			printf 'echo %s\r' "$shell_marker" >&"$fd"
+			sleep 1
+		done
+		if ! awk -v marker="$shell_marker" \
+			'{ sub(/\r$/, ""); if ($0 == marker) found = 1 } END { exit !found }' "$log" 2>/dev/null; then
+			echo "timed out waiting for QEMU guest shell: $shell_marker" >&2
+			return 1
+		fi
+	else
+		sleep "${ARGOSFS_QEMU_SCRIPT_START_DELAY:-1}"
+	fi
+
+	printf 'stty -echo; echo %s\r' "$upload_marker" >&"$fd"
+	if [ -n "$log" ]; then
+		argosfs_qemu_wait_log_marker "$log" "$upload_marker" "${ARGOSFS_QEMU_SCRIPT_READY_TIMEOUT:-30}" || return $?
+	else
+		sleep "${ARGOSFS_QEMU_SCRIPT_STTY_DELAY:-0.2}"
+	fi
+	printf "cat >'%s' <<'%s'\r" "$remote" "$delimiter" >&"$fd"
+	while IFS= read -r line || [ -n "$line" ]; do
+		printf '%s\r' "$line" >&"$fd"
+		sleep "$line_delay"
+	done <"$script"
+	printf '%s\r' "$delimiter" >&"$fd"
+	printf "stty echo; sh '%s'\r" "$remote" >&"$fd"
+}
 argosfs_qemu_wait_console_prompt() {
 	local log="$1"
 	local min_count="${2:-1}"
