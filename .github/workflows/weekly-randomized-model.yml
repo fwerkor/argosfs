@@ -549,7 +549,7 @@ jobs:
         run: scripts/ci/install-deps.sh
 
       - name: Download QEMU bundle
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: weekly-capos-qemu-bundle-${{ matrix.arch }}
           path: ${{ runner.temp }}/weekly-capos-qemu-bundle-${{ matrix.arch }}
