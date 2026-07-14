@@ -66,8 +66,8 @@ sync
 echo ARGOSFS_READY_FOR_HOST_KILL
 i=0
 while true; do
-  slot=$((i % 64))
-  printf 'dirty root write %s\n' "$i" >"/root/argosfs-hardkill/dirty-$slot.txt"
+  slot=$((i % 4))
+  dd if=/dev/zero of="/root/argosfs-hardkill/dirty-$slot.bin" bs=64K count=64 2>/dev/null
   i=$((i + 1))
 done
 CMDS

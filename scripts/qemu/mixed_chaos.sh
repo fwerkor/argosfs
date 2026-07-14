@@ -131,8 +131,8 @@ sync
 echo ARGOSFS_CHAOS_READY_FOR_HARD_KILL
 round=0
 while true; do
-  slot=\$((round % 64))
-  printf 'dirty chaos write %s\n' "\$round" >"/root/argosfs-chaos-live/dirty-\$slot.txt"
+  slot=\$((round % 4))
+  dd if=/dev/zero of="/root/argosfs-chaos-live/dirty-\$slot.bin" bs=64K count=64 2>/dev/null
   round=\$((round + 1))
 done
 CMDS
