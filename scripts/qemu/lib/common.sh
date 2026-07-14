@@ -152,6 +152,30 @@ argosfs_qemu_wait_log_marker() {
 	return 1
 }
 
+argosfs_qemu_wait_console_prompt() {
+	local log="$1"
+	local min_count="${2:-1}"
+	local timeout_s="${3:-120}"
+	local reject="${4:-}"
+	local label="${5:-QEMU console prompt}"
+	local deadline=$((SECONDS + timeout_s))
+	local count
+
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		if [ -n "$reject" ] && grep -Eiq "$reject" "$log" 2>/dev/null; then
+			echo "QEMU rejected while waiting for $label: $reject" >&2
+			return 2
+		fi
+		count="$(grep -Fc 'Please press Enter to activate this console.' "$log" 2>/dev/null || true)"
+		if [ "$count" -ge "$min_count" ]; then
+			return 0
+		fi
+		sleep 1
+	done
+	echo "timed out waiting for $label in $log" >&2
+	return 1
+}
+
 argosfs_qemu_monitor_command() {
 	local monitor="$1"
 	local command="$2"
@@ -159,6 +183,7 @@ argosfs_qemu_monitor_command() {
 	local attempt=1
 	local response
 	local status
+	local allowed_error="${4:-}"
 
 	while [ "$attempt" -le 3 ]; do
 		if [ ! -S "$monitor" ]; then
@@ -178,9 +203,14 @@ argosfs_qemu_monitor_command() {
 			printf '\n'
 		} >>"$monitor_log"
 
-		if [ "$status" -eq 0 ] && ! printf '%s\n' "$response" | grep -Eiq \
-			'Error:|unknown command|invalid parameter|not found|not supported|does not support hotplugging|already in use'; then
-			return 0
+		if [ "$status" -eq 0 ]; then
+			if [ -n "$allowed_error" ] && printf '%s\n' "$response" | grep -Eiq "$allowed_error"; then
+				return 0
+			fi
+			if ! printf '%s\n' "$response" | grep -Eiq \
+				'Error:|unknown command|invalid parameter|not found|not supported|does not support hotplugging|already in use'; then
+				return 0
+			fi
 		fi
 		sleep 1
 		attempt=$((attempt + 1))

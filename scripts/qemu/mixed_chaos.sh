@@ -16,8 +16,7 @@ commands1="$artifacts/qemu-mixed-chaos-phase1.commands"
 commands2="$artifacts/qemu-mixed-chaos-phase2.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-3000}"
-login_delay_s="${ARGOSFS_QEMU_CHAOS_LOGIN_DELAY:-140}"
-login_delay_s="$(argosfs_qemu_adjust_login_delay "$login_delay_s")"
+console_timeout_s="${ARGOSFS_QEMU_CHAOS_CONSOLE_TIMEOUT:-600}"
 command_delay_s="${ARGOSFS_QEMU_CHAOS_COMMAND_DELAY:-1}"
 worker_count="${ARGOSFS_QEMU_CHAOS_WORKERS:-6}"
 file_count="${ARGOSFS_QEMU_CHAOS_FILES:-160}"
@@ -132,9 +131,9 @@ sync
 echo ARGOSFS_CHAOS_READY_FOR_HARD_KILL
 round=0
 while true; do
-  printf 'dirty chaos write %s\n' "\$round" >"/root/argosfs-chaos-live/dirty-\$round.txt"
+  slot=\$((round % 4))
+  dd if=/dev/zero of="/root/argosfs-chaos-live/dirty-\$slot.bin" bs=64K count=64 2>/dev/null
   round=\$((round + 1))
-  [ "\$round" -lt 100000 ] || round=0
 done
 CMDS
 
@@ -189,7 +188,7 @@ qemu_device_del() {
   local prefix="$1" index="$2"
   argosfs_qemu_monitor_command "$monitor" "device_del ${prefix}disk$index" "$monitor_log"
   sleep 3
-  argosfs_qemu_monitor_command "$monitor" "drive_del $prefix$index" "$monitor_log"
+  argosfs_qemu_monitor_command "$monitor" "drive_del $prefix$index" "$monitor_log" "Device '[^']+' not found"
 }
 
 run_phase1_until_kill_marker() {
@@ -203,7 +202,7 @@ run_phase1_until_kill_marker() {
   # QEMU output is intentionally polled while this pipeline appends to the log.
   # shellcheck disable=SC2094
   (
-    sleep "$login_delay_s"
+    argosfs_qemu_wait_console_prompt "$log1" 1 "$console_timeout_s" "$reject" "mixed-chaos phase1 console prompt" || exit $?
     printf '\r'
     sleep "$command_delay_s"
     while IFS= read -r line; do
@@ -248,7 +247,7 @@ run_phase2() {
   # QEMU output is intentionally polled while this pipeline appends to the log.
   # shellcheck disable=SC2094
   (
-    sleep "$login_delay_s"
+    argosfs_qemu_wait_console_prompt "$log2" 1 "$console_timeout_s" "$reject" "mixed-chaos phase2 console prompt" || exit $?
     printf '\r'
     sleep "$command_delay_s"
     while IFS= read -r line; do
