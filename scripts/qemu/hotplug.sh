@@ -18,8 +18,7 @@ log="$artifacts/qemu-hotplug.log"
 commands="$artifacts/qemu-hotplug.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|I/O error|missing device}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-260}"
-login_delay_s="${ARGOSFS_QEMU_HOTPLUG_LOGIN_DELAY:-90}"
-login_delay_s="$(argosfs_qemu_adjust_login_delay "$login_delay_s")"
+console_timeout_s="${ARGOSFS_QEMU_HOTPLUG_CONSOLE_TIMEOUT:-420}"
 command_delay_s="${ARGOSFS_QEMU_HOTPLUG_COMMAND_DELAY:-1}"
 done_marker="ARGOSFS_QEMU_HOTPLUG_DONE"
 
@@ -66,7 +65,7 @@ set +e
 # QEMU output is intentionally polled while this pipeline appends to the log.
 # shellcheck disable=SC2094
 (
-	sleep "$login_delay_s"
+	argosfs_qemu_wait_console_prompt "$log" 1 "$console_timeout_s" "$reject" "hotplug console prompt" || exit $?
 	printf '\r'
 	sleep "$command_delay_s"
 	while IFS= read -r line; do
@@ -87,7 +86,7 @@ set +e
 			argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_UNPLUG 600
 			argosfs_qemu_monitor_command "$monitor" "device_del hotdisk0" "$monitor_log"
 			sleep 2
-			argosfs_qemu_monitor_command "$monitor" "drive_del hot0" "$monitor_log"
+			argosfs_qemu_monitor_command "$monitor" "drive_del hot0" "$monitor_log" "Device '[^']+' not found"
 		fi
 	done <"$commands"
 ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log" 2>&1
