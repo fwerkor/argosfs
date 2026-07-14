@@ -7,6 +7,7 @@ use crate::rootfs::{self, RootMountMode};
 use crate::scan;
 use crate::types::{
     BackendKind, Compression, DiskStatus, IoMode, NodeKind, StorageTier, VolumeConfig,
+    DEFAULT_DEFERRED_COMMIT_INTERVAL_MS, DEFAULT_DEFERRED_COMMIT_MAX_TRANSACTIONS,
 };
 use crate::util::clean_path;
 use crate::volume::NodeAttr;
@@ -56,6 +57,8 @@ pub fn run() -> Result<()> {
             defer_journal_flush,
             defer_metadata_commit,
             defer_data_flush,
+            deferred_commit_interval_ms,
+            deferred_commit_max_transactions,
             force,
         } => {
             let config = VolumeConfig {
@@ -67,6 +70,8 @@ pub fn run() -> Result<()> {
                 defer_journal_flush,
                 defer_metadata_commit,
                 defer_data_flush,
+                deferred_commit_interval_ms,
+                deferred_commit_max_transactions,
                 ..VolumeConfig::default()
             };
             let fs = match backend {

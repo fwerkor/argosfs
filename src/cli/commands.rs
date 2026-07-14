@@ -33,6 +33,10 @@ pub(super) enum Command {
         defer_metadata_commit: bool,
         #[arg(long)]
         defer_data_flush: bool,
+        #[arg(long, default_value_t = DEFAULT_DEFERRED_COMMIT_INTERVAL_MS)]
+        deferred_commit_interval_ms: u64,
+        #[arg(long, default_value_t = DEFAULT_DEFERRED_COMMIT_MAX_TRANSACTIONS)]
+        deferred_commit_max_transactions: u64,
         #[arg(long)]
         force: bool,
     },

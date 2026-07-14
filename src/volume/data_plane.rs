@@ -1213,6 +1213,15 @@ impl ArgosFs {
     }
 
     pub(super) fn stage_block_reclamation_locked(&self, meta: &mut Metadata, blocks: &[FileBlock]) {
+        if meta.backend != BackendKind::Host
+            && (bulk_import_enabled() || meta.config.defer_metadata_commit)
+        {
+            self.deferred_commit
+                .lock()
+                .pending_reclaims
+                .extend(blocks.iter().cloned());
+            return;
+        }
         self.account_blocks_locked(meta, blocks, false);
         if meta.backend != BackendKind::Host {
             self.delete_blocks_locked(meta, blocks);

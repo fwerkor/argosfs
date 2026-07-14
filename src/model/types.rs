@@ -5,7 +5,17 @@ use std::path::PathBuf;
 
 pub const FORMAT_VERSION: &str = "argosfs-rust-v1";
 pub const RAW_FORMAT_VERSION: u32 = 1;
+pub const DEFAULT_DEFERRED_COMMIT_INTERVAL_MS: u64 = 5_000;
+pub const DEFAULT_DEFERRED_COMMIT_MAX_TRANSACTIONS: u64 = 128;
 pub type InodeId = u64;
+
+fn default_deferred_commit_interval_ms() -> u64 {
+    DEFAULT_DEFERRED_COMMIT_INTERVAL_MS
+}
+
+fn default_deferred_commit_max_transactions() -> u64 {
+    DEFAULT_DEFERRED_COMMIT_MAX_TRANSACTIONS
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -277,6 +287,10 @@ pub struct VolumeConfig {
     pub defer_metadata_commit: bool,
     #[serde(default)]
     pub defer_data_flush: bool,
+    #[serde(default = "default_deferred_commit_interval_ms")]
+    pub deferred_commit_interval_ms: u64,
+    #[serde(default = "default_deferred_commit_max_transactions")]
+    pub deferred_commit_max_transactions: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -320,6 +334,8 @@ impl Default for VolumeConfig {
             defer_journal_flush: false,
             defer_metadata_commit: false,
             defer_data_flush: false,
+            deferred_commit_interval_ms: DEFAULT_DEFERRED_COMMIT_INTERVAL_MS,
+            deferred_commit_max_transactions: DEFAULT_DEFERRED_COMMIT_MAX_TRANSACTIONS,
         }
     }
 }

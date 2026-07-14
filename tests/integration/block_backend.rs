@@ -799,6 +799,212 @@ fn raw_batched_metadata_commit_persists_after_sync() {
 }
 
 #[test]
+fn raw_group_commit_batches_transactions_into_one_durable_record() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.defer_metadata_commit = true;
+    cfg.defer_data_flush = true;
+    cfg.deferred_commit_interval_ms = 60_000;
+    cfg.deferred_commit_max_transactions = 1_000;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "group-commit", false).unwrap();
+
+    for index in 0..8 {
+        fs.write_file(
+            &format!("/batched-{index:04}"),
+            &vec![index as u8; 2048],
+            0o644,
+        )
+        .unwrap();
+    }
+    assert_eq!(raw_journal_records(&images[0]).len(), 1);
+
+    let expected_txid = fs.metadata_snapshot().txid;
+    fs.sync().unwrap();
+    let records = raw_journal_records(&images[0]);
+    assert_eq!(records.len(), 2);
+    let group = records.last().unwrap();
+    assert_eq!(group["action"], "group-commit");
+    assert_eq!(group["txid"], expected_txid);
+    assert_eq!(group["details"]["transactions"], 16);
+    assert!(group.get("metadata").is_none());
+    assert!(group.get("metadata_delta").is_some());
+
+    drop(fs);
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/batched-0007", true).unwrap(),
+        vec![7u8; 2048]
+    );
+}
+
+#[test]
+fn raw_group_commit_forces_at_transaction_limit() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.defer_metadata_commit = true;
+    cfg.defer_data_flush = true;
+    cfg.deferred_commit_interval_ms = 60_000;
+    cfg.deferred_commit_max_transactions = 4;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "group-limit", false).unwrap();
+
+    fs.write_file("/one", &vec![1u8; 2048], 0o644).unwrap();
+    assert_eq!(raw_journal_records(&images[0]).len(), 1);
+    fs.write_file("/two", &vec![2u8; 2048], 0o644).unwrap();
+
+    let records = raw_journal_records(&images[0]);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records.last().unwrap()["action"], "group-commit");
+    assert_eq!(records.last().unwrap()["details"]["transactions"], 4);
+}
+
+#[test]
+fn raw_group_commit_limit_failure_is_reported_and_retryable() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.defer_metadata_commit = true;
+    cfg.defer_data_flush = true;
+    cfg.deferred_commit_interval_ms = 60_000;
+    cfg.deferred_commit_max_transactions = 2;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "group-retry", false).unwrap();
+
+    let _crash = journal::thread_crash_point(
+        argosfs::types::FaultPoint::AfterDataFlushBeforeJournalCommit.as_str(),
+    );
+    let err = fs
+        .write_file("/retry", &vec![b'r'; 2048], 0o644)
+        .unwrap_err();
+    assert!(matches!(err, ArgosError::InjectedCrash(_)));
+    drop(_crash);
+
+    assert_eq!(raw_journal_records(&images[0]).len(), 1);
+    fs.sync().unwrap();
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/retry", true).unwrap(),
+        vec![b'r'; 2048]
+    );
+    assert_eq!(reopened.transaction_report().unwrap().invalid_entries, 0);
+}
+
+#[test]
+fn raw_deferred_reclamation_does_not_reuse_last_durable_extent() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.defer_metadata_commit = true;
+    cfg.defer_data_flush = true;
+    cfg.deferred_commit_interval_ms = 60_000;
+    cfg.deferred_commit_max_transactions = 1_000;
+    cfg.compression = Compression::None;
+    let fs = ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "safe-reclaim", false).unwrap();
+
+    let old = vec![b'a'; 2048];
+    fs.write_file("/value", &old, 0o644).unwrap();
+    fs.sync().unwrap();
+    let value_ino = fs.resolve_path("/value", true).unwrap();
+    let durable = fs.metadata_snapshot();
+    let old_extent = match durable.inodes[&value_ino].blocks[0].shards[0]
+        .location
+        .as_ref()
+        .unwrap()
+    {
+        ShardLocation::RawExtent(extent) => extent.clone(),
+        other => panic!("expected raw extent, got {other:?}"),
+    };
+
+    fs.write_file("/value", &vec![b'b'; 2048], 0o644).unwrap();
+    fs.write_file("/other", &vec![b'c'; 2048], 0o644).unwrap();
+    let other_ino = fs.resolve_path("/other", true).unwrap();
+    let pending = fs.metadata_snapshot();
+    let other_extent = match pending.inodes[&other_ino].blocks[0].shards[0]
+        .location
+        .as_ref()
+        .unwrap()
+    {
+        ShardLocation::RawExtent(extent) => extent.clone(),
+        other => panic!("expected raw extent, got {other:?}"),
+    };
+    assert_ne!(other_extent.offset, old_extent.offset);
+    assert!(!pending.raw_pool.allocators[&old_extent.disk_id]
+        .free_extents
+        .iter()
+        .any(|extent| extent.offset == old_extent.offset));
+
+    std::mem::forget(fs);
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(reopened.read_file("/value", true).unwrap(), old);
+    assert_eq!(
+        reopened.resolve_path("/other", true).unwrap_err().errno(),
+        libc::ENOENT
+    );
+}
+
+#[test]
+fn raw_group_commit_reclaims_old_extent_after_durability_boundary() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.defer_metadata_commit = true;
+    cfg.defer_data_flush = true;
+    cfg.deferred_commit_interval_ms = 60_000;
+    cfg.deferred_commit_max_transactions = 1_000;
+    cfg.compression = Compression::None;
+    let fs =
+        ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "reclaim-boundary", false).unwrap();
+
+    fs.write_file("/value", &vec![b'a'; 2048], 0o644).unwrap();
+    fs.sync().unwrap();
+    let ino = fs.resolve_path("/value", true).unwrap();
+    let before = fs.metadata_snapshot();
+    let old_extent = match before.inodes[&ino].blocks[0].shards[0]
+        .location
+        .as_ref()
+        .unwrap()
+    {
+        ShardLocation::RawExtent(extent) => extent.clone(),
+        other => panic!("expected raw extent, got {other:?}"),
+    };
+
+    fs.write_file("/value", &vec![b'b'; 2048], 0o644).unwrap();
+    fs.sync().unwrap();
+    let committed = fs.metadata_snapshot();
+    assert!(committed.raw_pool.allocators[&old_extent.disk_id]
+        .free_extents
+        .iter()
+        .any(|extent| extent.offset == old_extent.offset));
+}
+
+#[test]
+fn deferred_commit_bounds_default_when_loading_legacy_config_json() {
+    let mut value = serde_json::to_value(VolumeConfig::default()).unwrap();
+    let object = value.as_object_mut().unwrap();
+    object.remove("deferred_commit_interval_ms");
+    object.remove("deferred_commit_max_transactions");
+    let config: VolumeConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        config.deferred_commit_interval_ms,
+        argosfs::types::DEFAULT_DEFERRED_COMMIT_INTERVAL_MS
+    );
+    assert_eq!(
+        config.deferred_commit_max_transactions,
+        argosfs::types::DEFAULT_DEFERRED_COMMIT_MAX_TRANSACTIONS
+    );
+}
+
+#[test]
 fn raw_deferred_data_flush_requires_batched_metadata_commit() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
