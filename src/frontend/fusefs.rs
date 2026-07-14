@@ -16,6 +16,8 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_secs(5);
@@ -23,8 +25,55 @@ const FUSE_WRITEBACK_MAX_BYTES: usize = 1024 * 1024;
 
 pub struct ArgosFuse {
     volume: ArgosFs,
+    commit_worker: Option<DeferredCommitWorker>,
     writeback: Mutex<FuseWriteback>,
     handles: Mutex<FuseHandles>,
+}
+
+struct DeferredCommitWorker {
+    stop: Option<Sender<()>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl DeferredCommitWorker {
+    fn start(volume: &ArgosFs) -> Result<Option<Self>> {
+        let Some(interval) = volume.deferred_commit_interval() else {
+            return Ok(None);
+        };
+        let (stop, receiver) = mpsc::channel();
+        let volume = volume.clone();
+        let join = thread::Builder::new()
+            .name("argosfs-group-commit".to_string())
+            .spawn(move || loop {
+                match receiver.recv_timeout(interval) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if let Err(err) = volume.sync_deferred_if_dirty() {
+                            eprintln!("argosfs: deferred group commit failed: {err}");
+                        }
+                    }
+                }
+            })?;
+        Ok(Some(Self {
+            stop: Some(stop),
+            join: Some(join),
+        }))
+    }
+
+    fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for DeferredCommitWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -138,11 +187,17 @@ struct FuseWriteback {
 
 impl ArgosFuse {
     pub fn new(volume: ArgosFs) -> Self {
-        Self {
+        Self::try_new(volume).expect("start ArgosFS deferred commit worker")
+    }
+
+    fn try_new(volume: ArgosFs) -> Result<Self> {
+        let commit_worker = DeferredCommitWorker::start(&volume)?;
+        Ok(Self {
             volume,
+            commit_worker,
             writeback: Mutex::new(FuseWriteback::default()),
             handles: Mutex::new(FuseHandles::default()),
-        }
+        })
     }
 
     fn require_access(&self, req: &Request, ino: INodeNo, mask: i32) -> Result<()> {
@@ -260,6 +315,9 @@ impl ArgosFuse {
 
 impl Drop for ArgosFuse {
     fn drop(&mut self) {
+        if let Some(worker) = self.commit_worker.as_mut() {
+            worker.stop();
+        }
         let _ = self.flush_all_writeback();
         let _ = self.volume.sync();
     }
@@ -294,7 +352,7 @@ pub fn mount_volume(
         );
     }
     let config = mount_config(mount_options);
-    fuser::mount2(ArgosFuse::new(volume), mountpoint, &config).map_err(ArgosError::Io)
+    fuser::mount2(ArgosFuse::try_new(volume)?, mountpoint, &config).map_err(ArgosError::Io)
 }
 
 fn mount_config(options: Vec<MountOption>) -> Config {
@@ -1731,5 +1789,56 @@ mod tests {
 
         assert_eq!(volume.read_file("/buffered", true).unwrap(), b"hello world");
         assert!(fuse.writeback.lock().dirty.is_empty());
+    }
+
+    #[test]
+    fn periodic_worker_commits_idle_deferred_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let images = vec![tmp.path().join("disk.img")];
+        let volume = ArgosFs::create_loop(
+            &images,
+            VolumeConfig {
+                k: 1,
+                m: 0,
+                chunk_size: 1024,
+                compression: crate::types::Compression::None,
+                defer_journal_flush: true,
+                defer_metadata_commit: true,
+                defer_data_flush: true,
+                deferred_commit_interval_ms: 20,
+                deferred_commit_max_transactions: 1_000,
+                ..VolumeConfig::default()
+            },
+            32 * 1024 * 1024,
+            "periodic-commit",
+            false,
+        )
+        .unwrap();
+        let fuse = ArgosFuse::new(volume.clone());
+        volume
+            .write_file("/periodic", &vec![b'p'; 2048], 0o644)
+            .unwrap();
+        let expected_txid = volume.metadata_snapshot().txid;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let report = volume.transaction_report().unwrap();
+            if report.last_valid_txid == expected_txid {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "periodic commit timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        drop(fuse);
+        drop(volume);
+        let reopened = ArgosFs::open_loop(&images, false).unwrap();
+        assert_eq!(
+            reopened.read_file("/periodic", true).unwrap(),
+            vec![b'p'; 2048]
+        );
     }
 }
