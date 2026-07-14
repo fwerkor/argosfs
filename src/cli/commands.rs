@@ -447,7 +447,15 @@ pub(super) enum Command {
         path: String,
     },
     VerifyJournal {
-        root: PathBuf,
+        root: Option<PathBuf>,
+        #[arg(long, default_value = "host")]
+        backend: BackendKind,
+        #[arg(long, value_delimiter = ',')]
+        images: Vec<PathBuf>,
+        #[arg(long, value_delimiter = ',')]
+        devices: Vec<PathBuf>,
+        #[arg(long)]
+        pool: Option<String>,
     },
     CompactJournal {
         root: PathBuf,
