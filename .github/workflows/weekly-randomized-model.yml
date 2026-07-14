@@ -417,7 +417,7 @@ jobs:
           key: weekly-capos-${{ matrix.arch }}
 
       - name: Cache CapOS downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/capos-dl
           key: weekly-capos-dl-${{ matrix.capos_target }}-${{ github.run_id }}
