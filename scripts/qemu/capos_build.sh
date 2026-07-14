@@ -4,7 +4,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 artifacts="${ARGOSFS_TEST_ARTIFACTS:-$repo/target/argosfs-test-artifacts/capos-build}"
 capos_repo="${CAPOS_REPO:-https://github.com/fwerkor/capos.git}"
-capos_ref="${CAPOS_REF:-168f01fc44f627ab07f23dd9590453f0ba5fe7fc}"
+capos_ref="${CAPOS_REF:-3903b2968a692fdc77e05f63eb3a1cfa9a739999}"
 capos_local_source="${CAPOS_LOCAL_SOURCE:-}"
 capos_full_compile="${ARGOSFS_CAPOS_FULL_COMPILE:-1}"
 capos_make_jobs="${ARGOSFS_CAPOS_MAKE_JOBS:-$(nproc 2>/dev/null || echo 2)}"
