@@ -1,8 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-sudo apt-get update
-sudo apt-get install -y --no-install-recommends \
+apt_get() {
+	local attempt
+	local max_attempts=4
+	for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+		if sudo apt-get \
+			-o Acquire::ForceIPv4=true \
+			-o Acquire::Retries=5 \
+			-o Acquire::http::Timeout=30 \
+			-o Acquire::https::Timeout=30 \
+			-o DPkg::Lock::Timeout=120 \
+			"$@"; then
+			return 0
+		fi
+		if ((attempt == max_attempts)); then
+			return 1
+		fi
+		echo "warning: apt-get failed (attempt $attempt/$max_attempts); retrying" >&2
+		sleep $((attempt * 10))
+	done
+}
+
+apt_get update
+apt_get install -y --no-install-recommends \
 	acl \
 	attr \
 	autoconf \
@@ -53,7 +74,7 @@ case "${ARGOSFS_CI_QEMU_ARCH:-all}" in
 		;;
 esac
 for package in "${optional_packages[@]}"; do
-	if sudo apt-get install -y --no-install-recommends "$package"; then
+	if apt_get install -y --no-install-recommends "$package"; then
 		continue
 	fi
 	echo "warning: optional CI package was unavailable on this runner: $package" >&2
