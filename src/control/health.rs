@@ -7,7 +7,7 @@ use crate::util::{ensure_dir, now_f64};
 use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -129,9 +129,19 @@ pub fn probe_disk_path(path: &Path, benchmark_bytes: usize) -> DiskProbe {
         recommended_tier: StorageTier::Warm,
         ..DiskProbe::default()
     };
-    if let Ok(metadata) = fs::metadata(path) {
-        let dev = metadata.dev();
-        probe.backing_fs_id = Some(format!("dev:{dev}"));
+    let metadata = fs::metadata(path).ok();
+    let is_block_device = metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.file_type().is_block_device());
+    if let Some(metadata) = metadata.as_ref() {
+        let dev = if is_block_device {
+            metadata.rdev()
+        } else {
+            metadata.dev()
+        };
+        if !is_block_device {
+            probe.backing_fs_id = Some(format!("dev:{dev}"));
+        }
         if let Some((block, backing)) = sysfs_block_from_dev(dev) {
             probe.sysfs_block = Some(block.clone());
             probe.backing_device = Some(backing);
@@ -152,15 +162,13 @@ pub fn probe_disk_path(path: &Path, benchmark_bytes: usize) -> DiskProbe {
             probe.class = classify_block(&block, probe.rotational);
         }
     }
-    if probe.capacity_bytes == 0 {
+    if !is_block_device {
         if let Ok((capacity, available)) = statvfs_capacity(path) {
             probe.capacity_bytes = capacity;
             probe.available_bytes = available;
         }
-    } else if let Ok((_, available)) = statvfs_capacity(path) {
-        probe.available_bytes = available;
     }
-    if benchmark_bytes > 0 {
+    if benchmark_bytes > 0 && metadata.as_ref().is_some_and(|metadata| metadata.is_dir()) {
         if let Ok(result) = benchmark_path(path, benchmark_bytes) {
             probe.measured_write_mib_s = result.write_mib_s;
             probe.measured_read_mib_s = result.read_mib_s;
