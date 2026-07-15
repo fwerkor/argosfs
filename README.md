@@ -25,9 +25,9 @@ target/debug/argosfs scan --backend loop --images disk0.img,disk1.img,disk2.img 
 target/debug/argosfs preflight-root --backend loop --images disk0.img,disk1.img,disk2.img --mode rw
 ```
 
-See `docs/raw-backend.md`, `docs/capos-rootfs.md`, and
-`docs/repository-layout.md` for the raw layout, CapOS boot flow, and repository
-organization.
+See `docs/cli.md`, `docs/raw-backend.md`, `docs/capos-rootfs.md`, and
+`docs/repository-layout.md` for CLI selection/configuration, the raw layout,
+CapOS boot flow, and repository organization.
 
 ArgosFS is a Rust implementation of a self-driving, erasure-coded Linux
 filesystem. It provides a real FUSE mount frontend suitable for root filesystem
@@ -120,9 +120,10 @@ cargo build
 cargo test
 ```
 
-## Quick Start
+## Development Quick Start (Host Backend)
 
-Create a `4+2` ArgosFS volume:
+The host backend is intended for development and compatibility testing.
+Create a `4+2` volume:
 
 ```bash
 cargo run -- mkfs /var/lib/argosfs/root --disks 6 --k 4 --m 2 --compression zstd
@@ -155,6 +156,12 @@ cargo run -- autopilot /var/lib/argosfs/root --once
 ```
 
 ## CLI
+
+Block-backed commands can infer the backend from `--images` or `--devices`, and
+can reuse a JSON device selector with `--pool-config FILE`. Conflicting selectors
+are rejected instead of ignored. Size options accept values such as `64MiB` and
+`2GiB`; `--json` is global. See [`docs/cli.md`](docs/cli.md) for the selection,
+precedence, and output contract.
 
 ```bash
 argosfs mkfs ROOT --disks 6 --k 4 --m 2 --compression zstd
@@ -195,6 +202,8 @@ argosfs get-posix-acl ROOT /etc/shadow
 argosfs set-nfs4-acl ROOT /srv/data @nfs4-acl.json
 argosfs get-nfs4-acl ROOT /srv/data
 argosfs verify-journal ROOT
+argosfs inspect-pool --pool-config /etc/argosfs/root-pool.json
+argosfs fsck --pool-config /etc/argosfs/root-pool.json --repair
 ```
 
 `add-disk` defaults to automatic probing. Pass `--tier`, `--weight`, or
@@ -226,16 +235,25 @@ I/O error.
 
 ## Root Filesystem Use
 
-ArgosFS can be mounted as a Linux root filesystem through initramfs:
+Production-style rootfs use selects a loop/raw pool rather than a host volume.
+Keep the device list and expected identity in one JSON selector:
 
-1. Build and install the static or dynamically linked `argosfs` binary into the
-   initramfs image.
-2. Include libfuse3 and `/dev/fuse` support.
-3. Run `argosfs fsck ROOT --repair --remove-orphans`.
-4. Mount with `argosfs mount ROOT /newroot --foreground`.
-5. `switch_root /newroot /sbin/init`.
+```bash
+sudo install -d -m 0755 /etc/argosfs
+sudo install -m 0644 docs/pool-config.example.json \
+  /etc/argosfs/root-pool.json
+argosfs fsck --pool-config /etc/argosfs/root-pool.json \
+  --repair --remove-orphans
+argosfs preflight-root --pool-config /etc/argosfs/root-pool.json --mode rw
+argosfs mount-root --pool-config /etc/argosfs/root-pool.json \
+  --target /newroot --mode rw --foreground
+```
 
-See `docs/rootfs.md`, `docs/boot.md`, and `integrations/` for templates.
+An initramfs must include the binary, libfuse3, `/dev/fuse`, stable device
+identification, and the replay/fsck/preflight/mount sequence before
+`switch_root`. See `docs/rootfs.md`, `docs/boot.md`, `docs/capos-rootfs.md`, and
+`integrations/` for complete flows. The positional `mount ROOT MOUNTPOINT`
+command remains the development-only host-backend frontend.
 
 ## Validation Artifacts
 

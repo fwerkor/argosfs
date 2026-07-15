@@ -85,7 +85,9 @@ For real block devices use `argosfs.devices=/dev/disk/by-id/...`.
 ## Recovery and Watchdog Assets
 
 The repository provides CapOS-targeted systemd assets under
-`integrations/capos/systemd/`:
+`integrations/capos/systemd/`. They prefer the shared
+`/etc/argosfs/root-pool.json` selector and retain `ARGOSFS_BACKEND` plus
+`ARGOSFS_DEVICES` as a compatibility fallback:
 
 - `argosfs-root.service` verifies the opened root pool after switch-root.
 - `argosfs-health.service` runs a readonly fsck health check.

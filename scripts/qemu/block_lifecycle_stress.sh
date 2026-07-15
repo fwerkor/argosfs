@@ -54,14 +54,14 @@ argosfs mkfs --backend raw --devices "$devs" --k 2 --m 1 --chunk-size 65536 --co
 argosfs import-tree --backend raw --devices "$devs" "$src" /
 argosfs fsck --backend raw --devices "$devs" --repair --remove-orphans >/tmp/argosfs-lifecycle-fsck-initial.json
 all="$devs"
-argosfs add-device --backend raw --devices "$all" --device /dev/vde --image-size 134217728 --force >/tmp/argosfs-lifecycle-add.json
+argosfs add-device --backend raw --devices "$all" --device /dev/vde --force >/tmp/argosfs-lifecycle-add.json
 all="$all,/dev/vde"
 argosfs list-devices --backend raw --devices "$all" >/tmp/argosfs-lifecycle-devices-after-add.json
 argosfs reshape --backend raw --devices "$all" --k 2 --m 1 --max-files 96 >/tmp/argosfs-lifecycle-reshape.json
 argosfs scrub --backend raw --devices "$all" >/tmp/argosfs-lifecycle-scrub-after-reshape.json
 argosfs drain-device --backend raw --devices "$all" --device disk-0000 >/tmp/argosfs-lifecycle-drain.json
 argosfs remove-device --backend raw --devices "$all" --device disk-0000 >/tmp/argosfs-lifecycle-remove.json
-argosfs replace-device --backend raw --devices "$all" --old disk-0001 --new /dev/vdf --image-size 134217728 --force >/tmp/argosfs-lifecycle-replace.json
+argosfs replace-device --backend raw --devices "$all" --old disk-0001 --new /dev/vdf --force >/tmp/argosfs-lifecycle-replace.json
 all="$all,/dev/vdf"
 argosfs fsck --backend raw --devices "$all" --repair --remove-orphans >/tmp/argosfs-lifecycle-fsck-final.json
 argosfs scrub --backend raw --devices "$all" >/tmp/argosfs-lifecycle-scrub-final.json

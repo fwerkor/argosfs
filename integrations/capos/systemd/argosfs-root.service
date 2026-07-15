@@ -7,10 +7,11 @@ ConditionPathExists=/usr/sbin/argosfs
 
 [Service]
 Type=oneshot
+Environment=ARGOSFS_POOL_CONFIG=/etc/argosfs/root-pool.json
 Environment=ARGOSFS_BACKEND=raw
 Environment=ARGOSFS_MODE=ro
 Environment=ARGOSFS_DEVICES=
-ExecStart=/bin/sh -c 'test -n "$ARGOSFS_DEVICES" && /usr/sbin/argosfs preflight-root --backend "$ARGOSFS_BACKEND" --devices "$ARGOSFS_DEVICES" --mode "$ARGOSFS_MODE" || exit 0'
+ExecStart=/bin/sh -c 'if [ -r "$ARGOSFS_POOL_CONFIG" ]; then exec /usr/sbin/argosfs preflight-root --pool-config "$ARGOSFS_POOL_CONFIG" --mode "$ARGOSFS_MODE"; elif [ -n "$ARGOSFS_DEVICES" ]; then exec /usr/sbin/argosfs preflight-root --backend "$ARGOSFS_BACKEND" --devices "$ARGOSFS_DEVICES" --mode "$ARGOSFS_MODE"; else exit 0; fi'
 RemainAfterExit=yes
 
 [Install]

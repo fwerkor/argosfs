@@ -1,0 +1,9 @@
+{
+  "backend": "loop",
+  "images": [
+    "disk0.img",
+    "disk1.img",
+    "disk2.img"
+  ],
+  "pool": "capos-root"
+}

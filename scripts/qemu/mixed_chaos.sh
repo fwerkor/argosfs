@@ -114,7 +114,7 @@ cmp "\$src/sentinel.txt" "\$degraded/sentinel.txt"
 cmp "\$src/data/meta-83.txt" "\$degraded/data/meta-83.txt"
 cmp "\$src/data/blob-149.bin" "\$degraded/data/blob-149.bin"
 echo ARGOSFS_CHAOS_DEGRADED_READ_OK
-argosfs replace-device --backend raw --devices "\$survivors" --old disk-0001 --new /dev/vdg --image-size "$disk_size_bytes" --force >/tmp/argosfs-chaos-replace.json
+argosfs replace-device --backend raw --devices "\$survivors" --old disk-0001 --new /dev/vdg --force >/tmp/argosfs-chaos-replace.json
 repaired="\$survivors,/dev/vdg"
 argosfs fsck --backend raw --devices "\$repaired" --repair --remove-orphans >/tmp/argosfs-chaos-fsck.json
 argosfs scrub --backend raw --devices "\$repaired" >/tmp/argosfs-chaos-scrub.json

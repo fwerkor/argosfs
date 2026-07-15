@@ -1,92 +1,132 @@
 # ArgosFS Root Filesystem Guide
 
-This guide describes how to use ArgosFS as an experimental Linux root
-filesystem.
+ArgosFS supports two distinct deployment models:
 
-## Build an ArgosFS Root
+- **Loop/raw pools** are the supported root-filesystem path. They use
+  `mount-root`, root preflight, journal replay, and the initramfs integration.
+- **Host volumes** store shards in ordinary directories and are intended for
+  development and compatibility testing. They use the simpler `mount ROOT`
+  command and host-only tools such as `autopilot` and `add-disk`.
+
+Do not mix a positional host `ROOT` with loop/raw selectors. The CLI rejects
+such combinations.
+
+## Build a block-backed root pool
 
 ```bash
 cargo build --release
 sudo install -m 0755 target/release/argosfs /usr/local/sbin/argosfs
-sudo argosfs mkfs /var/lib/argosfs/root --disks 1 --k 1 --m 0 --compression zstd
-sudo argosfs import-tree /var/lib/argosfs/root /srv/rootfs /
-sudo argosfs probe-disks /var/lib/argosfs/root
-sudo argosfs refresh-smart /var/lib/argosfs/root || true
-sudo argosfs set-io-mode /var/lib/argosfs/root --mode io-uring
-sudo argosfs fsck /var/lib/argosfs/root --repair --remove-orphans
+sudo install -d -m 0755 /etc/argosfs
 ```
 
-To add redundancy later, add disks and reshape the live layout:
+Create `/etc/argosfs/root-pool.json`. Real deployments should use stable
+`/dev/disk/by-id` paths:
+
+```json
+{
+  "backend": "raw",
+  "devices": [
+    "/dev/disk/by-id/wwn-device-0",
+    "/dev/disk/by-id/wwn-device-1",
+    "/dev/disk/by-id/wwn-device-2"
+  ],
+  "pool": "system-root"
+}
+```
+
+Format and populate the pool:
 
 ```bash
-sudo argosfs add-disk /var/lib/argosfs/root --path /var/lib/argosfs/disk1
-sudo argosfs reshape /var/lib/argosfs/root --k 1 --m 1
+sudo argosfs mkfs --pool-config /etc/argosfs/root-pool.json \
+  --k 2 --m 1 --compression zstd
+sudo argosfs import-tree --pool-config /etc/argosfs/root-pool.json \
+  /srv/rootfs /
+sudo argosfs fsck --pool-config /etc/argosfs/root-pool.json \
+  --repair --remove-orphans
+sudo argosfs preflight-root --pool-config /etc/argosfs/root-pool.json \
+  --mode rw --json
 ```
+
+For image-based testing, set `backend` to `loop` and replace `devices` with an
+`images` array. Relative image paths are resolved relative to the pool
+configuration file.
 
 `import-tree` preserves directories, regular files, symlinks, ownership,
-permissions, and special nodes where the caller has permission to read/create
-them.
+permissions, hardlinks, xattrs, and special nodes where the caller has the
+required privileges.
 
-To encrypt the root filesystem at rest, create a key file in the initramfs trust
-boundary and rewrite existing stripes:
+## Manual mount test
 
-```bash
-sudo install -m 0600 /dev/stdin /etc/argosfs.key
-sudo argosfs enable-encryption /var/lib/argosfs/root --key-file /etc/argosfs.key --reencrypt
-```
-
-## Manual Boot Test
+The imported tree must contain `/dev`, `/proc`, `/run`, and `/sys` directories
+before normal root preflight succeeds.
 
 ```bash
 sudo mkdir -p /mnt/argos-root
-sudo argosfs mount /var/lib/argosfs/root /mnt/argos-root --foreground -o allow_other
+sudo argosfs preflight-root --pool-config /etc/argosfs/root-pool.json \
+  --mode rw
+sudo argosfs mount-root --pool-config /etc/argosfs/root-pool.json \
+  --target /mnt/argos-root --mode rw --foreground
+```
+
+Run the mount command in a dedicated terminal or service, then enter the root:
+
+```bash
 sudo chroot /mnt/argos-root /bin/sh
 ```
 
-## initramfs Contract
+## initramfs contract
 
 An initramfs image must contain:
 
-- `/usr/local/sbin/argosfs`,
-- libfuse3 runtime libraries,
-- `/dev/fuse` support in the kernel,
-- the ArgosFS volume root or a way to discover it,
-- `ARGOSFS_KEY_FILE` or `ARGOSFS_KEY` when volume encryption is enabled,
-- a small script that runs repair, mounts ArgosFS at `/newroot`, then calls
-  `switch_root`.
+- the `argosfs` binary and libfuse3 runtime libraries;
+- `/dev/fuse` support in the kernel and initramfs device tree;
+- a stable way to discover all loop images or raw devices;
+- the encryption key source when encryption is enabled;
+- logic that replays, checks, preflights, mounts, and calls `switch_root`.
 
-Minimal flow:
+A generic block-backed flow is:
 
 ```bash
 modprobe fuse || true
-export ARGOSFS_KEY_FILE=/etc/argosfs.key
-argosfs fsck "$ARGOSFS_ROOT" --repair --remove-orphans
-argosfs mount "$ARGOSFS_ROOT" /newroot --foreground -o allow_other &
+argosfs replay-journal --pool-config /etc/argosfs/root-pool.json
+argosfs fsck --pool-config /etc/argosfs/root-pool.json \
+  --repair --remove-orphans
+argosfs preflight-root --pool-config /etc/argosfs/root-pool.json --mode rw
+argosfs mount-root --pool-config /etc/argosfs/root-pool.json \
+  --target /newroot --mode rw --foreground &
 exec switch_root /newroot /sbin/init
 ```
 
-## Operational Notes
+CapOS uses the more complete discovery and emergency-recovery implementation in
+`integrations/capos/initramfs/argosfs-root.sh`; see `docs/capos-rootfs.md`.
 
-- Run `argosfs autopilot ROOT --interval 60` as a long-running service. Each
-  interval reopens the volume, updates planner state, and performs only the
-  maintenance work that is due under its risk, cooldown, scrub, and rebalance
-  budgets.
-- Add replacement devices with `argosfs add-disk ROOT --path /mnt/device --rebalance`.
-  The command automatically probes SSD/HDD/NVMe class, real capacity, measured
-  performance, and recommended tier/weight unless overridden.
-- Use `argosfs refresh-smart ROOT` when `smartctl` is available to import real
-  SMART/NVMe health counters.
-- Use `argosfs verify-journal ROOT` before boot handoff or after unclean
-  shutdowns to validate the metadata hash chain and trigger replay/metadata-copy
-  repair.
-- Use `argosfs preflight-root --backend loop|raw ... --mode MODE` before
-  handoff. It always emits a JSON report with `ok`, stable issue codes,
-  `recommended_mode`, and readonly/rw eligibility fields; failed preflight exits
-  nonzero after printing the report so initramfs and watchdog jobs can archive
-  the exact reason.
-- Use `argosfs prometheus ROOT --listen 127.0.0.1:9108` for node-local
-  Prometheus scraping.
-- Use `argosfs set-posix-acl` and `argosfs set-nfs4-acl` to pre-seed rootfs ACL
-  policy before booting the image.
-- Mark bad devices with `argosfs mark-disk ROOT disk-XXXX failed`.
-- Use `argosfs scrub ROOT` after unclean shutdowns or device replacement.
+## Operations
+
+Use the same pool selector for all block-backed operations:
+
+```bash
+argosfs inspect-pool --pool-config /etc/argosfs/root-pool.json
+argosfs list-devices --pool-config /etc/argosfs/root-pool.json
+argosfs fsck --pool-config /etc/argosfs/root-pool.json
+argosfs scrub --pool-config /etc/argosfs/root-pool.json
+argosfs verify-journal --pool-config /etc/argosfs/root-pool.json
+```
+
+`preflight-root` reports stable issue codes and a recommended fallback mode.
+Plain `rw` fails closed when required devices are missing. Use `degraded-ro` for
+a conservative degraded boot, or explicit `degraded-rw` only when the operator
+accepts the additional risk.
+
+## Host-backend compatibility mode
+
+For local development without block images:
+
+```bash
+argosfs mkfs /var/lib/argosfs/dev-root --disks 1 --k 1 --m 0
+argosfs import-tree /var/lib/argosfs/dev-root /srv/rootfs /
+argosfs mount /var/lib/argosfs/dev-root /mnt/argos-root --foreground
+```
+
+Host-only storage automation uses `add-disk`, `probe-disks`, `refresh-smart`, and
+`autopilot`. These commands are intentionally separate from block-pool device
+lifecycle commands.
