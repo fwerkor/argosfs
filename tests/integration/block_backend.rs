@@ -1249,6 +1249,60 @@ fn loop_block_cli_replace_device_rewrites_off_old_member() {
 }
 
 #[test]
+fn repeated_loop_replacements_do_not_raise_quorum_with_removed_members() {
+    let tmp = TempDir::new().unwrap();
+    let mut active = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&active, config(2, 1), 32 * 1024 * 1024, "quorum", false).unwrap();
+    fs.write_file("/payload", b"survives-replacements", 0o644)
+        .unwrap();
+    drop(fs);
+
+    for index in 0..3 {
+        let new_image = tmp.path().join(format!("replacement-{index}.img"));
+        let images_arg = active
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(",");
+        let output = Command::new(argosfs_binary())
+            .args([
+                "replace-device",
+                "--backend",
+                "loop",
+                "--images",
+                &images_arg,
+                "--old",
+                &format!("disk-{index:04}"),
+                "--new",
+            ])
+            .arg(&new_image)
+            .args(["--image-size", &(32 * 1024 * 1024).to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "replacement {index} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        active.remove(0);
+        active.push(new_image);
+    }
+
+    let reopened = ArgosFs::open_loop(&active, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/payload", false).unwrap(),
+        b"survives-replacements"
+    );
+    for index in 0..3 {
+        assert_eq!(
+            reopened.metadata_snapshot().disks[&format!("disk-{index:04}")].status,
+            DiskStatus::Removed
+        );
+    }
+}
+
+#[test]
 fn raw_recovery_ignores_unquorumed_metadata_and_journal_tail() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 3);

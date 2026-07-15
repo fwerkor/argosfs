@@ -24,6 +24,7 @@ pub const RAW_BLOCK_SIZE: u64 = 4096;
 pub const RAW_SUPER_MAGIC: &[u8; 16] = b"ARGOSFS-RAW-SB\0\0";
 pub const RAW_LABEL_MAGIC: &[u8; 16] = b"ARGOSFS-RAW-LB\0\0";
 pub const ENDIAN_MARKER: u32 = 0x1234_5678;
+const SUPPORTED_REQUIRED_FEATURE_FLAGS: u64 = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RawRegion {
@@ -198,6 +199,33 @@ impl RawSuperblock {
                 "raw superblock checksum mismatch".to_string(),
             ));
         }
+        let required_feature_flags = get_u64(bytes, 48)?;
+        let unsupported = required_feature_flags & !SUPPORTED_REQUIRED_FEATURE_FLAGS;
+        if unsupported != 0 {
+            return Err(ArgosError::IncompatibleFormat(format!(
+                "unsupported required raw feature flags 0x{unsupported:x}"
+            )));
+        }
+        let block_size = get_u32(bytes, 56)?;
+        let sector_size = get_u32(bytes, 60)?;
+        let k = get_u32(bytes, 100)?;
+        let m = get_u32(bytes, 104)?;
+        let chunk_size = get_u64(bytes, 112)?;
+        if block_size != RAW_BLOCK_SIZE as u32 {
+            return Err(ArgosError::IncompatibleFormat(format!(
+                "unsupported raw block size {block_size}"
+            )));
+        }
+        if sector_size == 0 || !sector_size.is_power_of_two() || block_size % sector_size != 0 {
+            return Err(ArgosError::IncompatibleFormat(format!(
+                "invalid raw sector size {sector_size} for block size {block_size}"
+            )));
+        }
+        if k == 0 || k.checked_add(m).is_none() || chunk_size == 0 {
+            return Err(ArgosError::IncompatibleFormat(
+                "invalid raw erasure layout or chunk size".to_string(),
+            ));
+        }
         let journal = get_region(bytes, 128)?;
         let metadata = get_region(bytes, 144)?;
         let allocator = get_region(bytes, 160)?;
@@ -206,30 +234,91 @@ impl RawSuperblock {
         validate_region("metadata", metadata)?;
         validate_region("allocator", allocator)?;
         validate_region("data", data)?;
+        let backup_superblock_offset = get_u64(bytes, 192)?;
+        validate_region_order(journal, metadata, allocator, data, backup_superblock_offset)?;
         Ok(Self {
             pool_uuid: uuid_from(bytes, 64)?,
             device_uuid: uuid_from(bytes, 80)?,
             disk_id: get_fixed_str(bytes, 256, 64)?,
             disk_index: get_u32(bytes, 96)?,
-            k: get_u32(bytes, 100)?,
-            m: get_u32(bytes, 104)?,
-            chunk_size: get_u64(bytes, 112)?,
+            k,
+            m,
+            chunk_size,
             generation: get_u64(bytes, 32)?,
             clean: get_u32(bytes, 108)? != 0,
             feature_flags: get_u64(bytes, 40)?,
-            required_feature_flags: get_u64(bytes, 48)?,
-            block_size: get_u32(bytes, 56)?,
-            sector_size: get_u32(bytes, 60)?,
+            required_feature_flags,
+            block_size,
+            sector_size,
             journal,
             metadata,
             allocator,
             data,
-            backup_superblock_offset: get_u64(bytes, 192)?,
+            backup_superblock_offset,
             label: get_fixed_str(bytes, 320, 128)?,
             last_mount_time: get_u64(bytes, 200)?,
             last_clean_unmount_time: get_u64(bytes, 208)?,
         })
     }
+
+    pub fn validate_device_capacity(&self, capacity: u64) -> Result<()> {
+        let backup_end = self
+            .backup_superblock_offset
+            .checked_add((SUPERBLOCK_SIZE + DEVICE_LABEL_SIZE) as u64)
+            .ok_or_else(|| {
+                ArgosError::IncompatibleFormat("backup superblock range overflow".to_string())
+            })?;
+        if backup_end > capacity {
+            return Err(ArgosError::IncompatibleFormat(format!(
+                "raw layout backup offset {} does not fit device capacity {capacity}",
+                self.backup_superblock_offset
+            )));
+        }
+        for (name, region) in [
+            ("journal", self.journal),
+            ("metadata", self.metadata),
+            ("allocator", self.allocator),
+            ("data", self.data),
+        ] {
+            let end = region
+                .offset
+                .checked_add(region.length)
+                .ok_or_else(|| ArgosError::IncompatibleFormat(format!("{name} region overflow")))?;
+            if end > capacity {
+                return Err(ArgosError::IncompatibleFormat(format!(
+                    "{name} region ends at {end}, beyond device capacity {capacity}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_region_order(
+    journal: RawRegion,
+    metadata: RawRegion,
+    allocator: RawRegion,
+    data: RawRegion,
+    backup_superblock_offset: u64,
+) -> Result<()> {
+    let end = |name: &str, region: RawRegion| {
+        region
+            .offset
+            .checked_add(region.length)
+            .ok_or_else(|| ArgosError::IncompatibleFormat(format!("{name} region overflow")))
+    };
+    if journal.offset < DEVICE_LABEL_OFFSET + DEVICE_LABEL_SIZE as u64
+        || end("journal", journal)? > metadata.offset
+        || end("metadata", metadata)? > allocator.offset
+        || end("allocator", allocator)? > data.offset
+        || end("data", data)? > backup_superblock_offset
+        || !backup_superblock_offset.is_multiple_of(RAW_BLOCK_SIZE)
+    {
+        return Err(ArgosError::IncompatibleFormat(
+            "raw superblock regions overlap or are out of order".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 struct RawLayoutRegions {
@@ -454,6 +543,55 @@ mod tests {
         assert!(matches!(
             RawSuperblock::decode(&encoded).unwrap_err(),
             ArgosError::Checksum(_)
+        ));
+    }
+
+    #[test]
+    fn superblock_rejects_unknown_required_features_and_overlapping_regions() {
+        let mut sb = RawSuperblock::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "disk-0000".to_string(),
+            0,
+            2,
+            1,
+            262_144,
+            64 * 1024 * 1024,
+            "capos-root".to_string(),
+        )
+        .unwrap();
+        sb.required_feature_flags = 1;
+        assert!(matches!(
+            RawSuperblock::decode(&sb.encode()).unwrap_err(),
+            ArgosError::IncompatibleFormat(_)
+        ));
+
+        sb.required_feature_flags = 0;
+        sb.metadata.offset = sb.journal.offset;
+        assert!(matches!(
+            RawSuperblock::decode(&sb.encode()).unwrap_err(),
+            ArgosError::IncompatibleFormat(_)
+        ));
+    }
+
+    #[test]
+    fn superblock_layout_must_fit_the_opened_device() {
+        let sb = RawSuperblock::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "disk-0000".to_string(),
+            0,
+            2,
+            1,
+            262_144,
+            64 * 1024 * 1024,
+            "capos-root".to_string(),
+        )
+        .unwrap();
+        sb.validate_device_capacity(64 * 1024 * 1024).unwrap();
+        assert!(matches!(
+            sb.validate_device_capacity(32 * 1024 * 1024).unwrap_err(),
+            ArgosError::IncompatibleFormat(_)
         ));
     }
 
