@@ -1193,13 +1193,12 @@ impl ArgosFs {
                 }
             }
             acl::POSIX_ACL_DEFAULT_XATTR | acl::ARGOS_POSIX_ACL_DEFAULT_XATTR => {
-                if inode.kind != NodeKind::Directory {
+                if acl::is_empty_posix_acl_xattr(value) {
+                    inode.posix_acl_default = None;
+                } else if inode.kind != NodeKind::Directory {
                     return Err(ArgosError::Invalid(
                         "default ACL can only be set on directories".to_string(),
                     ));
-                }
-                if acl::is_empty_posix_acl_xattr(value) {
-                    inode.posix_acl_default = None;
                 } else {
                     inode.posix_acl_default = Some(acl::parse_posix_acl_xattr(value)?);
                 }

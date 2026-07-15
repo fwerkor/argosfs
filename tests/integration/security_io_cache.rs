@@ -193,6 +193,35 @@ fn empty_posix_acl_xattrs_remove_existing_acls() {
 }
 
 #[test]
+fn empty_default_acl_xattrs_are_noops_on_regular_files() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    fs.write_file("/file", b"acl", 0o600).unwrap();
+    let file = fs.resolve_path("/file", false).unwrap();
+    let header_only = 0x0002u32.to_le_bytes();
+    let encoded =
+        acl::posix_acl_to_xattr(&acl::parse_posix_acl("user::rw-,group::r--,other::---").unwrap());
+
+    for (name, empty_value) in [
+        (acl::POSIX_ACL_DEFAULT_XATTR, Vec::new()),
+        (acl::ARGOS_POSIX_ACL_DEFAULT_XATTR, header_only.to_vec()),
+    ] {
+        fs.setxattr_inode(file, name, &empty_value).unwrap();
+        assert!(fs.metadata_snapshot().inodes[&file]
+            .posix_acl_default
+            .is_none());
+        assert_eq!(
+            fs.getxattr_inode(file, name).unwrap_err().errno(),
+            libc::ENOENT
+        );
+        assert_eq!(
+            fs.setxattr_inode(file, name, &encoded).unwrap_err().errno(),
+            libc::EINVAL
+        );
+    }
+}
+
+#[test]
 fn xattr_namespaces_are_explicitly_enforced() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
