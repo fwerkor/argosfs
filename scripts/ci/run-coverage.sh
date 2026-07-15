@@ -45,6 +45,7 @@ ARGOSFS_TEST_ARTIFACTS="$artifacts/randomized-model" \
 if [ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]; then
   ARGOSFS_COMPAT_WORKDIR="$artifacts/mounted-fuse" \
     scripts/tests/host/privileged_fuse.sh
+  ARGOSFS_PERMISSION_COMPAT_MODE=kernel \
   ARGOSFS_COMPAT_WORKDIR="$artifacts/permission-compat" \
     scripts/tests/host/permission_compat.sh
   if [ -n "${PJDFSTEST_ROOT:-}" ] && [ -d "$PJDFSTEST_ROOT/tests" ]; then
