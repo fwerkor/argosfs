@@ -1184,9 +1184,13 @@ impl ArgosFs {
             .ok_or_else(|| ArgosError::NotFound(format!("inode {ino}")))?;
         match name {
             acl::POSIX_ACL_ACCESS_XATTR | acl::ARGOS_POSIX_ACL_ACCESS_XATTR => {
-                let access_acl = acl::parse_posix_acl_xattr(value)?;
-                inode.mode = acl::mode_from_access_acl(&access_acl, inode.mode);
-                inode.posix_acl_access = Some(access_acl);
+                if acl::is_empty_posix_acl_xattr(value) {
+                    inode.posix_acl_access = None;
+                } else {
+                    let access_acl = acl::parse_posix_acl_xattr(value)?;
+                    inode.mode = acl::mode_from_access_acl(&access_acl, inode.mode);
+                    inode.posix_acl_access = Some(access_acl);
+                }
             }
             acl::POSIX_ACL_DEFAULT_XATTR | acl::ARGOS_POSIX_ACL_DEFAULT_XATTR => {
                 if inode.kind != NodeKind::Directory {
@@ -1194,7 +1198,11 @@ impl ArgosFs {
                         "default ACL can only be set on directories".to_string(),
                     ));
                 }
-                inode.posix_acl_default = Some(acl::parse_posix_acl_xattr(value)?);
+                if acl::is_empty_posix_acl_xattr(value) {
+                    inode.posix_acl_default = None;
+                } else {
+                    inode.posix_acl_default = Some(acl::parse_posix_acl_xattr(value)?);
+                }
             }
             acl::NFS4_ACL_XATTR => {
                 let text = std::str::from_utf8(value)
