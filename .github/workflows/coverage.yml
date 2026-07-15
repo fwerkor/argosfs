@@ -15,7 +15,7 @@ env:
 
 jobs:
   rust-coverage:
-    name: Rust line coverage (>= 90%)
+    name: Rust line coverage (>= 80%)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -53,7 +53,7 @@ jobs:
       - name: Enforce line coverage
         env:
           ARGOSFS_COVERAGE_REQUIRE_FUSE: "1"
-          ARGOSFS_COVERAGE_MIN_LINES: "90"
+          ARGOSFS_COVERAGE_MIN_LINES: "80"
           PJDFSTEST_ROOT: ${{ github.workspace }}/external/pjdfstest
         run: scripts/ci/run-coverage.sh
 

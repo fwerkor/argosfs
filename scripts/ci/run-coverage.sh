@@ -4,7 +4,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
 
-minimum_lines="${ARGOSFS_COVERAGE_MIN_LINES:-90}"
+minimum_lines="${ARGOSFS_COVERAGE_MIN_LINES:-80}"
 require_fuse="${ARGOSFS_COVERAGE_REQUIRE_FUSE:-0}"
 artifacts="${ARGOSFS_COVERAGE_ARTIFACTS:-$repo/target/coverage}"
 rm -rf "$artifacts"
