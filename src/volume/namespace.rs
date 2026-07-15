@@ -422,6 +422,15 @@ impl ArgosFs {
         self.write_inode_range_checked(ino, offset, data, Some((uid, gid)), true)
     }
 
+    pub(crate) fn write_inode_range_from_open_handle(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize> {
+        self.write_inode_range_checked(ino, offset, data, None, true)
+    }
+
     pub(super) fn write_inode_range_checked(
         &self,
         ino: InodeId,
@@ -857,6 +866,14 @@ impl ArgosFs {
             return Err(ArgosError::AlreadyExists(name));
         }
         let ino = self.alloc_inode_locked(&mut meta);
+        let gid = {
+            let parent_inode = self.dir_inode_locked(&meta, parent)?;
+            if parent_inode.mode & libc::S_ISGID != 0 {
+                parent_inode.gid
+            } else {
+                gid
+            }
+        };
         let inherited_acl = meta
             .inodes
             .get(&parent)

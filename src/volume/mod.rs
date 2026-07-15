@@ -768,6 +768,22 @@ impl ArgosFs {
         }
         let now = now_f64();
         let ino = self.alloc_inode_locked(meta);
+        let (gid, inherit_setgid) = {
+            let parent_inode = self.dir_inode_locked(meta, parent)?;
+            (
+                if parent_inode.mode & libc::S_ISGID != 0 {
+                    parent_inode.gid
+                } else {
+                    gid
+                },
+                parent_inode.mode & libc::S_ISGID != 0,
+            )
+        };
+        let mode = if inherit_setgid {
+            mode | libc::S_ISGID
+        } else {
+            mode
+        };
         let inherited_default_acl = meta
             .inodes
             .get(&parent)
@@ -872,6 +888,14 @@ impl ArgosFs {
         };
         let now = now_f64();
         let ino = self.alloc_inode_locked(meta);
+        let gid = {
+            let parent_inode = self.dir_inode_locked(meta, parent)?;
+            if parent_inode.mode & libc::S_ISGID != 0 {
+                parent_inode.gid
+            } else {
+                gid
+            }
+        };
         let inherited_acl = meta
             .inodes
             .get(&parent)
