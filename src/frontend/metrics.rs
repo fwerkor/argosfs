@@ -11,18 +11,14 @@ use std::time::Duration;
 pub fn serve(volume: ArgosFs, listen: &str) -> Result<()> {
     let listener = TcpListener::bind(listen)?;
     for stream in listener.incoming() {
+        let stream = stream?;
         let volume = volume.clone();
-        match stream {
-            Ok(stream) => {
-                thread::spawn(move || {
-                    let mut stream = stream;
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                    let _ = handle_client(&volume, &mut stream);
-                });
-            }
-            Err(err) => return Err(err.into()),
-        }
+        thread::spawn(move || {
+            let mut stream = stream;
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            let _ = handle_client(&volume, &mut stream);
+        });
     }
     Ok(())
 }
