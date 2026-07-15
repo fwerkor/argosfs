@@ -362,3 +362,268 @@ fn dirty_host_sync_ignores_deleted_paths_and_keeps_failed_paths() {
     assert!(fs.sync_dirty_host_shards().is_err());
     assert!(fs.dirty_host_shards.lock().contains(&unsyncable));
 }
+
+#[test]
+fn volume_constructors_validate_layouts_force_recreation_and_backend_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        ArgosFs::create(
+            dir.path().join("k-zero"),
+            VolumeConfig {
+                k: 0,
+                m: 1,
+                ..VolumeConfig::default()
+            },
+            1,
+            false,
+        ),
+        Err(ArgosError::Invalid(_))
+    ));
+    assert!(matches!(
+        ArgosFs::create(
+            dir.path().join("too-few"),
+            VolumeConfig {
+                k: 2,
+                m: 1,
+                ..VolumeConfig::default()
+            },
+            2,
+            false,
+        ),
+        Err(ArgosError::NotEnoughDisks { .. })
+    ));
+    let root = dir.path().join("host");
+    let fs = ArgosFs::create(
+        &root,
+        VolumeConfig {
+            k: 1,
+            m: 0,
+            chunk_size: 0,
+            ..VolumeConfig::default()
+        },
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        fs.metadata_snapshot().config.chunk_size,
+        VolumeConfig::default().chunk_size
+    );
+    drop(fs);
+    assert!(matches!(
+        ArgosFs::create(
+            &root,
+            VolumeConfig {
+                k: 1,
+                m: 0,
+                ..VolumeConfig::default()
+            },
+            1,
+            false
+        ),
+        Err(ArgosError::AlreadyExists(_))
+    ));
+    let recreated = ArgosFs::create(
+        &root,
+        VolumeConfig {
+            k: 1,
+            m: 0,
+            ..VolumeConfig::default()
+        },
+        1,
+        true,
+    )
+    .unwrap();
+    let recreated_meta = recreated.metadata_snapshot();
+    assert_eq!(recreated_meta.backend, BackendKind::Host);
+    assert!(!recreated_meta.uuid.is_empty());
+
+    assert!(matches!(
+        ArgosFs::create_block_backend(
+            BackendKind::Host,
+            &[dir.path().join("unused-host-device")],
+            VolumeConfig {
+                k: 1,
+                m: 0,
+                ..VolumeConfig::default()
+            },
+            "host",
+            false,
+        ),
+        Err(ArgosError::Unsupported(_))
+    ));
+    assert!(matches!(
+        ArgosFs::create_block_backend(
+            BackendKind::LoopBlock,
+            &[],
+            VolumeConfig {
+                k: 0,
+                m: 0,
+                ..VolumeConfig::default()
+            },
+            "invalid",
+            false,
+        ),
+        Err(ArgosError::Invalid(_))
+    ));
+    assert!(matches!(
+        ArgosFs::create_block_backend(
+            BackendKind::LoopBlock,
+            &[],
+            VolumeConfig {
+                k: 1,
+                m: 0,
+                ..VolumeConfig::default()
+            },
+            "empty",
+            false,
+        ),
+        Err(ArgosError::NotEnoughDisks { .. })
+    ));
+
+    let loop_image = dir.path().join("loop.img");
+    let loop_fs = ArgosFs::create_loop(
+        std::slice::from_ref(&loop_image),
+        VolumeConfig {
+            k: 1,
+            m: 0,
+            chunk_size: 0,
+            ..VolumeConfig::default()
+        },
+        32 * 1024 * 1024,
+        "loop",
+        false,
+    )
+    .unwrap();
+    loop_fs.mark_clean_unmount().unwrap();
+    drop(loop_fs);
+    assert!(ArgosFs::open_loop(std::slice::from_ref(&loop_image), false).is_ok());
+
+    let raw_image = dir.path().join("raw.img");
+    std::fs::File::create(&raw_image)
+        .unwrap()
+        .set_len(32 * 1024 * 1024)
+        .unwrap();
+    let raw_fs = ArgosFs::create_raw(
+        std::slice::from_ref(&raw_image),
+        VolumeConfig {
+            k: 1,
+            m: 0,
+            ..VolumeConfig::default()
+        },
+        "raw",
+        false,
+    )
+    .unwrap();
+    raw_fs.mark_clean_unmount().unwrap();
+    drop(raw_fs);
+    assert!(ArgosFs::open_raw(std::slice::from_ref(&raw_image), false).is_ok());
+}
+
+#[test]
+fn mknod_validates_rdev_types_inheritance_and_duplicates() {
+    let (_dir, fs) = host_volume();
+    assert!(matches!(
+        fs.mknod_path("/regular-rdev", libc::S_IFREG | 0o600, 1),
+        Err(ArgosError::Invalid(_))
+    ));
+    assert!(matches!(
+        fs.mknod_path("/fifo-rdev", libc::S_IFIFO | 0o600, 1),
+        Err(ArgosError::Invalid(_))
+    ));
+    assert!(matches!(
+        fs.mknod_path("/socket-rdev", libc::S_IFSOCK | 0o600, 1),
+        Err(ArgosError::Invalid(_))
+    ));
+    assert!(matches!(
+        fs.mknod_path("/directory-mode", libc::S_IFDIR | 0o755, 0),
+        Err(ArgosError::Unsupported(_))
+    ));
+    let regular = fs.mknod_path("/regular", 0o640, 0).unwrap();
+    assert_eq!(
+        fs.attr_inode(regular).unwrap().mode & libc::S_IFMT,
+        libc::S_IFREG
+    );
+    assert!(fs.mknod_path("/regular", 0o640, 0).is_err());
+
+    let parent = fs
+        .mkdir_at_with_owner(ROOT_INO, OsStr::new("sgid"), 0o2775, 1000, 4242)
+        .unwrap();
+    let child = fs
+        .mknod_at_with_owner(parent.ino, OsStr::new("child"), 0o600, 0, 1001, 9999)
+        .unwrap();
+    assert_eq!(child.gid, 4242);
+}
+
+#[test]
+fn rename_covers_same_inode_exchange_cycles_cross_parent_and_type_conflicts() {
+    let (_dir, fs) = host_volume();
+    fs.write_file("/same-a", b"same", 0o600).unwrap();
+    let same = fs.resolve_path("/same-a", true).unwrap();
+    fs.link_at(same, ROOT_INO, OsStr::new("same-b")).unwrap();
+    fs.rename_path("/same-a", "/same-b").unwrap();
+    assert_eq!(fs.attr_path("/same-a", false).unwrap().ino, same);
+    assert_eq!(fs.attr_path("/same-b", false).unwrap().ino, same);
+
+    let a = fs.mkdir("/a", 0o755).unwrap();
+    fs.mkdir("/a/b", 0o755).unwrap();
+    assert!(fs
+        .rename_at_with_policy(
+            a,
+            OsStr::new("b"),
+            ROOT_INO,
+            OsStr::new("a"),
+            RenamePolicy {
+                exchange: true,
+                ..RenamePolicy::default()
+            },
+        )
+        .is_err());
+
+    let p1 = fs.mkdir("/p1", 0o755).unwrap();
+    let p2 = fs.mkdir("/p2", 0o755).unwrap();
+    fs.mkdir("/p1/d1", 0o755).unwrap();
+    fs.mkdir("/p2/d2", 0o755).unwrap();
+    let before_p1 = fs.attr_inode(p1).unwrap().nlink;
+    let before_p2 = fs.attr_inode(p2).unwrap().nlink;
+    fs.rename_at_with_policy(
+        p1,
+        OsStr::new("d1"),
+        p2,
+        OsStr::new("d2"),
+        RenamePolicy {
+            exchange: true,
+            ..RenamePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(fs.attr_inode(p1).unwrap().nlink, before_p1);
+    assert_eq!(fs.attr_inode(p2).unwrap().nlink, before_p2);
+
+    fs.mkdir("/nonempty", 0o755).unwrap();
+    fs.write_file("/nonempty/child", b"x", 0o600).unwrap();
+    fs.mkdir("/source-dir", 0o755).unwrap();
+    assert!(fs.rename_path("/source-dir", "/nonempty").is_err());
+    fs.write_file("/source-file", b"x", 0o600).unwrap();
+    assert!(fs.rename_path("/source-file", "/nonempty").is_err());
+    fs.mkdir("/empty-dir", 0o755).unwrap();
+    fs.write_file("/another-file", b"x", 0o600).unwrap();
+    assert!(fs.rename_path("/empty-dir", "/another-file").is_err());
+
+    fs.write_file("/replace-old", b"old", 0o600).unwrap();
+    fs.write_file("/replace-new", b"new", 0o600).unwrap();
+    let old_ino = fs.resolve_path("/replace-old", true).unwrap();
+    let new_ino = fs.resolve_path("/replace-new", true).unwrap();
+    fs.rename_path("/replace-old", "/replace-new").unwrap();
+    assert_eq!(fs.resolve_path("/replace-new", true).unwrap(), old_ino);
+    assert!(fs.attr_inode(new_ino).is_err());
+
+    fs.mkdir("/move-source", 0o755).unwrap();
+    let left = fs.mkdir("/left", 0o755).unwrap();
+    let right = fs.mkdir("/right", 0o755).unwrap();
+    let left_links = fs.attr_inode(left).unwrap().nlink;
+    let right_links = fs.attr_inode(right).unwrap().nlink;
+    fs.rename_path("/move-source", "/right/moved").unwrap();
+    assert_eq!(fs.attr_inode(left).unwrap().nlink, left_links);
+    assert_eq!(fs.attr_inode(right).unwrap().nlink, right_links + 1);
+}
