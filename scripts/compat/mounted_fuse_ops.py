@@ -348,6 +348,26 @@ def check_permission_enforcement(root):
             f.write(b"-updated")
     require_identity_action(nobody_uid, nobody_gid, owner_update, "chowned owner access")
     require(open(owned, "rb").read() == b"owned-updated", "chowned owner update was not persisted")
+
+    truncate_open = path(root, b"truncate-open-handle.txt")
+    with open(truncate_open, "wb") as f:
+        f.write(b"truncate-me")
+    os.chown(truncate_open, nobody_uid, nobody_gid)
+    os.chmod(truncate_open, 0o600)
+    def truncate_after_mode_change():
+        fd = os.open(truncate_open, os.O_WRONLY)
+        try:
+            os.chmod(truncate_open, 0)
+            os.ftruncate(fd, 3)
+        finally:
+            os.close(fd)
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        truncate_after_mode_change,
+        "truncate through an already-open writable handle",
+    )
+    require(os.stat(truncate_open).st_size == 3, "open-handle truncate size mismatch")
     log("passed", "cross-user-permissions")
 
 

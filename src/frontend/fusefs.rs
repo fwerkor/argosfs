@@ -252,6 +252,26 @@ impl ArgosFuse {
         Ok(())
     }
 
+    fn require_writable_handle(&self, ino: INodeNo, fh: FileHandle) -> Result<()> {
+        let file = self
+            .handles
+            .lock()
+            .get(fh)
+            .cloned()
+            .ok_or_else(|| ArgosError::Invalid("invalid FUSE file handle".to_string()))?;
+        if file.ino != ino.0 {
+            return Err(ArgosError::Invalid(
+                "FUSE file handle inode mismatch".to_string(),
+            ));
+        }
+        if !file.can_write() {
+            return Err(ArgosError::PermissionDenied(
+                "FUSE file handle is not open for writing".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn queue_writeback(&self, ino: InodeId, offset: u64, data: &[u8]) -> bool {
         if data.len() > FUSE_WRITEBACK_MAX_BYTES {
             return false;
@@ -467,7 +487,7 @@ impl Filesystem for ArgosFuse {
         atime: Option<TimeOrNow>,
         mtime: Option<TimeOrNow>,
         _ctime: Option<SystemTime>,
-        _fh: Option<FileHandle>,
+        fh: Option<FileHandle>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
@@ -510,7 +530,11 @@ impl Filesystem for ArgosFuse {
                 }
             }
             if size.is_some() {
-                self.require_access(req, ino, libc::W_OK)?;
+                if let Some(fh) = fh {
+                    self.require_writable_handle(ino, fh)?;
+                } else {
+                    self.require_access(req, ino, libc::W_OK)?;
+                }
             }
             if atime.is_some() || mtime.is_some() {
                 let owner_or_root = req.uid() == 0 || req.uid() == current.uid;
@@ -1898,6 +1922,52 @@ mod tests {
             volume.read_inode(attr.ino, 0, 64, false).unwrap(),
             b"accepted"
         );
+    }
+
+    #[test]
+    fn truncate_uses_the_successfully_opened_writable_handle_after_mode_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let volume = ArgosFs::create(
+            tmp.path(),
+            VolumeConfig {
+                k: 1,
+                m: 0,
+                ..VolumeConfig::default()
+            },
+            1,
+            false,
+        )
+        .unwrap();
+        let ino = volume.create_file_path("/truncate", 0o600).unwrap();
+        volume.write_inode_range(ino, 0, b"payload").unwrap();
+        let fuse = ArgosFuse::new(volume.clone());
+        let writable = fuse.handles.lock().open(OpenFileHandle {
+            ino,
+            flags: libc::O_WRONLY,
+        });
+        let read_only = fuse.handles.lock().open(OpenFileHandle {
+            ino,
+            flags: libc::O_RDONLY,
+        });
+        volume.chmod_inode(ino, 0).unwrap();
+
+        fuse.require_writable_handle(INodeNo(ino), writable)
+            .unwrap();
+        assert_eq!(
+            fuse.require_writable_handle(INodeNo(ino), read_only)
+                .unwrap_err()
+                .errno(),
+            libc::EACCES
+        );
+        assert_eq!(
+            fuse.require_writable_handle(INodeNo(ino + 1), writable)
+                .unwrap_err()
+                .errno(),
+            libc::EINVAL
+        );
+
+        volume.truncate_inode_as(ino, 2).unwrap();
+        assert_eq!(volume.read_inode(ino, 0, 8, false).unwrap(), b"pa");
     }
 
     #[test]
