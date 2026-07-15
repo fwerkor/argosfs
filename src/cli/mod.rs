@@ -6,23 +6,26 @@ use crate::metrics;
 use crate::rootfs::{self, RootMountMode};
 use crate::scan;
 use crate::types::{
-    BackendKind, Compression, DiskStatus, IoMode, NodeKind, StorageTier, VolumeConfig,
-    DEFAULT_DEFERRED_COMMIT_INTERVAL_MS, DEFAULT_DEFERRED_COMMIT_MAX_TRANSACTIONS,
+    BackendKind, Compression, DiskStatus, FsckReport, HealthReport, IoMode, NodeKind, StorageTier,
+    TransactionReport, VolumeConfig, DEFAULT_DEFERRED_COMMIT_INTERVAL_MS,
+    DEFAULT_DEFERRED_COMMIT_MAX_TRANSACTIONS,
 };
 use crate::util::clean_path;
 use crate::volume::NodeAttr;
 use crate::{ArgosError, ArgosFs, AutopilotPolicy};
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
+
+const DEFAULT_LOOP_IMAGE_SIZE: u64 = 64 * 1024 * 1024;
 
 mod commands;
 mod tree;
@@ -31,21 +34,31 @@ use commands::Command;
 use tree::{export_tree, import_tree};
 
 #[derive(Parser)]
-#[command(name = "argosfs")]
+#[command(name = "argosfs", version, arg_required_else_help = true)]
 #[command(about = "ArgosFS self-driving erasure-coded root filesystem")]
+#[command(after_help = "Command groups:
+  Setup and discovery: mkfs, scan, inspect-device, inspect-pool, list-devices
+  Root filesystem: mount-root, preflight-root, replay-journal, mount-recovery
+  Device lifecycle: add-device, drain-device, replace-device, remove-device, reshape
+  Maintenance: health, fsck, scrub, rebalance, autopilot, verify-journal
+  File and security tools: import-tree, export-tree, put/get/ls/stat, ACL and encryption commands
+
+Use `argosfs help <COMMAND>` for command-specific options. Block-backed commands can reuse a JSON selector with `--pool-config FILE`.")]
 struct Cli {
+    /// Emit machine-readable JSON where the command supports structured output.
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Command,
 }
 
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
+    let Cli { command, json } = Cli::parse();
+    match command {
         Command::Mkfs {
             root,
-            backend,
-            images,
-            devices,
+            storage,
             image_size,
             pool_name,
             disks,
@@ -61,6 +74,8 @@ pub fn run() -> Result<()> {
             deferred_commit_max_transactions,
             force,
         } => {
+            let storage = storage.resolve(BackendKind::Host)?;
+            validate_root_backend(root.as_deref(), storage.backend)?;
             let config = VolumeConfig {
                 k,
                 m,
@@ -74,30 +89,53 @@ pub fn run() -> Result<()> {
                 deferred_commit_max_transactions,
                 ..VolumeConfig::default()
             };
-            let fs = match backend {
+            let fs = match storage.backend {
                 BackendKind::Host => {
+                    reject_option(image_size.is_some(), "--image-size", BackendKind::Host)?;
+                    reject_option(
+                        pool_name.is_some() || storage.pool.is_some(),
+                        "--pool-name/pool config identity",
+                        BackendKind::Host,
+                    )?;
                     let root = root.context("host mkfs requires ROOT")?;
-                    ArgosFs::create(root, config, disks, force)?
+                    ArgosFs::create(root, config, disks.unwrap_or(6), force)?
                 }
                 BackendKind::LoopBlock => {
-                    let paths = require_paths(images, "loop mkfs requires --images")?;
-                    ArgosFs::create_loop(&paths, config, image_size, &pool_name, force)?
+                    reject_option(disks.is_some(), "--disks", BackendKind::LoopBlock)?;
+                    let paths = require_paths(
+                        storage.images,
+                        "loop mkfs requires --images or --pool-config",
+                    )?;
+                    let pool_name = pool_name
+                        .or(storage.pool)
+                        .unwrap_or_else(|| "argosfs-root".to_string());
+                    ArgosFs::create_loop(
+                        &paths,
+                        config,
+                        image_size.unwrap_or(DEFAULT_LOOP_IMAGE_SIZE),
+                        &pool_name,
+                        force,
+                    )?
                 }
                 BackendKind::RawBlock => {
-                    let paths = require_paths(devices, "raw mkfs requires --devices")?;
+                    reject_option(disks.is_some(), "--disks", BackendKind::RawBlock)?;
+                    reject_option(image_size.is_some(), "--image-size", BackendKind::RawBlock)?;
+                    let paths = require_paths(
+                        storage.devices,
+                        "raw mkfs requires --devices or --pool-config",
+                    )?;
+                    let pool_name = pool_name
+                        .or(storage.pool)
+                        .unwrap_or_else(|| "argosfs-root".to_string());
                     ArgosFs::create_raw(&paths, config, &pool_name, force)?
                 }
             };
-            println!("{}", serde_json::to_string_pretty(&fs.health_report())?);
+            print_health_report(&fs.health_report(), json, true)?;
         }
-        Command::Scan {
-            backend,
-            images,
-            devices,
-            json,
-        } => {
-            let paths = backend_paths(backend, images, devices)?;
-            let report = match backend {
+        Command::Scan { storage } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let paths = backend_paths(storage.backend, storage.images, storage.devices)?;
+            let report = match storage.backend {
                 BackendKind::LoopBlock => scan::scan_images(&paths),
                 BackendKind::RawBlock => scan::scan_devices(&paths),
                 BackendKind::Host => bail!("scan is only supported for loop/raw backends"),
@@ -161,40 +199,43 @@ pub fn run() -> Result<()> {
                 }))?
             );
         }
-        Command::InspectPool {
-            backend,
-            images,
-            devices,
-            pool,
-        } => {
-            let fs = open_backend(None, backend, images, devices, false)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
-            println!("{}", serde_json::to_string_pretty(&fs.health_report())?);
+        Command::InspectPool { storage } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let fs = open_backend(
+                None,
+                storage.backend,
+                storage.images,
+                storage.devices,
+                false,
+            )?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
+            print_health_report(&fs.health_report(), json, true)?;
         }
-        Command::ListDevices {
-            backend,
-            images,
-            devices,
-            pool,
-        } => {
-            let fs = open_backend(None, backend, images, devices, false)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+        Command::ListDevices { storage } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let fs = open_backend(
+                None,
+                storage.backend,
+                storage.images,
+                storage.devices,
+                false,
+            )?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&fs.metadata_snapshot().disks)?
             );
         }
         Command::AddDevice {
-            backend,
-            images,
-            devices,
-            pool,
+            storage,
             device,
             image_size,
             force,
         } => {
-            let fs = open_backend(None, backend, images, devices, true)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let image_size = block_image_size(storage.backend, image_size)?;
+            let fs = open_backend(None, storage.backend, storage.images, storage.devices, true)?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             let disk_id = fs.add_block_device(device, image_size, force)?;
             fs.sync()?;
             println!(
@@ -202,15 +243,10 @@ pub fn run() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({"disk_id": disk_id}))?
             );
         }
-        Command::DrainDevice {
-            backend,
-            images,
-            devices,
-            pool,
-            device,
-        } => {
-            let fs = open_backend(None, backend, images, devices, true)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+        Command::DrainDevice { storage, device } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let fs = open_backend(None, storage.backend, storage.images, storage.devices, true)?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             let rewritten = fs.drain_disk(&device)?;
             fs.sync()?;
             println!(
@@ -221,15 +257,18 @@ pub fn run() -> Result<()> {
             );
         }
         Command::ReplaceDevice {
-            backend,
-            mut images,
-            mut devices,
-            pool,
+            storage,
             old,
             new,
             image_size,
             force,
         } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let backend = storage.backend;
+            let pool = storage.pool;
+            let mut images = storage.images;
+            let mut devices = storage.devices;
+            let image_size = block_image_size(backend, image_size)?;
             let fs = open_backend(None, backend, images.clone(), devices.clone(), true)?;
             validate_requested_pool(&fs, pool.as_deref())?;
             let new_id = fs.add_block_device(new.clone(), image_size, force)?;
@@ -253,15 +292,10 @@ pub fn run() -> Result<()> {
                 }))?
             );
         }
-        Command::RemoveDevice {
-            backend,
-            images,
-            devices,
-            pool,
-            device,
-        } => {
-            let fs = open_backend(None, backend, images, devices, true)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+        Command::RemoveDevice { storage, device } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let fs = open_backend(None, storage.backend, storage.images, storage.devices, true)?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             let rewritten = fs.remove_disk(&device)?;
             fs.sync()?;
             println!(
@@ -280,15 +314,17 @@ pub fn run() -> Result<()> {
             fusefs::mount(root, mountpoint, foreground, option)?;
         }
         Command::MountRoot {
-            backend,
-            images,
-            devices,
-            pool,
+            storage,
             target,
             mode,
             foreground,
             option,
         } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let backend = storage.backend;
+            let images = storage.images;
+            let devices = storage.devices;
+            let pool = storage.pool;
             let write = matches!(
                 mode,
                 RootMountMode::ReadWrite | RootMountMode::DegradedReadWrite
@@ -308,42 +344,40 @@ pub fn run() -> Result<()> {
                 fusefs::mount_volume(fs, target, foreground, root_mount_options(option))?;
             }
         }
-        Command::PreflightRoot {
-            backend,
-            images,
-            devices,
-            pool,
-            mode,
-        } => {
-            let fs = open_backend(None, backend, images, devices, false)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+        Command::PreflightRoot { storage, mode } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let fs = open_backend(
+                None,
+                storage.backend,
+                storage.images,
+                storage.devices,
+                false,
+            )?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             let report = rootfs::preflight_report(&fs, mode);
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            print_preflight_report(&report, json)?;
             if !report.ok {
                 bail!("root preflight failed: {}", report.errors.join("; "));
             }
         }
-        Command::ReplayJournal {
-            backend,
-            images,
-            devices,
-            pool,
-        } => {
-            let fs = open_backend(None, backend, images, devices, true)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+        Command::ReplayJournal { storage } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let fs = open_backend(None, storage.backend, storage.images, storage.devices, true)?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             let report = fs.transaction_report()?;
             fs.sync()?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            print_transaction_report(&report, json)?;
         }
-        Command::MountRecovery {
-            backend,
-            images,
-            devices,
-            pool,
-            target,
-        } => {
-            let fs = open_backend(None, backend, images, devices, false)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+        Command::MountRecovery { storage, target } => {
+            let storage = storage.resolve(BackendKind::LoopBlock)?;
+            let fs = open_backend(
+                None,
+                storage.backend,
+                storage.images,
+                storage.devices,
+                false,
+            )?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             rootfs::preflight_volume(&fs, RootMountMode::Recovery)?;
             fusefs::mount_volume(fs, target, true, root_mount_options(vec!["ro".to_string()]))?;
         }
@@ -368,7 +402,7 @@ pub fn run() -> Result<()> {
             let file_bytes = fs.read_file(&path, true)?;
             io::copy(&mut file_bytes.as_slice(), &mut io::stdout().lock())?;
         }
-        Command::Ls { root, path, json } => {
+        Command::Ls { root, path } => {
             let fs = ArgosFs::open(root)?;
             let ino = fs.resolve_path(&path, true)?;
             let entries = fs.readdir(ino)?;
@@ -427,14 +461,12 @@ pub fn run() -> Result<()> {
         Command::Truncate { root, path, size } => {
             ArgosFs::open(root)?.truncate_path(&path, size)?;
         }
-        Command::ImportTree {
-            backend,
-            images,
-            devices,
-            args,
-        } => {
+        Command::ImportTree { storage, args } => {
+            let storage = storage.resolve(BackendKind::Host)?;
+            let backend = storage.backend;
             let (root, source, dest) = import_args(backend, args)?;
-            let fs = open_backend(root, backend, images, devices, true)?;
+            validate_root_backend(root.as_deref(), backend)?;
+            let fs = open_backend(root, backend, storage.images, storage.devices, true)?;
             let _bulk_import =
                 (backend != BackendKind::Host).then(|| crate::volume::bulk_import_scope(true));
             let import_result = import_tree(&fs, &source, &dest);
@@ -446,14 +478,12 @@ pub fn run() -> Result<()> {
             import_result?;
             sync_result?;
         }
-        Command::ExportTree {
-            backend,
-            images,
-            devices,
-            args,
-        } => {
+        Command::ExportTree { storage, args } => {
+            let storage = storage.resolve(BackendKind::Host)?;
+            let backend = storage.backend;
             let (root, dest) = export_args(backend, args)?;
-            let fs = open_backend(root, backend, images, devices, false)?;
+            validate_root_backend(root.as_deref(), backend)?;
+            let fs = open_backend(root, backend, storage.images, storage.devices, false)?;
             export_tree(&fs, &dest)?;
         }
         Command::AddDisk {
@@ -533,55 +563,50 @@ pub fn run() -> Result<()> {
             }
             fs.set_disk_health(&disk_id, health)?;
         }
-        Command::Health { root, json } => {
+        Command::Health { root } => {
             let report = ArgosFs::open(root)?.health_report();
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!("volume {} txid {}", report.volume_uuid, report.txid);
-                for disk in report.disks {
-                    println!(
-                        "{} {:?} {:?} used={} risk={:.2} predicted={} {:?}",
-                        disk.id,
-                        disk.status,
-                        disk.tier,
-                        disk.used_bytes,
-                        disk.risk_score,
-                        disk.predicted_failure,
-                        disk.reasons
-                    );
-                }
-            }
+            print_health_report(&report, json, false)?;
         }
         Command::Fsck {
             root,
-            backend,
-            images,
-            devices,
-            pool,
+            storage,
             repair,
             remove_orphans,
         } => {
-            let fs = open_backend(root, backend, images, devices, repair || remove_orphans)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+            let default_backend = if root.is_some() {
+                BackendKind::Host
+            } else {
+                BackendKind::LoopBlock
+            };
+            let storage = storage.resolve(default_backend)?;
+            validate_root_backend(root.as_deref(), storage.backend)?;
+            let fs = open_backend(
+                root,
+                storage.backend,
+                storage.images,
+                storage.devices,
+                repair || remove_orphans,
+            )?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             let report = fs.fsck(repair, remove_orphans)?;
             if repair || remove_orphans {
                 fs.sync()?;
             }
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            print_fsck_report(&report, json)?;
         }
-        Command::Scrub {
-            root,
-            backend,
-            images,
-            devices,
-            pool,
-        } => {
-            let fs = open_backend(root, backend, images, devices, true)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+        Command::Scrub { root, storage } => {
+            let default_backend = if root.is_some() {
+                BackendKind::Host
+            } else {
+                BackendKind::LoopBlock
+            };
+            let storage = storage.resolve(default_backend)?;
+            validate_root_backend(root.as_deref(), storage.backend)?;
+            let fs = open_backend(root, storage.backend, storage.images, storage.devices, true)?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             let report = fs.scrub()?;
             fs.sync()?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            print_fsck_report(&report, json)?;
         }
         Command::Rebalance { root } => {
             let rewritten = ArgosFs::open(root)?.rebalance()?;
@@ -592,16 +617,20 @@ pub fn run() -> Result<()> {
         }
         Command::Reshape {
             root,
-            backend,
-            images,
-            devices,
-            pool,
+            storage,
             k,
             m,
             max_files,
         } => {
-            let fs = open_backend(root, backend, images, devices, true)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+            let default_backend = if root.is_some() {
+                BackendKind::Host
+            } else {
+                BackendKind::LoopBlock
+            };
+            let storage = storage.resolve(default_backend)?;
+            validate_root_backend(root.as_deref(), storage.backend)?;
+            let fs = open_backend(root, storage.backend, storage.images, storage.devices, true)?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             let report = fs.reshape_layout(k, m, max_files)?;
             fs.sync()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -612,7 +641,6 @@ pub fn run() -> Result<()> {
             once,
             dry_run,
             explain,
-            json,
             interval,
         } => loop {
             let fs = ArgosFs::open(&root)?;
@@ -622,11 +650,7 @@ pub fn run() -> Result<()> {
             } else {
                 fs.autopilot_once_with_policy(autopilot_policy)?
             };
-            if json {
-                println!("{}", serde_json::to_string(&report)?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            }
+            print_autopilot_report(&report, json)?;
             if once {
                 break;
             }
@@ -731,17 +755,24 @@ pub fn run() -> Result<()> {
             let acl = fs.get_nfs4_acl_path(&path)?.unwrap_or_default();
             println!("{}", acl::nfs4_to_json(&acl)?);
         }
-        Command::VerifyJournal {
-            root,
-            backend,
-            images,
-            devices,
-            pool,
-        } => {
-            let fs = open_backend(root, backend, images, devices, false)?;
-            validate_requested_pool(&fs, pool.as_deref())?;
+        Command::VerifyJournal { root, storage } => {
+            let default_backend = if root.is_some() {
+                BackendKind::Host
+            } else {
+                BackendKind::LoopBlock
+            };
+            let storage = storage.resolve(default_backend)?;
+            validate_root_backend(root.as_deref(), storage.backend)?;
+            let fs = open_backend(
+                root,
+                storage.backend,
+                storage.images,
+                storage.devices,
+                false,
+            )?;
+            validate_requested_pool(&fs, storage.pool.as_deref())?;
             let report = fs.transaction_report()?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            print_transaction_report(&report, json)?;
             if report.invalid_entries > 0 || report.double_write_mismatches > 0 {
                 bail!(
                     "journal verification failed: invalid_entries={} double_write_mismatches={}",
@@ -753,7 +784,7 @@ pub fn run() -> Result<()> {
         Command::CompactJournal { root } => {
             journal::compact_journal(&root)?;
             let report = ArgosFs::audit_transactions(root)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            print_transaction_report(&report, json)?;
             if report.invalid_entries > 0 || report.double_write_mismatches > 0 {
                 bail!(
                     "journal verification failed after compaction: invalid_entries={} double_write_mismatches={}",
@@ -941,6 +972,236 @@ fn kind_name(kind: &NodeKind) -> &'static str {
     }
 }
 
+fn print_autopilot_report(report: &serde_json::Value, explicit_json: bool) -> Result<()> {
+    if explicit_json {
+        println!("{}", serde_json::to_string(report)?);
+        return Ok(());
+    }
+    if !io::stdout().is_terminal() {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+
+    let actions = report
+        .get("actions")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let health = report.get("health").unwrap_or(&serde_json::Value::Null);
+    let volume = health
+        .get("volume_uuid")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let txid = health
+        .get("txid")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    let adaptive_mode = report
+        .pointer("/planner/adaptive_mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let stopped = report
+        .pointer("/planner/stopped_for_conflict")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    println!(
+        "autopilot volume={volume} txid={txid} actions={} mode={adaptive_mode} stopped_for_conflict={stopped}",
+        actions.len()
+    );
+    for action in actions {
+        let name = action
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let detail = action
+            .get("error")
+            .or_else(|| action.get("reason"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(detail) = detail {
+            println!("  {name}: {detail}");
+        } else {
+            println!("  {name}");
+        }
+    }
+    Ok(())
+}
+
+fn structured_json_requested(explicit_json: bool) -> bool {
+    explicit_json || !io::stdout().is_terminal()
+}
+
+fn print_health_report(
+    report: &HealthReport,
+    explicit_json: bool,
+    json_when_redirected: bool,
+) -> Result<()> {
+    if explicit_json || (json_when_redirected && !io::stdout().is_terminal()) {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+    println!(
+        "volume {}: txid={} files={} directories={} devices={} io={:?} encryption={}",
+        report.volume_uuid,
+        report.txid,
+        report.files,
+        report.directories,
+        report.disks.len(),
+        report.io_mode,
+        report.encryption_enabled
+    );
+    for disk in &report.disks {
+        println!(
+            "  {} status={:?} tier={:?} used={}/{} risk={:.2} predicted_failure={}",
+            disk.id,
+            disk.status,
+            disk.tier,
+            disk.used_bytes,
+            disk.capacity_bytes,
+            disk.risk_score,
+            disk.predicted_failure
+        );
+    }
+    Ok(())
+}
+
+fn print_fsck_report(report: &FsckReport, explicit_json: bool) -> Result<()> {
+    if structured_json_requested(explicit_json) {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+    println!(
+        "checked files={} directories={} damaged={} repaired={} unrecoverable={} missing_shards={} checksum_errors={} orphans={}",
+        report.files_checked,
+        report.directories_checked,
+        report.damaged_files,
+        report.repaired_files,
+        report.unrecoverable_files,
+        report.missing_shards,
+        report.checksum_errors,
+        report.orphan_shards
+    );
+    for error in &report.errors {
+        eprintln!("error: {error}");
+    }
+    Ok(())
+}
+
+fn print_transaction_report(report: &TransactionReport, explicit_json: bool) -> Result<()> {
+    if structured_json_requested(explicit_json) {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+    println!(
+        "journal valid={} invalid={} last_txid={} generation={} replayed={} metadata_source={} quorum={}",
+        report.valid_entries,
+        report.invalid_entries,
+        report.last_valid_txid,
+        report.last_valid_generation,
+        report.replayed,
+        report.selected_metadata_source,
+        report
+            .raw_journal_quorum
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    );
+    for error in &report.errors {
+        eprintln!("error: {error}");
+    }
+    Ok(())
+}
+
+fn print_preflight_report(report: &rootfs::RootPreflightReport, explicit_json: bool) -> Result<()> {
+    if structured_json_requested(explicit_json) {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+    println!(
+        "preflight ok={} backend={:?} mode={} available={}/{} degraded={} recommended_mode={}",
+        report.ok,
+        report.backend,
+        report.mode,
+        report.available_devices,
+        report.total_devices,
+        report.degraded,
+        report.recommended_mode
+    );
+    for issue in &report.issues {
+        println!("  {} [{}] {}", issue.severity, issue.code, issue.message);
+    }
+    Ok(())
+}
+
+fn validate_root_backend(root: Option<&Path>, backend: BackendKind) -> Result<()> {
+    match (backend, root) {
+        (BackendKind::Host, None) => bail!(
+            "host backend requires ROOT; use --images, --devices, or --pool-config for a block-backed volume"
+        ),
+        (BackendKind::LoopBlock | BackendKind::RawBlock, Some(_)) => bail!(
+            "ROOT is only valid for the host backend and cannot be combined with a loop/raw selector"
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn reject_option(present: bool, option: &str, backend: BackendKind) -> Result<()> {
+    if present {
+        bail!("{option} is not valid for the {} backend", backend.as_str());
+    }
+    Ok(())
+}
+
+fn block_image_size(backend: BackendKind, requested: Option<u64>) -> Result<u64> {
+    match backend {
+        BackendKind::LoopBlock => Ok(requested.unwrap_or(DEFAULT_LOOP_IMAGE_SIZE)),
+        BackendKind::RawBlock => {
+            reject_option(requested.is_some(), "--image-size", backend)?;
+            Ok(0)
+        }
+        BackendKind::Host => bail!("device lifecycle commands require the loop or raw backend"),
+    }
+}
+
+fn parse_byte_size_u64(value: &str) -> std::result::Result<u64, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("size cannot be empty".to_string());
+    }
+    let split = value
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '_')
+        .unwrap_or(value.len());
+    let number = value[..split].replace('_', "");
+    if number.is_empty() {
+        return Err(format!("invalid size: {value}"));
+    }
+    let suffix = value[split..].trim().to_ascii_lowercase();
+    let multiplier = match suffix.as_str() {
+        "" | "b" => 1,
+        "k" | "kb" => 1_000,
+        "m" | "mb" => 1_000_000,
+        "g" | "gb" => 1_000_000_000,
+        "t" | "tb" => 1_000_000_000_000,
+        "ki" | "kib" => 1_u64 << 10,
+        "mi" | "mib" => 1_u64 << 20,
+        "gi" | "gib" => 1_u64 << 30,
+        "ti" | "tib" => 1_u64 << 40,
+        _ => {
+            return Err(format!(
+                "unknown size suffix {suffix:?}; use bytes, KiB, MiB, GiB, TiB, KB, MB, GB, or TB"
+            ))
+        }
+    };
+    number
+        .parse::<u64>()
+        .map_err(|err| format!("invalid size {value:?}: {err}"))?
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("size {value:?} is too large"))
+}
+
+fn parse_byte_size_usize(value: &str) -> std::result::Result<usize, String> {
+    let parsed = parse_byte_size_u64(value)?;
+    usize::try_from(parsed).map_err(|_| format!("size {value:?} does not fit this platform"))
+}
+
 fn parse_u32_auto(value: &str) -> std::result::Result<u32, String> {
     let trimmed = value.trim();
     if let Some(rest) = trimmed.strip_prefix("0o") {
@@ -964,5 +1225,100 @@ fn parse_u64_auto(value: &str) -> std::result::Result<u64, String> {
         u64::from_str_radix(trimmed, 8).map_err(|err| err.to_string())
     } else {
         trimmed.parse::<u64>().map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+    use tempfile::TempDir;
+
+    #[test]
+    fn byte_size_parser_accepts_binary_and_decimal_suffixes() {
+        assert_eq!(parse_byte_size_u64("64MiB").unwrap(), 64 * 1024 * 1024);
+        assert_eq!(parse_byte_size_u64("1_024KiB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_byte_size_u64("2GiB").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_size_u64("3GB").unwrap(), 3_000_000_000);
+        assert!(parse_byte_size_u64("1.5GiB").is_err());
+    }
+
+    #[test]
+    fn backend_selector_infers_raw_from_devices() {
+        let resolved = commands::BackendArgs {
+            devices: vec![PathBuf::from("/dev/test")],
+            ..Default::default()
+        }
+        .resolve(BackendKind::LoopBlock)
+        .unwrap();
+        assert_eq!(resolved.backend, BackendKind::RawBlock);
+        assert!(resolved.images.is_empty());
+    }
+
+    #[test]
+    fn explicit_backend_rejects_wrong_path_type() {
+        let error = commands::BackendArgs {
+            backend: Some(BackendKind::LoopBlock),
+            devices: vec![PathBuf::from("/dev/test")],
+            ..Default::default()
+        }
+        .resolve(BackendKind::LoopBlock)
+        .unwrap_err();
+        assert!(error.to_string().contains("loop backend requires --images"));
+    }
+
+    #[test]
+    fn pool_config_resolves_relative_paths_and_pool_name() {
+        let temp = TempDir::new().unwrap();
+        let config_dir = temp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("pool.json");
+        fs::write(
+            &config_path,
+            r#"{"backend":"loop","images":["disk0.img","disk1.img"],"pool":"rootpool"}"#,
+        )
+        .unwrap();
+
+        let resolved = commands::BackendArgs {
+            pool_config: Some(config_path),
+            ..Default::default()
+        }
+        .resolve(BackendKind::Host)
+        .unwrap();
+        assert_eq!(resolved.backend, BackendKind::LoopBlock);
+        assert_eq!(resolved.pool.as_deref(), Some("rootpool"));
+        assert_eq!(resolved.images[0], config_dir.join("disk0.img"));
+    }
+
+    #[test]
+    fn clap_rejects_images_and_devices_together() {
+        let error = match Cli::try_parse_from([
+            "argosfs",
+            "inspect-pool",
+            "--images",
+            "disk.img",
+            "--devices",
+            "/dev/test",
+        ]) {
+            Ok(_) => panic!("conflicting selectors were accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn version_flag_is_available() {
+        let error = match Cli::try_parse_from(["argosfs", "--version"]) {
+            Ok(_) => panic!("--version unexpectedly parsed as a normal command"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn json_flag_is_global() {
+        let cli = Cli::try_parse_from(["argosfs", "health", "/tmp/volume", "--json"]).unwrap();
+        assert!(cli.json);
     }
 }
