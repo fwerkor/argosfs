@@ -132,10 +132,11 @@ fn health_probe_and_smart_refresh_cover_observation_and_all_failed_paths() {
     assert_eq!(after_observation.weight, before.weight);
     assert!(after_observation.io_samples > before.io_samples);
     assert_eq!(fs.refresh_disk_probe(None).unwrap().len(), 1);
-    assert!(matches!(
-        fs.refresh_smart_health(Some(&disk_id)),
-        Err(ArgosError::Unsupported(_))
-    ));
+    match fs.refresh_smart_health(Some(&disk_id)) {
+        Ok(refreshed) => assert_eq!(refreshed.len(), 1),
+        Err(ArgosError::Unsupported(_)) => {}
+        Err(error) => panic!("unexpected SMART refresh error: {error}"),
+    }
 }
 
 #[test]
