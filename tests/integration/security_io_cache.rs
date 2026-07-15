@@ -130,6 +130,15 @@ fn posix_acl_parser_rejects_malformed_entries() {
     assert!(acl::parse_posix_acl("user::r-q").is_err());
     assert!(acl::parse_posix_acl("mask:7:rwx").is_err());
     assert!(acl::parse_posix_acl("other:99:---").is_err());
+    assert!(acl::parse_posix_acl("").is_err());
+    assert!(acl::parse_posix_acl("user::rw-,group::r--").is_err());
+    assert!(acl::parse_posix_acl("user::rw-,user::r--,group::r--,other::---").is_err());
+    assert!(acl::parse_posix_acl("user::rw-,user:42:r--,group::r--,other::---").is_err());
+    assert!(acl::parse_posix_acl(
+        "user::rw-,user:42:r--,user:42:---,group::r--,mask::r--,other::---"
+    )
+    .is_err());
+    assert!(acl::parse_posix_acl_xattr(&[]).is_err());
 
     let mut encoded = Vec::new();
     encoded.extend_from_slice(&0x0002u32.to_le_bytes());
@@ -137,6 +146,85 @@ fn posix_acl_parser_rejects_malformed_entries() {
     encoded.extend_from_slice(&0o7u16.to_le_bytes());
     encoded.extend_from_slice(&u32::MAX.to_le_bytes());
     assert!(acl::parse_posix_acl_xattr(&encoded).is_err());
+
+    assert!(acl::parse_posix_acl_xattr(&0x0002u32.to_le_bytes()).is_err());
+
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    fs.write_file("/file", b"acl", 0o644).unwrap();
+    assert!(fs
+        .set_posix_acl_path("/file", false, argosfs::types::PosixAcl::default())
+        .is_err());
+}
+
+#[test]
+fn nfs4_acl_uses_ordered_ace_evaluation() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let file = fs
+        .create_file_at_with_owner(1, OsStr::new("ordered-aces"), 0, 1000, 2000)
+        .unwrap();
+
+    fs.set_nfs4_acl_path(
+        "/ordered-aces",
+        acl::parse_nfs4_acl_json(
+            r#"{"entries":[
+                {"ace_type":"allow","principal":"EVERYONE@","flags":[],"permissions":["read"]},
+                {"ace_type":"deny","principal":"uid:3000","flags":[],"permissions":["read"]}
+            ]}"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    fs.check_access_inode(file.ino, 3000, 3000, libc::R_OK)
+        .unwrap();
+
+    fs.set_nfs4_acl_path(
+        "/ordered-aces",
+        acl::parse_nfs4_acl_json(
+            r#"{"entries":[
+                {"ace_type":"deny","principal":"uid:3000","flags":[],"permissions":["read"]},
+                {"ace_type":"allow","principal":"EVERYONE@","flags":[],"permissions":["read"]}
+            ]}"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs.check_access_inode(file.ino, 3000, 3000, libc::R_OK)
+            .unwrap_err()
+            .errno(),
+        libc::EACCES
+    );
+}
+
+#[test]
+fn nfs4_acl_matches_special_principals_and_skips_inherit_only_aces() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let file = fs
+        .create_file_at_with_owner(1, OsStr::new("special-principals"), 0, 1000, 2000)
+        .unwrap();
+    fs.set_nfs4_acl_path(
+        "/special-principals",
+        acl::parse_nfs4_acl_json(
+            r#"{"entries":[
+                {"ace_type":"allow","principal":"OWNER@","flags":[],"permissions":["read"]},
+                {"ace_type":"allow","principal":"GROUP@","flags":[],"permissions":["write"]},
+                {"ace_type":"deny","principal":"EVERYONE@","flags":["inherit-only"],"permissions":["execute"]},
+                {"ace_type":"allow","principal":"EVERYONE@","flags":[],"permissions":["execute"]}
+            ]}"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    fs.check_access_inode(file.ino, 1000, 1000, libc::R_OK)
+        .unwrap();
+    fs.check_access_inode_with_groups(file.ino, 3000, &[3000, 2000], libc::W_OK)
+        .unwrap();
+    fs.check_access_inode(file.ino, 4000, 4000, libc::X_OK)
+        .unwrap();
 }
 
 #[test]

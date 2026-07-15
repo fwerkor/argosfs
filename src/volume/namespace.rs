@@ -1344,6 +1344,7 @@ impl ArgosFs {
         default_acl: bool,
         acl_value: PosixAcl,
     ) -> Result<()> {
+        acl::validate_posix_acl(&acl_value)?;
         let ino = self.resolve_path(path, false)?;
         let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
