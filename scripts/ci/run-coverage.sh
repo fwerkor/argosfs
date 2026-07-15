@@ -74,6 +74,10 @@ else
   echo "WARNING: mounted FUSE coverage skipped because /dev/fuse is unavailable" >&2
 fi
 
+ARGOSFS_COVERAGE_PROFILE_DIR="$repo/target" \
+ARGOSFS_COVERAGE_QUARANTINE_DIR="$artifacts/corrupt-profiles" \
+  scripts/ci/prune-coverage-profiles.sh
+
 coverage_ignore='(^|/)(tests/|tests\.rs$|[^/]*_tests\.rs$|[^/]*-tests\.rs$)'
 cargo llvm-cov report \
   --ignore-filename-regex "$coverage_ignore" \
