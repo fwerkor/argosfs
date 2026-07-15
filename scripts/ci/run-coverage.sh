@@ -74,6 +74,11 @@ else
   echo "WARNING: mounted FUSE coverage skipped because /dev/fuse is unavailable" >&2
 fi
 
-cargo llvm-cov report --lcov --output-path "$artifacts/lcov.info"
-cargo llvm-cov report --summary-only \
+coverage_ignore='(^|/)(tests/|tests\.rs$|[^/]*_tests\.rs$|[^/]*-tests\.rs$)'
+cargo llvm-cov report \
+  --ignore-filename-regex "$coverage_ignore" \
+  --lcov --output-path "$artifacts/lcov.info"
+cargo llvm-cov report \
+  --ignore-filename-regex "$coverage_ignore" \
+  --summary-only \
   --fail-under-lines "$minimum_lines" | tee "$artifacts/summary.txt"
