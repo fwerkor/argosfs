@@ -115,6 +115,84 @@ fn posix_and_nfs4_acl_are_enforced_and_exposed_as_xattrs() {
 }
 
 #[test]
+fn empty_posix_acl_xattrs_remove_existing_acls() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    fs.write_file("/file", b"acl", 0o600).unwrap();
+    fs.mkdir("/dir", 0o700).unwrap();
+
+    let acl_value = acl::parse_posix_acl("user::rw-,group::r--,other::---").unwrap();
+    let encoded = acl::posix_acl_to_xattr(&acl_value);
+    let header_only = 0x0002u32.to_le_bytes();
+    let file = fs.resolve_path("/file", false).unwrap();
+    let dir = fs.resolve_path("/dir", false).unwrap();
+
+    for (name, empty_value) in [
+        (acl::POSIX_ACL_ACCESS_XATTR, Vec::new()),
+        (acl::ARGOS_POSIX_ACL_ACCESS_XATTR, header_only.to_vec()),
+    ] {
+        fs.setxattr_inode(file, name, &encoded).unwrap();
+        let mode_with_acl = fs.attr_path("/file", false).unwrap().mode;
+        fs.setxattr_inode(file, name, &empty_value).unwrap();
+
+        assert!(fs.metadata_snapshot().inodes[&file]
+            .posix_acl_access
+            .is_none());
+        assert_eq!(fs.attr_path("/file", false).unwrap().mode, mode_with_acl);
+        let names = fs.listxattr_inode(file).unwrap();
+        for xattr in [
+            acl::POSIX_ACL_ACCESS_XATTR,
+            acl::ARGOS_POSIX_ACL_ACCESS_XATTR,
+        ] {
+            assert!(!names.iter().any(|name| name == xattr));
+            assert_eq!(
+                fs.getxattr_inode(file, xattr).unwrap_err().errno(),
+                libc::ENOENT
+            );
+        }
+    }
+
+    fs.setxattr_inode(file, acl::POSIX_ACL_ACCESS_XATTR, &encoded)
+        .unwrap();
+    let mode_with_acl = fs.attr_path("/file", false).unwrap().mode;
+    assert_eq!(
+        fs.setxattr_inode(file, acl::POSIX_ACL_ACCESS_XATTR, &0x0003u32.to_le_bytes())
+            .unwrap_err()
+            .errno(),
+        libc::EINVAL
+    );
+    assert_eq!(
+        fs.getxattr_inode(file, acl::POSIX_ACL_ACCESS_XATTR)
+            .unwrap(),
+        encoded
+    );
+    assert_eq!(fs.attr_path("/file", false).unwrap().mode, mode_with_acl);
+
+    for (name, empty_value) in [
+        (acl::POSIX_ACL_DEFAULT_XATTR, header_only.to_vec()),
+        (acl::ARGOS_POSIX_ACL_DEFAULT_XATTR, Vec::new()),
+    ] {
+        fs.setxattr_inode(dir, name, &encoded).unwrap();
+        fs.setxattr_inode(dir, name, &empty_value).unwrap();
+
+        assert!(fs.metadata_snapshot().inodes[&dir]
+            .posix_acl_default
+            .is_none());
+        let names = fs.listxattr_inode(dir).unwrap();
+        for xattr in [
+            acl::POSIX_ACL_DEFAULT_XATTR,
+            acl::ARGOS_POSIX_ACL_DEFAULT_XATTR,
+        ] {
+            assert!(!names.iter().any(|name| name == xattr));
+            assert_eq!(
+                fs.getxattr_inode(dir, xattr).unwrap_err().errno(),
+                libc::ENOENT
+            );
+        }
+    }
+}
+
+#[test]
 fn xattr_namespaces_are_explicitly_enforced() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
