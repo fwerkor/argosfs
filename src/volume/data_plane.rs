@@ -1451,17 +1451,4 @@ impl ArgosFs {
             .map(|candidate| candidate.used_bytes)
             .sum()
     }
-
-    pub(super) fn referenced_shards(&self) -> BTreeSet<(String, PathBuf)> {
-        let meta = self.meta.read();
-        let mut refs = BTreeSet::new();
-        for inode in meta.inodes.values() {
-            for block in &inode.blocks {
-                for shard in &block.shards {
-                    refs.insert((shard.disk_id.clone(), shard.relpath.clone()));
-                }
-            }
-        }
-        refs
-    }
 }
