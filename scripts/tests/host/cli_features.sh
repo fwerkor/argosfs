@@ -97,8 +97,9 @@ stdin_volume="$artifacts/stdin-volume"
 "$argosfs" mkfs "$stdin_volume" --force --disks 1 --k 1 --m 0 --compression none >"$artifacts/logs/stdin-mkfs.json"
 printf 'stdin-feature-key\n' | "$argosfs" enable-encryption "$stdin_volume" --passphrase-stdin >"$artifacts/logs/stdin-encryption.json"
 "$argosfs" encryption-status "$stdin_volume" >"$artifacts/logs/stdin-encryption-status.json"
-if "$argosfs" refresh-smart "$volume" "$extra_id" >"$artifacts/logs/refresh-smart.json" 2>"$artifacts/logs/refresh-smart.err"; then
-  echo "refresh-smart unexpectedly succeeded for removed test disk" >&2
+"$argosfs" refresh-smart "$volume" "$extra_id" >"$artifacts/logs/refresh-smart.json" 2>"$artifacts/logs/refresh-smart.err" || true
+if "$argosfs" refresh-smart "$volume" missing-disk >"$artifacts/logs/refresh-smart-missing.json" 2>"$artifacts/logs/refresh-smart-missing.err"; then
+  echo "refresh-smart unexpectedly succeeded for an unknown disk" >&2
   exit 1
 fi
 
