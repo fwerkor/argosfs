@@ -799,6 +799,42 @@ fn raw_batched_metadata_commit_persists_after_sync() {
 }
 
 #[test]
+fn raw_group_commit_reuses_open_device_after_path_disappears() {
+    let tmp = TempDir::new().unwrap();
+    let original = tmp.path().join("root.img");
+    let moved = tmp.path().join("root-after-switch-root.img");
+    let images = vec![original.clone()];
+    let mut cfg = config(1, 0);
+    cfg.defer_journal_flush = true;
+    cfg.defer_metadata_commit = true;
+    cfg.defer_data_flush = true;
+    cfg.deferred_commit_interval_ms = 60_000;
+    cfg.deferred_commit_max_transactions = 1_000;
+    cfg.compression = Compression::None;
+    let fs =
+        ArgosFs::create_loop(&images, cfg, 32 * 1024 * 1024, "switch-root-handles", false).unwrap();
+    fs.write_file("/before", &vec![b'b'; 2048], 0o644).unwrap();
+    fs.sync().unwrap();
+
+    std::fs::rename(&original, &moved).unwrap();
+    fs.write_file("/after", &vec![b'a'; 2048], 0o644).unwrap();
+    assert!(fs.sync_deferred_if_dirty().unwrap());
+    assert!(fs.transaction_report().unwrap().errors.is_empty());
+    drop(fs);
+
+    let reopened = ArgosFs::open_loop(&[moved], false).unwrap();
+    assert_eq!(
+        reopened.read_file("/before", true).unwrap(),
+        vec![b'b'; 2048]
+    );
+    assert_eq!(
+        reopened.read_file("/after", true).unwrap(),
+        vec![b'a'; 2048]
+    );
+    assert!(reopened.transaction_report().unwrap().errors.is_empty());
+}
+
+#[test]
 fn raw_group_commit_batches_transactions_into_one_durable_record() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
