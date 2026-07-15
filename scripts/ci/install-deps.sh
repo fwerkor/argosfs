@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+prefer_https_ubuntu_ports() {
+	local source
+	for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+		[[ -f "$source" ]] || continue
+		sudo sed -i \
+			's|http://ports.ubuntu.com/ubuntu-ports|https://ports.ubuntu.com/ubuntu-ports|g' \
+			"$source"
+	done
+}
+
 apt_get() {
 	local attempt
 	local max_attempts=4
 	for ((attempt = 1; attempt <= max_attempts; attempt++)); do
 		if sudo apt-get \
 			-o Acquire::ForceIPv4=true \
-			-o Acquire::Retries=5 \
-			-o Acquire::http::Timeout=30 \
-			-o Acquire::https::Timeout=30 \
+			-o Acquire::Retries=3 \
+			-o Acquire::http::Timeout=15 \
+			-o Acquire::https::Timeout=15 \
 			-o DPkg::Lock::Timeout=120 \
 			"$@"; then
 			return 0
@@ -22,6 +32,7 @@ apt_get() {
 	done
 }
 
+prefer_https_ubuntu_ports
 apt_get update
 apt_get install -y --no-install-recommends \
 	acl \
