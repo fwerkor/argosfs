@@ -38,7 +38,7 @@ ARGOSFS_CAPOS_MAKE_JOBS="$make_jobs" \
 ARGOSFS_CAPOS_MAKE_TARGET="$make_target" \
 ARGOSFS_CAPOS_MAKE_V="${ARGOSFS_CAPOS_MAKE_V:-}" \
 CAPOS_REPO="${CAPOS_REPO:-https://github.com/fwerkor/capos.git}" \
-CAPOS_REF="${CAPOS_REF:-168f01fc44f627ab07f23dd9590453f0ba5fe7fc}" \
+CAPOS_REF="${CAPOS_REF:-3903b2968a692fdc77e05f63eb3a1cfa9a739999}" \
 CAPOS_LOCAL_SOURCE="${CAPOS_LOCAL_SOURCE:-}" \
 "$repo/scripts/qemu/capos_build.sh"
 

@@ -17,7 +17,6 @@ reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: 
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-600}"
 login_delay_s="${ARGOSFS_QEMU_REBOOT_LOGIN_DELAY:-420}"
 reboot_delay_s="${ARGOSFS_QEMU_REBOOT_DELAY:-600}"
-command_delay_s="${ARGOSFS_QEMU_REBOOT_COMMAND_DELAY:-1}"
 done_marker="ARGOSFS_QEMU_REBOOT_DONE"
 
 cat >"$commands1" <<'CMDS'
@@ -51,12 +50,8 @@ argosfs_qemu_build_args
 
 send_command_file() {
 	local file="$1"
-	printf '\r' >&3
-	sleep "$command_delay_s"
-	while IFS= read -r line; do
-		printf '%s\r' "$line" >&3
-		sleep "$command_delay_s"
-	done <"$file"
+	local remote="$2"
+	argosfs_qemu_stream_script "$file" 3 "$remote" "$log"
 }
 
 wait_for_log_count() {
@@ -94,14 +89,14 @@ exec 3>"$stdin_fifo"
 wait_status=0
 wait_for_log_count 'Please press Enter to activate this console\.' 1 "$login_delay_s" 'first login prompt' || wait_status=$?
 if [ "$wait_status" -eq 0 ]; then
-	send_command_file "$commands1"
+	send_command_file "$commands1" /tmp/argosfs-qemu-reboot-phase1.sh
 	wait_for_log_count 'ARGOSFS_REBOOT_REQUESTED' 1 60 'phase1 reboot request' || wait_status=$?
 fi
 if [ "$wait_status" -eq 0 ]; then
 	wait_for_log_count 'Please press Enter to activate this console\.' 2 "$reboot_delay_s" 'second login prompt' || wait_status=$?
 fi
 if [ "$wait_status" -eq 0 ]; then
-	send_command_file "$commands2"
+	send_command_file "$commands2" /tmp/argosfs-qemu-reboot-phase2.sh
 	wait_for_log_count "$done_marker" 1 120 'reboot persistence completion' || wait_status=$?
 fi
 exec 3>&-

@@ -17,7 +17,6 @@ commands2="$artifacts/qemu-mixed-chaos-phase2.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-3000}"
 console_timeout_s="${ARGOSFS_QEMU_CHAOS_CONSOLE_TIMEOUT:-600}"
-command_delay_s="${ARGOSFS_QEMU_CHAOS_COMMAND_DELAY:-1}"
 worker_count="${ARGOSFS_QEMU_CHAOS_WORKERS:-6}"
 file_count="${ARGOSFS_QEMU_CHAOS_FILES:-160}"
 if [ "$file_count" -lt 150 ]; then
@@ -203,18 +202,11 @@ run_phase1_until_kill_marker() {
   # shellcheck disable=SC2094
   (
     argosfs_qemu_wait_console_prompt "$log1" 1 "$console_timeout_s" "$reject" "mixed-chaos phase1 console prompt" || exit $?
-    printf '\r'
-    sleep "$command_delay_s"
-    while IFS= read -r line; do
-      printf '%s\r' "$line"
-      sleep "$command_delay_s"
-      if [ "$line" = "echo ARGOSFS_WAIT_CHAOS_HOTPLUG" ]; then
-        argosfs_qemu_wait_log_marker "$log1" ARGOSFS_WAIT_CHAOS_HOTPLUG 180
-        for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
-        idx=0
-        for disk in "${disks[@]}"; do qemu_device_add chaos "$idx" "$disk"; idx=$((idx + 1)); done
-      fi
-    done <"$commands1"
+    argosfs_qemu_stream_script "$commands1" 1 /tmp/argosfs-qemu-mixed-phase1.sh "$log1"
+    argosfs_qemu_wait_log_marker "$log1" ARGOSFS_WAIT_CHAOS_HOTPLUG 180
+    for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
+    idx=0
+    for disk in "${disks[@]}"; do qemu_device_add chaos "$idx" "$disk"; idx=$((idx + 1)); done
   ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log1" 2>&1 &
   qemu_pid=$!
   deadline=$((SECONDS + timeout_s))
@@ -248,21 +240,14 @@ run_phase2() {
   # shellcheck disable=SC2094
   (
     argosfs_qemu_wait_console_prompt "$log2" 1 "$console_timeout_s" "$reject" "mixed-chaos phase2 console prompt" || exit $?
-    printf '\r'
-    sleep "$command_delay_s"
-    while IFS= read -r line; do
-      printf '%s\r' "$line"
-      sleep "$command_delay_s"
-      if [ "$line" = "echo ARGOSFS_WAIT_CHAOS_REATTACH" ]; then
-        argosfs_qemu_wait_log_marker "$log2" ARGOSFS_WAIT_CHAOS_REATTACH 180
-        for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
-        qemu_device_add recover 0 "${disks[0]}"
-        qemu_device_add recover 1 "${disks[2]}"
-        qemu_device_add recover 2 "${disks[3]}"
-        qemu_device_add recover 3 "${disks[4]}"
-        qemu_device_add recover 4 "${disks[5]}"
-      fi
-    done <"$commands2"
+    argosfs_qemu_stream_script "$commands2" 1 /tmp/argosfs-qemu-mixed-phase2.sh "$log2"
+    argosfs_qemu_wait_log_marker "$log2" ARGOSFS_WAIT_CHAOS_REATTACH 180
+    for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
+    qemu_device_add recover 0 "${disks[0]}"
+    qemu_device_add recover 1 "${disks[2]}"
+    qemu_device_add recover 2 "${disks[3]}"
+    qemu_device_add recover 3 "${disks[4]}"
+    qemu_device_add recover 4 "${disks[5]}"
   ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log2" 2>&1
   status=${PIPESTATUS[1]}
   set -e

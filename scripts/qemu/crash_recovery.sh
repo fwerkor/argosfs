@@ -17,7 +17,6 @@ commands2="$artifacts/qemu-crash-recovery-phase2.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-1800}"
 console_timeout_s="${ARGOSFS_QEMU_CRASH_CONSOLE_TIMEOUT:-600}"
-command_delay_s="${ARGOSFS_QEMU_CRASH_COMMAND_DELAY:-1}"
 done_marker="ARGOSFS_QEMU_CRASH_RECOVERY_DONE"
 
 disks=()
@@ -111,18 +110,11 @@ run_phase1_until_kill_marker() {
   # shellcheck disable=SC2094
   (
     argosfs_qemu_wait_console_prompt "$log1" 1 "$console_timeout_s" "$reject" "crash-recovery phase1 console prompt" || exit $?
-    printf '\r'
-    sleep "$command_delay_s"
-    while IFS= read -r line; do
-      printf '%s\r' "$line" || exit 0
-      sleep "$command_delay_s"
-      if [ "$line" = "echo ARGOSFS_WAIT_CRASH_HOTPLUG" ]; then
-        argosfs_qemu_wait_log_marker "$log1" ARGOSFS_WAIT_CRASH_HOTPLUG 180
-        for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
-        idx=0
-        for disk in "${disks[@]}"; do qemu_device_add "$idx" "$disk"; idx=$((idx + 1)); done
-      fi
-    done <"$commands1"
+    argosfs_qemu_stream_script "$commands1" 1 /tmp/argosfs-qemu-crash-phase1.sh "$log1"
+    argosfs_qemu_wait_log_marker "$log1" ARGOSFS_WAIT_CRASH_HOTPLUG 180
+    for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
+    idx=0
+    for disk in "${disks[@]}"; do qemu_device_add "$idx" "$disk"; idx=$((idx + 1)); done
   ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log1" 2>&1 &
   qemu_pid=$!
   deadline=$((SECONDS + timeout_s))
@@ -149,12 +141,7 @@ run_phase2() {
   # shellcheck disable=SC2094
   (
     argosfs_qemu_wait_console_prompt "$log2" 1 "$console_timeout_s" "$reject" "crash-recovery phase2 console prompt" || exit $?
-    printf '\r'
-    sleep "$command_delay_s"
-    while IFS= read -r line; do
-      printf '%s\r' "$line" || exit 0
-      sleep "$command_delay_s"
-    done <"$commands2"
+    argosfs_qemu_stream_script "$commands2" 1 /tmp/argosfs-qemu-crash-phase2.sh "$log2"
   ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log2" 2>&1
   status=${PIPESTATUS[1]}
   set -e
