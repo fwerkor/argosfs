@@ -214,6 +214,56 @@ def check_rename(root):
     log("passed", "rename-overwrite")
 
 
+def check_readdirplus_permission(root, identity=None, check_metadata=True):
+    if os.geteuid() != 0:
+        if require_cross_user():
+            raise AssertionError("mandatory readdirplus permission check must run as root")
+        log("skipped", "readdirplus-search-permission", "requires root to switch uid and gid")
+        return
+    if not require_cross_user():
+        log("skipped", "readdirplus-search-permission", "requires an allow_other test mount")
+        return
+    identity = identity or nobody_identity()
+    if identity is None:
+        log("skipped", "readdirplus-search-permission", "nobody user unavailable")
+        return
+    nobody_uid, nobody_gid = identity
+
+    readable = path(root, b"readable-no-search")
+    os.mkdir(readable, 0o700)
+    readable_child = path(readable, b"visible-name")
+    with open(readable_child, "wb") as f:
+        f.write(b"name")
+    os.chown(readable, nobody_uid, nobody_gid)
+    os.chmod(readable, 0o400)
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        lambda: require(os.listdir(readable) == [b"visible-name"], "directory listing mismatch"),
+        "readable directory listing without search permission",
+    )
+    if not check_metadata:
+        return
+
+    time.sleep(5.1)
+
+    def expect_scandir_metadata_denied():
+        try:
+            entries = list(os.scandir(readable))
+        except PermissionError:
+            return
+        require(len(entries) == 1, "scandir entry count mismatch")
+        expect_permission_denied(lambda: entries[0].stat(follow_symlinks=False))
+
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        expect_scandir_metadata_denied,
+        "directory metadata denial without search permission",
+    )
+    log("passed", "readdirplus-search-permission")
+
+
 def check_permission_enforcement(root):
     if os.geteuid() != 0:
         if require_cross_user():
@@ -322,19 +372,7 @@ def check_permission_enforcement(root):
     )
     require(open(inherited_file, "rb").read() == b"setgid-group", "group writeback was not persisted")
 
-    readable = path(root, b"readable-no-search")
-    os.mkdir(readable, 0o700)
-    readable_child = path(readable, b"visible-name")
-    with open(readable_child, "wb") as f:
-        f.write(b"name")
-    os.chown(readable, nobody_uid, nobody_gid)
-    os.chmod(readable, 0o400)
-    require_identity_action(
-        nobody_uid,
-        nobody_gid,
-        lambda: require(os.listdir(readable) == [b"visible-name"], "directory listing mismatch"),
-        "readable directory listing without search permission",
-    )
+    check_readdirplus_permission(root, identity, check_metadata=False)
 
     owned = path(root, b"owned-by-nobody.txt")
     with open(owned, "wb") as f:
@@ -456,6 +494,14 @@ def main():
         check_sticky,
         check_concurrency,
     ]
+    requested_check = os.environ.get("ARGOSFS_COMPAT_CHECK")
+    if requested_check:
+        available_checks = {
+            "readdirplus-permissions": check_readdirplus_permission,
+        }
+        if requested_check not in available_checks:
+            raise SystemExit(f"unknown ARGOSFS_COMPAT_CHECK: {requested_check}")
+        checks = [available_checks[requested_check]]
     for check in checks:
         check(root)
     log("passed", "all")

@@ -14,9 +14,15 @@ else
   sudo sh -c 'grep -qxF user_allow_other /etc/fuse.conf 2>/dev/null || printf "%s\n" user_allow_other >>/etc/fuse.conf'
 fi
 
-export ARGOSFS_COMPAT_SUITE="mounted-fuse-permissions"
-export ARGOSFS_COMPAT_MOUNT_OPTIONS="allow_other,default_permissions"
 export ARGOSFS_COMPAT_RUN_AS_ROOT=1
 export ARGOSFS_REQUIRE_CROSS_USER=1
 
+export ARGOSFS_COMPAT_SUITE="mounted-fuse-internal-permissions"
+export ARGOSFS_COMPAT_MOUNT_OPTIONS="allow_other"
+export ARGOSFS_COMPAT_CHECK="readdirplus-permissions"
+"$repo/scripts/compat/run_mounted_fuse_compat.sh"
+unset ARGOSFS_COMPAT_CHECK
+
+export ARGOSFS_COMPAT_SUITE="mounted-fuse-kernel-permissions"
+export ARGOSFS_COMPAT_MOUNT_OPTIONS="allow_other,default_permissions"
 "$repo/scripts/compat/run_mounted_fuse_compat.sh"

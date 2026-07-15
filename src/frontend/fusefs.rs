@@ -1341,7 +1341,7 @@ impl Filesystem for ArgosFuse {
             return;
         }
         match self
-            .require_access(req, ino, libc::R_OK)
+            .require_access(req, ino, libc::R_OK | libc::X_OK)
             .and_then(|()| self.volume.readdir(ino.0))
         {
             Ok(entries) => {
