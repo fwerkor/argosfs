@@ -19,6 +19,12 @@ fi
 # environment as the Rust test binaries. The clean must happen after show-env,
 # otherwise Cargo can reuse uninstrumented artifacts from the ordinary target.
 eval "$(cargo llvm-cov show-env --sh)"
+# cargo-llvm-cov defaults to an eight-file profile pool (`%8m`). This workflow
+# launches the same test binaries repeatedly through the host scenario scripts;
+# a bounded pool lets later filtered runs overwrite the initial full-test
+# profiles. Use one profile per process/module so the final report is a union of
+# every Cargo, CLI, and FUSE execution.
+export LLVM_PROFILE_FILE="$repo/target/argosfs-%p-%m.profraw"
 cargo llvm-cov clean --workspace
 
 cargo test --all-targets --all-features -- --test-threads=1
@@ -45,8 +51,10 @@ ARGOSFS_TEST_ARTIFACTS="$artifacts/randomized-model" \
 if [ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]; then
   ARGOSFS_COMPAT_WORKDIR="$artifacts/mounted-fuse" \
     scripts/tests/host/privileged_fuse.sh
+  permission_work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/argosfs-coverage-permission-$$"
+  rm -rf "$permission_work"
   ARGOSFS_PERMISSION_COMPAT_MODE=kernel \
-  ARGOSFS_COMPAT_WORKDIR="$artifacts/permission-compat" \
+  ARGOSFS_COMPAT_WORKDIR="$permission_work" \
     scripts/tests/host/permission_compat.sh
   if [ -n "${PJDFSTEST_ROOT:-}" ] && [ -d "$PJDFSTEST_ROOT/tests" ]; then
     ARGOSFS_COMPAT_WORKDIR="$artifacts/pjdfstest-work" \
