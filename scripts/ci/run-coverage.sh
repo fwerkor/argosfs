@@ -51,7 +51,11 @@ ARGOSFS_TEST_ARTIFACTS="$artifacts/randomized-model" \
 if [ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]; then
   ARGOSFS_COMPAT_WORKDIR="$artifacts/mounted-fuse" \
     scripts/tests/host/privileged_fuse.sh
-  permission_work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/argosfs-coverage-permission-$$"
+  # GitHub's RUNNER_TEMP parent is not traversable by the nobody user. The
+  # cross-user permission suite must live directly below a world-traversable
+  # temporary directory, otherwise kernel default_permissions rejects every
+  # access before it reaches the mounted filesystem.
+  permission_work="${TMPDIR:-/tmp}/argosfs-coverage-permission-$$"
   rm -rf "$permission_work"
   ARGOSFS_PERMISSION_COMPAT_MODE=kernel \
   ARGOSFS_COMPAT_WORKDIR="$permission_work" \
