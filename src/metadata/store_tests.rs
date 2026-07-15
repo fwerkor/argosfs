@@ -286,3 +286,262 @@ fn sample_metadata() -> Metadata {
         inodes,
     }
 }
+
+#[test]
+fn paged_options_and_page_keys_validate_all_boundaries() {
+    assert_eq!(
+        PagedMetadataOptions::default().directory_entries_per_page,
+        128
+    );
+    for options in [
+        PagedMetadataOptions {
+            directory_entries_per_page: 0,
+            ..PagedMetadataOptions::default()
+        },
+        PagedMetadataOptions {
+            xattrs_per_page: 0,
+            ..PagedMetadataOptions::default()
+        },
+        PagedMetadataOptions {
+            file_blocks_per_page: 0,
+            ..PagedMetadataOptions::default()
+        },
+    ] {
+        assert!(matches!(options.validate(), Err(ArgosError::Invalid(_))));
+    }
+    PagedMetadataOptions::default().validate().unwrap();
+
+    assert_eq!(MetadataPageKey::header().kind, MetadataPageKind::Header);
+    assert_eq!(MetadataPageKey::disk("disk").owner, "disk");
+    assert_eq!(MetadataPageKey::inode(42).owner, "42");
+    assert_eq!(MetadataPageKey::directory(42, 3).page, 3);
+    assert_eq!(MetadataPageKey::xattr(42, 4).page, 4);
+    assert_eq!(MetadataPageKey::shard_index(42, 5).page, 5);
+    assert_eq!(chunked_pairs::<u8>(Vec::new(), 2), Vec::<Vec<u8>>::new());
+    assert_eq!(chunked_pairs(vec![1, 2, 3], 2), vec![vec![1, 2], vec![3]]);
+}
+
+#[test]
+fn metadata_pages_reject_key_body_and_hash_mismatches() {
+    let metadata = sample_metadata();
+    let header = MetadataPageBody::Header(MetadataHeaderPage::from(&metadata));
+    assert!(MetadataPage::new(MetadataPageKey::inode(1), metadata.txid, header.clone()).is_err());
+
+    let mut page = MetadataPage::new(MetadataPageKey::header(), metadata.txid, header).unwrap();
+    page.body_hash = "bad".to_string();
+    assert!(matches!(
+        page.verify_hash(),
+        Err(ArgosError::CorruptedMetadata(_))
+    ));
+
+    let disk = metadata.disks.values().next().unwrap().clone();
+    let inode = metadata.inodes.values().next().unwrap().clone();
+    let bodies = [
+        (
+            MetadataPageKey::header(),
+            MetadataPageBody::Disk(disk.clone()),
+        ),
+        (
+            MetadataPageKey::header(),
+            MetadataPageBody::Inode(InodeCorePage::from(&inode)),
+        ),
+        (
+            MetadataPageKey::directory(inode.id + 1, 0),
+            MetadataPageBody::Directory(DirectoryPage {
+                inode: inode.id,
+                first_name: None,
+                entries: Vec::new(),
+            }),
+        ),
+        (
+            MetadataPageKey::xattr(inode.id + 1, 0),
+            MetadataPageBody::Xattr(XattrPage {
+                inode: inode.id,
+                first_name: None,
+                xattrs: Vec::new(),
+            }),
+        ),
+        (
+            MetadataPageKey::shard_index(inode.id + 1, 0),
+            MetadataPageBody::ShardIndex(ShardIndexPage {
+                inode: inode.id,
+                first_block: 0,
+                blocks: Vec::new(),
+            }),
+        ),
+    ];
+    for (key, body) in bodies {
+        assert!(validate_page_key(&key, &body).is_err());
+    }
+}
+
+#[test]
+fn paged_metadata_rejects_version_header_hash_and_reference_corruption() {
+    let metadata = sample_metadata();
+    let original = PagedMetadata::from_metadata(&metadata).unwrap();
+
+    let mut bad_version = original.clone();
+    bad_version.version += 1;
+    assert!(matches!(
+        bad_version.to_metadata(),
+        Err(ArgosError::Invalid(_))
+    ));
+
+    let mut bad_options = original.clone();
+    bad_options.options.file_blocks_per_page = 0;
+    assert!(matches!(
+        bad_options.to_metadata(),
+        Err(ArgosError::Invalid(_))
+    ));
+
+    let mut missing_header = original.clone();
+    missing_header.pages.remove(&MetadataPageKey::header());
+    assert!(matches!(
+        missing_header.to_metadata(),
+        Err(ArgosError::CorruptedMetadata(_))
+    ));
+
+    let mut wrong_header_body = original.clone();
+    let disk = metadata.disks.values().next().unwrap().clone();
+    let header = wrong_header_body
+        .pages
+        .get_mut(&MetadataPageKey::header())
+        .unwrap();
+    header.body = MetadataPageBody::Disk(disk);
+    header.body_hash = hash_page_body(&header.body).unwrap();
+    assert!(matches!(
+        wrong_header_body.to_metadata(),
+        Err(ArgosError::CorruptedMetadata(_))
+    ));
+
+    let mut bad_hash = original.clone();
+    bad_hash
+        .pages
+        .get_mut(&MetadataPageKey::header())
+        .unwrap()
+        .body_hash = "bad".to_string();
+    assert!(matches!(
+        bad_hash.to_metadata(),
+        Err(ArgosError::CorruptedMetadata(_))
+    ));
+
+    let mut missing_directory_owner = original.clone();
+    missing_directory_owner
+        .pages
+        .remove(&MetadataPageKey::inode(1));
+    assert!(matches!(
+        missing_directory_owner.to_metadata(),
+        Err(ArgosError::CorruptedMetadata(message)) if message.contains("directory page")
+    ));
+
+    let mut missing_xattr_owner = original.clone();
+    missing_xattr_owner.pages.remove(&MetadataPageKey::inode(2));
+    missing_xattr_owner
+        .pages
+        .retain(|key, _| key.kind != MetadataPageKind::ShardIndex);
+    assert!(matches!(
+        missing_xattr_owner.to_metadata(),
+        Err(ArgosError::CorruptedMetadata(message)) if message.contains("xattr page")
+    ));
+
+    let mut missing_shard_owner = original;
+    missing_shard_owner.pages.remove(&MetadataPageKey::inode(2));
+    missing_shard_owner
+        .pages
+        .retain(|key, _| key.kind != MetadataPageKind::Xattr);
+    assert!(matches!(
+        missing_shard_owner.to_metadata(),
+        Err(ArgosError::CorruptedMetadata(message)) if message.contains("shard index page")
+    ));
+}
+
+#[test]
+fn page_put_apply_delta_and_store_trait_cover_insert_replace_delete_and_import() {
+    let before = sample_metadata();
+    let mut store = PagedMetadata::from_metadata(&before).unwrap();
+    let header_key = MetadataPageKey::header();
+    let mut replacement = store.pages[&header_key].clone();
+    if let MetadataPageBody::Header(header) = &mut replacement.body {
+        header.config.fsname = "replaced".to_string();
+    }
+    replacement.body_hash = hash_page_body(&replacement.body).unwrap();
+    store.put_page(replacement.clone()).unwrap();
+    assert_eq!(store.pages[&header_key].body_hash, replacement.body_hash);
+
+    let mut invalid = replacement.clone();
+    invalid.body_hash = "invalid".to_string();
+    assert!(store.put_page(invalid).is_err());
+
+    let disk_key = store
+        .pages
+        .keys()
+        .find(|key| key.kind == MetadataPageKind::Disk)
+        .unwrap()
+        .clone();
+    store
+        .apply_delta(&[
+            MetadataPageDeltaOp::Delete {
+                key: disk_key.clone(),
+            },
+            MetadataPageDeltaOp::Put {
+                page: Box::new(replacement),
+            },
+        ])
+        .unwrap();
+    assert!(!store.pages.contains_key(&disk_key));
+
+    let mut imported = PagedMetadata {
+        version: PAGED_METADATA_VERSION,
+        options: PagedMetadataOptions::default(),
+        pages: BTreeMap::new(),
+    };
+    imported.import_metadata(&before).unwrap();
+    let exported = imported.export_metadata().unwrap();
+    assert_eq!(
+        serde_json::to_value(exported).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+}
+
+#[test]
+fn page_delta_reports_unchanged_deleted_added_and_changed_pages() {
+    let metadata = sample_metadata();
+    let before = PagedMetadata::from_metadata(&metadata).unwrap();
+    assert!(metadata_page_delta(&before, &before).is_empty());
+
+    let mut next = before.clone();
+    let removed_key = next
+        .pages
+        .keys()
+        .find(|key| key.kind == MetadataPageKind::Disk)
+        .unwrap()
+        .clone();
+    next.pages.remove(&removed_key);
+    let mut changed = next.pages[&MetadataPageKey::header()].clone();
+    if let MetadataPageBody::Header(header) = &mut changed.body {
+        header.updated_at += 1.0;
+    }
+    changed.body_hash = hash_page_body(&changed.body).unwrap();
+    next.pages.insert(changed.key.clone(), changed);
+    let added = MetadataPage::new(
+        MetadataPageKey::disk("extra"),
+        metadata.txid,
+        MetadataPageBody::Disk(Disk {
+            id: "extra".to_string(),
+            ..metadata.disks.values().next().unwrap().clone()
+        }),
+    )
+    .unwrap();
+    next.pages.insert(added.key.clone(), added);
+
+    let delta = metadata_page_delta(&before, &next);
+    assert!(delta
+        .iter()
+        .any(|op| matches!(op, MetadataPageDeltaOp::Delete { key } if key == &removed_key)));
+    assert!(delta.iter().any(|op| {
+        matches!(op, MetadataPageDeltaOp::Put { page } if page.key == MetadataPageKey::header())
+    }));
+    assert!(delta.iter().any(|op| {
+        matches!(op, MetadataPageDeltaOp::Put { page } if page.key == MetadataPageKey::disk("extra"))
+    }));
+}
