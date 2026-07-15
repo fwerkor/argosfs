@@ -98,6 +98,10 @@ pub fn parse_posix_acl_xattr(value: &[u8]) -> Result<PosixAcl> {
     parse_posix_acl(text)
 }
 
+pub(crate) fn is_empty_posix_acl_xattr(value: &[u8]) -> bool {
+    value.is_empty() || value == POSIX_ACL_XATTR_VERSION.to_le_bytes()
+}
+
 pub fn posix_acl_to_xattr(acl: &PosixAcl) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + acl.entries.len() * 8);
     out.extend_from_slice(&POSIX_ACL_XATTR_VERSION.to_le_bytes());
