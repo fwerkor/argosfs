@@ -1,0 +1,66 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-coverage:
+    name: Rust line coverage (>= 90%)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout ArgosFS
+        uses: actions/checkout@v7
+
+      - name: Checkout pjdfstest
+        uses: actions/checkout@v7
+        with:
+          repository: pjd/pjdfstest
+          ref: ededbeb2b44929972898afb87474b0937f78a877
+          path: external/pjdfstest
+
+      - name: Install system dependencies
+        run: scripts/ci/install-deps.sh
+
+      - name: Install Rust toolchain
+        run: scripts/ci/install-rust.sh stable
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-coverage
+
+      - name: Prepare FUSE
+        run: |
+          sudo modprobe fuse || true
+          test -c /dev/fuse
+          sudo chmod 0666 /dev/fuse
+          sudo sh -c 'grep -qxF user_allow_other /etc/fuse.conf 2>/dev/null || printf "%s\n" user_allow_other >>/etc/fuse.conf'
+
+      - name: Enforce line coverage
+        env:
+          ARGOSFS_COVERAGE_REQUIRE_FUSE: "1"
+          ARGOSFS_COVERAGE_MIN_LINES: "90"
+          PJDFSTEST_ROOT: ${{ github.workspace }}/external/pjdfstest
+        run: scripts/ci/run-coverage.sh
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: argosfs-coverage
+          path: target/coverage
+          if-no-files-found: warn
