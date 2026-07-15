@@ -6,7 +6,7 @@ use crate::raw_format::{
     DEVICE_LABEL_SIZE, PRIMARY_SUPERBLOCK_OFFSET, PROTECTIVE_HEADER_OFFSET, SUPERBLOCK_SIZE,
 };
 use crate::types::{
-    BackendKind, FaultPoint, Metadata, MetadataCandidateReport, RawJournalMemberReport,
+    BackendKind, DiskStatus, FaultPoint, Metadata, MetadataCandidateReport, RawJournalMemberReport,
     TransactionReport,
 };
 use crate::util::{now_f64, sha256_hex};
@@ -217,8 +217,10 @@ pub fn open_pool(kind: BackendKind, paths: &[PathBuf], write: bool) -> Result<Ra
     for (disk_id, disk) in &mut metadata.disks {
         if let Some(path) = present_paths.get(disk_id) {
             disk.path = path.clone();
-        } else if !present.contains(disk_id) {
-            disk.status = crate::types::DiskStatus::Offline;
+        } else if !present.contains(disk_id)
+            && !matches!(disk.status, DiskStatus::Removed | DiskStatus::Failed)
+        {
+            disk.status = DiskStatus::Offline;
         }
     }
     if !scan_errors.is_empty() {
@@ -512,23 +514,34 @@ fn append_journal(
     entry.extend_from_slice(&record_hash_bytes);
     entry.extend_from_slice(&record_bytes);
 
+    let mut append_positions = Vec::with_capacity(superblocks.len());
+    let mut rollover = false;
+    for sb in superblocks {
+        let mut header = vec![0u8; RAW_HEADER_SIZE];
+        backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
+        if &header[..16] != JOURNAL_MAGIC {
+            initialize_journal_region(backend, &sb.disk_id, sb)?;
+            backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
+        }
+        let write_offset = get_u64(&header, 24)?;
+        let end = write_offset.checked_add(entry.len() as u64);
+        if write_offset < RAW_HEADER_SIZE as u64 || end.is_none_or(|end| end > sb.journal.length) {
+            rollover = true;
+        }
+        append_positions.push((header, write_offset, end.unwrap_or_default()));
+    }
+    if rollover {
+        for sb in superblocks {
+            checkpoint_and_reset_journal(backend, sb, metadata)?;
+        }
+        return Ok(());
+    }
+
     let mut rollback_headers: Vec<(String, u64, Vec<u8>)> = Vec::new();
     let result = (|| -> Result<()> {
-        for (index, sb) in superblocks.iter().enumerate() {
-            let mut header = vec![0u8; RAW_HEADER_SIZE];
-            backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
-            if &header[..16] != JOURNAL_MAGIC {
-                initialize_journal_region(backend, &sb.disk_id, sb)?;
-                backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
-            }
-            let write_offset = get_u64(&header, 24)?;
-            let end = write_offset
-                .checked_add(entry.len() as u64)
-                .ok_or_else(|| ArgosError::Invalid("journal append overflow".to_string()))?;
-            if end > sb.journal.length {
-                checkpoint_and_reset_journal(backend, sb, metadata)?;
-                continue;
-            }
+        for (index, (sb, (mut header, write_offset, end))) in
+            superblocks.iter().zip(append_positions).enumerate()
+        {
             rollback_headers.push((sb.disk_id.clone(), sb.journal.offset, header.clone()));
             backend.write_at(&sb.disk_id, sb.journal.offset + write_offset, &entry)?;
             put_u64(&mut header, 24, end);
@@ -632,7 +645,14 @@ fn select_quorum_metadata_candidate(
 }
 
 fn metadata_quorum_requirement(metadata: &Metadata) -> usize {
-    metadata.disks.len().max(1) / 2 + 1
+    metadata
+        .disks
+        .values()
+        .filter(|disk| disk.status != DiskStatus::Removed)
+        .count()
+        .max(1)
+        / 2
+        + 1
 }
 
 fn read_metadata_candidates(
@@ -1029,9 +1049,14 @@ fn read_latest_journal_metadata(
         .max_by_key(|((txid, generation, _), _)| (*txid, *generation))
         .map(|(_, (metadata, _))| metadata);
     let total_members = base_metadata
-        .map(|metadata| metadata.disks.len())
-        .unwrap_or(superblocks.len())
-        .max(superblocks.len());
+        .map(|metadata| {
+            metadata
+                .disks
+                .values()
+                .filter(|disk| disk.status != DiskStatus::Removed)
+                .count()
+        })
+        .unwrap_or(superblocks.len());
     report.raw_journal_quorum = Some(raw_journal_quorum(&members, total_members) || best.is_some());
     report.raw_journal_members = members;
     Ok(best)
@@ -1200,14 +1225,22 @@ pub fn superblock_for_device(
     capacity: u64,
     label: &str,
 ) -> Result<RawSuperblock> {
+    let disk_index = u32::try_from(disk_index)
+        .map_err(|_| ArgosError::Invalid("raw disk index exceeds u32".to_string()))?;
+    let k = u32::try_from(k)
+        .map_err(|_| ArgosError::Invalid("raw data shard count exceeds u32".to_string()))?;
+    let m = u32::try_from(m)
+        .map_err(|_| ArgosError::Invalid("raw parity shard count exceeds u32".to_string()))?;
+    let chunk_size = u64::try_from(chunk_size)
+        .map_err(|_| ArgosError::Invalid("raw chunk size exceeds u64".to_string()))?;
     RawSuperblock::new(
         pool_uuid,
         Uuid::new_v4(),
         disk_id.to_string(),
-        disk_index as u32,
-        k as u32,
-        m as u32,
-        chunk_size as u64,
+        disk_index,
+        k,
+        m,
+        chunk_size,
         capacity,
         label.to_string(),
     )
@@ -1229,13 +1262,18 @@ pub fn inspect_device(kind: BackendKind, path: PathBuf) -> Result<(RawSuperblock
     let mut label = vec![0u8; DEVICE_LABEL_SIZE];
     backend.read_at(&id, PRIMARY_SUPERBLOCK_OFFSET, &mut sb)?;
     backend.read_at(&id, DEVICE_LABEL_OFFSET, &mut label)?;
-    let superblock = match RawSuperblock::decode(&sb) {
+    let decode = |bytes: &[u8]| -> Result<RawSuperblock> {
+        let superblock = RawSuperblock::decode(bytes)?;
+        superblock.validate_device_capacity(capacity)?;
+        Ok(superblock)
+    };
+    let superblock = match decode(&sb) {
         Ok(superblock) => superblock,
         Err(primary_err) => {
             let mut backup = vec![0u8; SUPERBLOCK_SIZE];
             let backup_offset = backup_superblock_offset_for_capacity(capacity);
             backend.read_at(&id, backup_offset, &mut backup)?;
-            RawSuperblock::decode(&backup).map_err(|backup_err| {
+            decode(&backup).map_err(|backup_err| {
                 ArgosError::IncompatibleFormat(format!(
                     "primary superblock failed ({primary_err}); backup superblock failed ({backup_err})"
                 ))
@@ -1357,7 +1395,11 @@ fn read_superblock_with_backup(
             PRIMARY_SUPERBLOCK_OFFSET,
             &mut primary,
         )
-        .and_then(|()| RawSuperblock::decode(&primary));
+        .and_then(|()| RawSuperblock::decode(&primary))
+        .and_then(|sb| {
+            sb.validate_device_capacity(capacity)?;
+            Ok(sb)
+        });
     match primary_result {
         Ok(sb) => Ok((sb, "primary")),
         Err(primary_err) => {
@@ -1366,6 +1408,10 @@ fn read_superblock_with_backup(
             backend
                 .read_at(&device_id.to_string(), backup_offset, &mut backup)
                 .and_then(|()| RawSuperblock::decode(&backup))
+                .and_then(|sb| {
+                    sb.validate_device_capacity(capacity)?;
+                    Ok(sb)
+                })
                 .map(|sb| (sb, "backup"))
                 .map_err(|backup_err| {
                     ArgosError::IncompatibleFormat(format!(

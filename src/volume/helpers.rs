@@ -264,16 +264,22 @@ pub(super) fn next_layout_id(meta: &Metadata) -> String {
     format!("layout-{next:04}")
 }
 
-pub(super) fn layout_total(layout: &LayoutConfig) -> usize {
-    layout.k + layout.m
+pub(super) fn checked_layout_total(k: usize, m: usize) -> Result<usize> {
+    k.checked_add(m)
+        .ok_or_else(|| ArgosError::Invalid("layout shard count overflow".to_string()))
 }
 
-pub(super) fn max_layout_total(meta: &Metadata) -> usize {
+pub(super) fn layout_total(layout: &LayoutConfig) -> Result<usize> {
+    checked_layout_total(layout.k, layout.m)
+}
+
+pub(super) fn max_layout_total(meta: &Metadata) -> Result<usize> {
+    let configured = checked_layout_total(meta.config.k, meta.config.m)?;
     meta.layouts
         .values()
-        .map(layout_total)
-        .max()
-        .unwrap_or(meta.config.k + meta.config.m)
+        .try_fold(configured, |maximum, layout| {
+            Ok(maximum.max(layout_total(layout)?))
+        })
 }
 
 pub(super) fn layout_stripe_raw_size(layout: &LayoutConfig) -> Result<usize> {

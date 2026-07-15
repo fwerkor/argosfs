@@ -60,6 +60,37 @@ fn create_entry_owner_can_come_from_fuse_request() {
 }
 
 #[test]
+fn setgid_directories_propagate_group_and_setgid_to_children() {
+    let tmp = TempDir::new().unwrap();
+    let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();
+    let shared = fs
+        .mkdir_at_with_owner(1, OsStr::new("shared"), 0o2775, 1000, 4242)
+        .unwrap();
+
+    let file = fs
+        .create_file_at_with_owner(shared.ino, OsStr::new("file"), 0o664, 1001, 1001)
+        .unwrap();
+    assert_eq!(file.gid, 4242);
+
+    let directory = fs
+        .mkdir_at_with_owner(shared.ino, OsStr::new("directory"), 0o775, 1001, 1001)
+        .unwrap();
+    assert_eq!(directory.gid, 4242);
+    assert_ne!(directory.mode & libc::S_ISGID, 0);
+
+    let link = fs
+        .symlink_at_with_owner(
+            shared.ino,
+            OsStr::new("link"),
+            std::path::Path::new("file"),
+            1001,
+            1001,
+        )
+        .unwrap();
+    assert_eq!(link.gid, 4242);
+}
+
+#[test]
 fn invalid_entry_names_are_rejected_before_metadata_changes() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();

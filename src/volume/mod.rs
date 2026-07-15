@@ -151,9 +151,10 @@ impl ArgosFs {
         if config.k == 0 {
             return Err(ArgosError::Invalid("k must be positive".to_string()));
         }
-        if disk_count < config.k + config.m {
+        let shard_count = checked_layout_total(config.k, config.m)?;
+        if disk_count < shard_count {
             return Err(ArgosError::NotEnoughDisks {
-                need: config.k + config.m,
+                need: shard_count,
                 have: disk_count,
             });
         }
@@ -361,9 +362,10 @@ impl ArgosFs {
         if config.k == 0 {
             return Err(ArgosError::Invalid("k must be positive".to_string()));
         }
-        if paths.len() < config.k + config.m {
+        let shard_count = checked_layout_total(config.k, config.m)?;
+        if paths.len() < shard_count {
             return Err(ArgosError::NotEnoughDisks {
-                need: config.k + config.m,
+                need: shard_count,
                 have: paths.len(),
             });
         }
@@ -783,6 +785,22 @@ impl ArgosFs {
         }
         let now = now_f64();
         let ino = self.alloc_inode_locked(meta);
+        let (gid, inherit_setgid) = {
+            let parent_inode = self.dir_inode_locked(meta, parent)?;
+            (
+                if parent_inode.mode & libc::S_ISGID != 0 {
+                    parent_inode.gid
+                } else {
+                    gid
+                },
+                parent_inode.mode & libc::S_ISGID != 0,
+            )
+        };
+        let mode = if inherit_setgid {
+            mode | libc::S_ISGID
+        } else {
+            mode
+        };
         let inherited_default_acl = meta
             .inodes
             .get(&parent)
@@ -887,6 +905,14 @@ impl ArgosFs {
         };
         let now = now_f64();
         let ino = self.alloc_inode_locked(meta);
+        let gid = {
+            let parent_inode = self.dir_inode_locked(meta, parent)?;
+            if parent_inode.mode & libc::S_ISGID != 0 {
+                parent_inode.gid
+            } else {
+                gid
+            }
+        };
         let inherited_acl = meta
             .inodes
             .get(&parent)

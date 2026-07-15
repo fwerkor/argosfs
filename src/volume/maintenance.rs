@@ -414,7 +414,7 @@ impl ArgosFs {
                 .iter()
                 .filter(|(id, disk)| id.as_str() != disk_id && disk.status == DiskStatus::Online)
                 .count();
-            let need = max_layout_total(&meta);
+            let need = max_layout_total(&meta)?;
             if have < need {
                 return Err(ArgosError::NotEnoughDisks { need, have });
             }
@@ -513,7 +513,7 @@ impl ArgosFs {
                 .values()
                 .filter(|disk| disk.status == DiskStatus::Online)
                 .count();
-            let need = target_k + target_m;
+            let need = checked_layout_total(target_k, target_m)?;
             if have < need {
                 return Err(ArgosError::NotEnoughDisks { need, have });
             }
@@ -869,22 +869,17 @@ impl ArgosFs {
                 NodeKind::Symlink | NodeKind::Special => {}
             }
         }
-        let refs = self.referenced_shards();
-        let mut referenced_usage = BTreeMap::<String, u64>::new();
-        {
-            let meta = self.metadata_snapshot();
-            for inode in meta.inodes.values() {
-                for block in &inode.blocks {
-                    for shard in &block.shards {
-                        *referenced_usage.entry(shard.disk_id.clone()).or_default() +=
-                            shard_accounted_size(shard);
-                    }
-                }
-            }
-        }
-        let meta = self.metadata_snapshot();
+        let meta = self.meta.read();
+        let refs = meta
+            .inodes
+            .values()
+            .flat_map(|inode| inode.blocks.iter())
+            .flat_map(|block| block.shards.iter())
+            .map(|shard| (shard.disk_id.clone(), shard.relpath.clone()))
+            .collect::<BTreeSet<_>>();
         if meta.backend == BackendKind::Host {
-            for (disk_id, disk) in meta.disks {
+            maintenance_after_read_delay();
+            for (disk_id, disk) in &meta.disks {
                 let disk_root = relative_or_absolute(&self.root, &disk.path);
                 let shard_root = disk_root.join("shards");
                 if !shard_root.exists() {
@@ -926,8 +921,25 @@ impl ArgosFs {
                 }
             }
         }
+        drop(meta);
         if repair || remove_orphans {
             let mut meta = self.meta.write();
+            let mut referenced_usage = BTreeMap::<String, u64>::new();
+            for shard in meta
+                .inodes
+                .values()
+                .flat_map(|inode| inode.blocks.iter())
+                .flat_map(|block| block.shards.iter())
+            {
+                let current = referenced_usage
+                    .get(&shard.disk_id)
+                    .copied()
+                    .unwrap_or(0u64);
+                referenced_usage.insert(
+                    shard.disk_id.clone(),
+                    current.saturating_add(shard_accounted_size(shard)),
+                );
+            }
             let mut metadata_changed = report.removed_orphans > 0;
             for (disk_id, disk) in meta.disks.iter_mut() {
                 let used_bytes = referenced_usage.get(disk_id).copied().unwrap_or(0);

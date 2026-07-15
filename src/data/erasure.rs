@@ -5,6 +5,7 @@ pub struct RsCodec {
     inner: Option<ReedSolomon>,
     k: usize,
     m: usize,
+    total: usize,
 }
 
 impl RsCodec {
@@ -12,16 +13,19 @@ impl RsCodec {
         if k == 0 {
             return Err(ArgosError::Invalid("k must be positive".to_string()));
         }
+        let total = k
+            .checked_add(m)
+            .ok_or_else(|| ArgosError::Invalid("erasure shard count overflow".to_string()))?;
         let inner = if m == 0 {
             None
         } else {
             Some(ReedSolomon::new(k, m).map_err(|err| ArgosError::Erasure(err.to_string()))?)
         };
-        Ok(Self { inner, k, m })
+        Ok(Self { inner, k, m, total })
     }
 
     pub fn total(&self) -> usize {
-        self.k + self.m
+        self.total
     }
 
     pub fn encode(&self, data_shards: &[Vec<u8>]) -> Result<Vec<Vec<u8>>> {
@@ -80,5 +84,18 @@ impl RsCodec {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codec_rejects_an_overflowing_shard_count() {
+        assert!(matches!(
+            RsCodec::new(usize::MAX, 1),
+            Err(ArgosError::Invalid(_))
+        ));
     }
 }

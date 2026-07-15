@@ -349,3 +349,35 @@ fn rebalance_does_not_overwrite_a_concurrent_committed_write() {
     std::env::remove_var("ARGOSFS_TEST_MAINTENANCE_AFTER_READ_DELAY_MS");
     assert_eq!(fs.read_inode(ino, 0, 1, false).unwrap(), b"Z");
 }
+
+#[test]
+fn fsck_orphan_scan_does_not_delete_a_concurrent_write() {
+    let _guard = env_lock();
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.chunk_size = 1024 * 1024;
+    cfg.compression = Compression::None;
+    let fs = Arc::new(ArgosFs::create(tmp.path(), cfg, 1, false).unwrap());
+    let ino = fs.create_file_path("/concurrent", 0o644).unwrap();
+    let payload = vec![b'W'; 2 * 1024 * 1024];
+
+    std::env::set_var("ARGOSFS_TEST_MAINTENANCE_AFTER_READ_DELAY_MS", "250");
+    let fsck_fs = Arc::clone(&fs);
+    let fsck = thread::spawn(move || fsck_fs.fsck(false, true));
+    thread::sleep(std::time::Duration::from_millis(50));
+    let writer_fs = Arc::clone(&fs);
+    let expected = payload.clone();
+    let writer = thread::spawn(move || writer_fs.write_inode_range(ino, 0, &expected));
+
+    let report = fsck.join().unwrap().unwrap();
+    assert_eq!(writer.join().unwrap().unwrap(), payload.len());
+    std::env::remove_var("ARGOSFS_TEST_MAINTENANCE_AFTER_READ_DELAY_MS");
+
+    assert_eq!(report.removed_orphans, 0);
+    assert_eq!(fs.read_file("/concurrent", false).unwrap(), payload);
+    assert!(fs
+        .metadata_snapshot()
+        .disks
+        .values()
+        .all(|disk| disk.used_bytes > 0));
+}

@@ -2,6 +2,7 @@ use crate::error::{ArgosError, Result};
 use crate::types::{
     Inode, Nfs4Ace, Nfs4AceType, Nfs4Acl, NodeKind, PosixAcl, PosixAclEntry, PosixAclTag,
 };
+use std::collections::BTreeSet;
 
 pub const ACL_READ: u16 = 0b100;
 pub const ACL_WRITE: u16 = 0b010;
@@ -63,7 +64,9 @@ pub fn parse_posix_acl(spec: &str) -> Result<PosixAcl> {
             perms: parse_perm_bits(parts[2])?,
         });
     }
-    Ok(PosixAcl { entries })
+    let acl = PosixAcl { entries };
+    validate_posix_acl(&acl)?;
+    Ok(acl)
 }
 
 pub fn format_posix_acl(acl: &PosixAcl) -> String {
@@ -84,9 +87,6 @@ pub fn format_posix_acl(acl: &PosixAcl) -> String {
 }
 
 pub fn parse_posix_acl_xattr(value: &[u8]) -> Result<PosixAcl> {
-    if value.is_empty() {
-        return Ok(PosixAcl::default());
-    }
     if value.len() >= 4 {
         let version = u32::from_le_bytes([value[0], value[1], value[2], value[3]]);
         if version == POSIX_ACL_XATTR_VERSION {
@@ -158,7 +158,81 @@ fn parse_posix_acl_binary(value: &[u8]) -> Result<PosixAcl> {
         validate_acl_id(&tag, id)?;
         entries.push(PosixAclEntry { tag, id, perms });
     }
-    Ok(PosixAcl { entries })
+    let acl = PosixAcl { entries };
+    validate_posix_acl(&acl)?;
+    Ok(acl)
+}
+
+pub fn validate_posix_acl(acl: &PosixAcl) -> Result<()> {
+    let mut user_obj = 0usize;
+    let mut group_obj = 0usize;
+    let mut mask = 0usize;
+    let mut other = 0usize;
+    let mut named_users = BTreeSet::new();
+    let mut named_groups = BTreeSet::new();
+
+    for entry in &acl.entries {
+        if entry.perms & !0o7 != 0 {
+            return Err(ArgosError::Invalid(format!(
+                "invalid POSIX ACL permissions: {:o}",
+                entry.perms
+            )));
+        }
+        validate_acl_id(&entry.tag, entry.id)?;
+        match entry.tag {
+            PosixAclTag::UserObj => user_obj += 1,
+            PosixAclTag::User => {
+                let Some(id) = entry.id else {
+                    return Err(ArgosError::Invalid(
+                        "named POSIX ACL user entries require an id".to_string(),
+                    ));
+                };
+                if !named_users.insert(id) {
+                    return Err(ArgosError::Invalid(format!(
+                        "duplicate POSIX ACL user entry: {id}"
+                    )));
+                }
+            }
+            PosixAclTag::GroupObj => group_obj += 1,
+            PosixAclTag::Group => {
+                let Some(id) = entry.id else {
+                    return Err(ArgosError::Invalid(
+                        "named POSIX ACL group entries require an id".to_string(),
+                    ));
+                };
+                if !named_groups.insert(id) {
+                    return Err(ArgosError::Invalid(format!(
+                        "duplicate POSIX ACL group entry: {id}"
+                    )));
+                }
+            }
+            PosixAclTag::Mask => mask += 1,
+            PosixAclTag::Other => other += 1,
+        }
+    }
+
+    for (name, count) in [
+        ("owner user", user_obj),
+        ("owner group", group_obj),
+        ("other", other),
+    ] {
+        if count != 1 {
+            return Err(ArgosError::Invalid(format!(
+                "POSIX ACL requires exactly one {name} entry"
+            )));
+        }
+    }
+    if mask > 1 {
+        return Err(ArgosError::Invalid(
+            "POSIX ACL permits at most one mask entry".to_string(),
+        ));
+    }
+    if (!named_users.is_empty() || !named_groups.is_empty()) && mask != 1 {
+        return Err(ArgosError::Invalid(
+            "extended POSIX ACL entries require a mask".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn nfs4_to_json(acl: &Nfs4Acl) -> Result<String> {
@@ -182,7 +256,7 @@ pub fn evaluate_access_with_groups(inode: &Inode, uid: u32, gids: &[u32], mask: 
             || inode.mode & 0o111 != 0;
     }
     if let Some(nfs4) = &inode.nfs4_acl {
-        if let Some(allowed) = evaluate_nfs4(nfs4, uid, gids, requested) {
+        if let Some(allowed) = evaluate_nfs4(nfs4, inode, uid, gids, requested) {
             return allowed;
         }
     }
@@ -316,30 +390,45 @@ fn evaluate_mode(inode: &Inode, uid: u32, gids: &[u32], requested: u16) -> bool 
     perms & requested == requested
 }
 
-fn evaluate_nfs4(acl: &Nfs4Acl, uid: u32, gids: &[u32], requested: u16) -> Option<bool> {
+fn evaluate_nfs4(
+    acl: &Nfs4Acl,
+    inode: &Inode,
+    uid: u32,
+    gids: &[u32],
+    requested: u16,
+) -> Option<bool> {
     if acl.entries.is_empty() {
         return None;
     }
-    let mut allowed = 0u16;
+    let mut remaining = requested;
     for ace in &acl.entries {
-        if !nfs4_principal_matches(ace, uid, gids) {
+        if ace.flags.iter().any(|flag| flag == "inherit-only")
+            || !nfs4_principal_matches(ace, inode, uid, gids)
+        {
             continue;
         }
-        let perms = nfs4_perm_bits(ace);
-        if perms & requested == 0 {
+        let affected = nfs4_perm_bits(ace) & remaining;
+        if affected == 0 {
             continue;
         }
         match ace.ace_type {
             Nfs4AceType::Deny => return Some(false),
-            Nfs4AceType::Allow => allowed |= perms,
+            Nfs4AceType::Allow => {
+                remaining &= !affected;
+                if remaining == 0 {
+                    return Some(true);
+                }
+            }
         }
     }
-    Some(allowed & requested == requested)
+    Some(false)
 }
 
-fn nfs4_principal_matches(ace: &Nfs4Ace, uid: u32, gids: &[u32]) -> bool {
+fn nfs4_principal_matches(ace: &Nfs4Ace, inode: &Inode, uid: u32, gids: &[u32]) -> bool {
     let principal = ace.principal.as_str();
     principal == "EVERYONE@"
+        || (principal == "OWNER@" && uid == inode.uid)
+        || (principal == "GROUP@" && gids.contains(&inode.gid))
         || principal == format!("uid:{uid}")
         || gids.iter().any(|gid| principal == format!("gid:{gid}"))
 }
@@ -347,8 +436,10 @@ fn nfs4_principal_matches(ace: &Nfs4Ace, uid: u32, gids: &[u32]) -> bool {
 fn nfs4_perm_bits(ace: &Nfs4Ace) -> u16 {
     ace.permissions.iter().fold(0u16, |mut acc, perm| {
         match perm.as_str() {
-            "r" | "read" | "read-data" => acc |= ACL_READ,
-            "w" | "write" | "write-data" | "append-data" => acc |= ACL_WRITE,
+            "r" | "read" | "read-data" | "list-directory" => acc |= ACL_READ,
+            "w" | "write" | "write-data" | "append-data" | "add-file" | "add-subdirectory" => {
+                acc |= ACL_WRITE
+            }
             "x" | "execute" => acc |= ACL_EXECUTE,
             _ => {}
         }

@@ -36,13 +36,13 @@ def nobody_identity():
     return entry.pw_uid, entry.pw_gid
 
 
-def run_as_identity(uid, gid, action):
+def run_as_identity(uid, gid, action, supplementary_groups=None):
     read_fd, write_fd = os.pipe()
     child = os.fork()
     if child == 0:
         os.close(read_fd)
         try:
-            os.setgroups([])
+            os.setgroups(supplementary_groups or [])
             os.setgid(gid)
             os.setuid(uid)
             action()
@@ -62,8 +62,8 @@ def run_as_identity(uid, gid, action):
     return status_code, message.decode("utf-8", "replace")
 
 
-def require_identity_action(uid, gid, action, description):
-    status_code, message = run_as_identity(uid, gid, action)
+def require_identity_action(uid, gid, action, description, supplementary_groups=None):
+    status_code, message = run_as_identity(uid, gid, action, supplementary_groups)
     require(
         os.WIFEXITED(status_code) and os.WEXITSTATUS(status_code) == 0,
         f"{description} failed for uid={uid} gid={gid}: {message}",
@@ -214,11 +214,64 @@ def check_rename(root):
     log("passed", "rename-overwrite")
 
 
+def check_readdirplus_permission(root, identity=None, check_metadata=True):
+    if os.geteuid() != 0:
+        if require_cross_user():
+            raise AssertionError("mandatory readdirplus permission check must run as root")
+        log("skipped", "readdirplus-search-permission", "requires root to switch uid and gid")
+        return
+    if not require_cross_user():
+        log("skipped", "readdirplus-search-permission", "requires an allow_other test mount")
+        return
+    identity = identity or nobody_identity()
+    if identity is None:
+        log("skipped", "readdirplus-search-permission", "nobody user unavailable")
+        return
+    nobody_uid, nobody_gid = identity
+
+    readable = path(root, b"readable-no-search")
+    os.mkdir(readable, 0o700)
+    readable_child = path(readable, b"visible-name")
+    with open(readable_child, "wb") as f:
+        f.write(b"name")
+    os.chown(readable, nobody_uid, nobody_gid)
+    os.chmod(readable, 0o400)
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        lambda: require(os.listdir(readable) == [b"visible-name"], "directory listing mismatch"),
+        "readable directory listing without search permission",
+    )
+    if not check_metadata:
+        return
+
+    time.sleep(5.1)
+
+    def expect_scandir_metadata_denied():
+        try:
+            entries = list(os.scandir(readable))
+        except PermissionError:
+            return
+        require(len(entries) == 1, "scandir entry count mismatch")
+        expect_permission_denied(lambda: entries[0].stat(follow_symlinks=False))
+
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        expect_scandir_metadata_denied,
+        "directory metadata denial without search permission",
+    )
+    log("passed", "readdirplus-search-permission")
+
+
 def check_permission_enforcement(root):
     if os.geteuid() != 0:
         if require_cross_user():
             raise AssertionError("mandatory permission checks must run as root")
         log("skipped", "cross-user-permissions", "requires root to switch uid and gid")
+        return
+    if not require_cross_user():
+        log("skipped", "cross-user-permissions", "requires an allow_other test mount")
         return
     identity = nobody_identity()
     if identity is None:
@@ -285,19 +338,41 @@ def check_permission_enforcement(root):
         "directory search permission",
     )
 
+    inherited_gid = nobody_gid + 1 if nobody_gid < 2**32 - 1 else nobody_gid - 1
     inherited = path(root, b"setgid-dir")
     os.mkdir(inherited, 0o755)
-    os.chown(inherited, 0, nobody_gid)
+    os.chown(inherited, 0, inherited_gid)
     os.chmod(inherited, 0o2777)
     inherited_file = path(inherited, b"child.txt")
     def create_in_setgid_dir():
         fd = os.open(inherited_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o664)
         os.write(fd, b"setgid")
         os.close(fd)
-    require_identity_action(nobody_uid, nobody_gid, create_in_setgid_dir, "setgid directory create")
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        create_in_setgid_dir,
+        "setgid directory create",
+        [inherited_gid],
+    )
     inherited_stat = os.stat(inherited_file)
     require(inherited_stat.st_uid == nobody_uid, "created file owner did not match request uid")
-    require(inherited_stat.st_gid == nobody_gid, "setgid directory group was not inherited")
+    require(inherited_stat.st_gid == inherited_gid, "setgid directory group was not inherited")
+    os.chown(inherited_file, 0, inherited_gid)
+    os.chmod(inherited_file, 0o620)
+    def append_through_supplementary_group():
+        with open(inherited_file, "ab") as f:
+            f.write(b"-group")
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        append_through_supplementary_group,
+        "supplementary-group writeback",
+        [inherited_gid],
+    )
+    require(open(inherited_file, "rb").read() == b"setgid-group", "group writeback was not persisted")
+
+    check_readdirplus_permission(root, identity, check_metadata=False)
 
     owned = path(root, b"owned-by-nobody.txt")
     with open(owned, "wb") as f:
@@ -311,6 +386,26 @@ def check_permission_enforcement(root):
             f.write(b"-updated")
     require_identity_action(nobody_uid, nobody_gid, owner_update, "chowned owner access")
     require(open(owned, "rb").read() == b"owned-updated", "chowned owner update was not persisted")
+
+    truncate_open = path(root, b"truncate-open-handle.txt")
+    with open(truncate_open, "wb") as f:
+        f.write(b"truncate-me")
+    os.chown(truncate_open, nobody_uid, nobody_gid)
+    os.chmod(truncate_open, 0o600)
+    def truncate_after_mode_change():
+        fd = os.open(truncate_open, os.O_WRONLY)
+        try:
+            os.chmod(truncate_open, 0)
+            os.ftruncate(fd, 3)
+        finally:
+            os.close(fd)
+    require_identity_action(
+        nobody_uid,
+        nobody_gid,
+        truncate_after_mode_change,
+        "truncate through an already-open writable handle",
+    )
+    require(os.stat(truncate_open).st_size == 3, "open-handle truncate size mismatch")
     log("passed", "cross-user-permissions")
 
 
@@ -399,6 +494,14 @@ def main():
         check_sticky,
         check_concurrency,
     ]
+    requested_check = os.environ.get("ARGOSFS_COMPAT_CHECK")
+    if requested_check:
+        available_checks = {
+            "readdirplus-permissions": check_readdirplus_permission,
+        }
+        if requested_check not in available_checks:
+            raise SystemExit(f"unknown ARGOSFS_COMPAT_CHECK: {requested_check}")
+        checks = [available_checks[requested_check]]
     for check in checks:
         check(root)
     log("passed", "all")

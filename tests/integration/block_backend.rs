@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn raw_superblock_builder_rejects_overflowing_layout_fields() {
+    let err = argosfs::raw_store::superblock_for_device(
+        uuid::Uuid::new_v4(),
+        0,
+        "disk-0000",
+        usize::MAX,
+        1,
+        4096,
+        64 * 1024 * 1024,
+        "overflow-layout",
+    )
+    .unwrap_err();
+    assert_eq!(err.errno(), libc::EINVAL);
+}
+
+#[test]
 fn verify_journal_cli_supports_loop_backend() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 3);
@@ -621,6 +637,77 @@ fn raw_journal_member_reports_quorum_across_devices() {
         .raw_journal_members
         .iter()
         .all(|member| member.last_valid_txid == report.last_valid_txid));
+}
+
+#[test]
+fn raw_journal_rollover_keeps_one_quorum_across_mixed_members() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 4);
+    let fs = ArgosFs::create_loop(
+        &images,
+        config(3, 1),
+        32 * 1024 * 1024,
+        "mixed-rollover",
+        false,
+    )
+    .unwrap();
+    fs.write_file("/before", b"committed", 0o644).unwrap();
+    fs.sync().unwrap();
+    let mut next = fs.metadata_snapshot();
+    drop(fs);
+
+    let superblocks = images
+        .iter()
+        .map(|path| {
+            argosfs::raw_store::inspect_device(BackendKind::LoopBlock, path.clone())
+                .unwrap()
+                .0
+        })
+        .collect::<Vec<_>>();
+    for (path, superblock) in images.iter().zip(&superblocks).take(2) {
+        let disk = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut header = [0u8; 4096];
+        disk.read_at(&mut header, superblock.journal.offset)
+            .unwrap();
+        header[24..32].copy_from_slice(&(superblock.journal.length - 1).to_le_bytes());
+        disk.write_at(&header, superblock.journal.offset).unwrap();
+        disk.sync_all().unwrap();
+    }
+
+    let previous_hash = next.integrity.meta_hash.clone();
+    next.txid += 1;
+    next.raw_pool.pool_name = "after-mixed-rollover".to_string();
+    journal::prepare_metadata_integrity_with_previous(&mut next, previous_hash).unwrap();
+    let devices = images
+        .iter()
+        .enumerate()
+        .map(|(index, path)| (format!("disk-{index:04}"), path.clone()))
+        .collect::<Vec<_>>();
+    let backend = FileBlockBackend::open_with_ids(BackendKind::LoopBlock, devices, true).unwrap();
+    argosfs::raw_store::append_transaction(
+        &backend,
+        &superblocks,
+        &next,
+        "mixed-rollover",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    drop(backend);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(reopened.metadata_snapshot().txid, next.txid);
+    assert_eq!(
+        reopened.metadata_snapshot().raw_pool.pool_name,
+        "after-mixed-rollover"
+    );
+    assert_eq!(
+        reopened.transaction_report().unwrap().raw_journal_quorum,
+        Some(true)
+    );
 }
 
 #[test]
@@ -1282,6 +1369,60 @@ fn loop_block_cli_replace_device_rewrites_off_old_member() {
         reopened.read_file("/payload", false).unwrap(),
         b"before-replace"
     );
+}
+
+#[test]
+fn repeated_loop_replacements_do_not_raise_quorum_with_removed_members() {
+    let tmp = TempDir::new().unwrap();
+    let mut active = loop_images(&tmp, 3);
+    let fs =
+        ArgosFs::create_loop(&active, config(2, 1), 32 * 1024 * 1024, "quorum", false).unwrap();
+    fs.write_file("/payload", b"survives-replacements", 0o644)
+        .unwrap();
+    drop(fs);
+
+    for index in 0..3 {
+        let new_image = tmp.path().join(format!("replacement-{index}.img"));
+        let images_arg = active
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(",");
+        let output = Command::new(argosfs_binary())
+            .args([
+                "replace-device",
+                "--backend",
+                "loop",
+                "--images",
+                &images_arg,
+                "--old",
+                &format!("disk-{index:04}"),
+                "--new",
+            ])
+            .arg(&new_image)
+            .args(["--image-size", &(32 * 1024 * 1024).to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "replacement {index} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        active.remove(0);
+        active.push(new_image);
+    }
+
+    let reopened = ArgosFs::open_loop(&active, false).unwrap();
+    assert_eq!(
+        reopened.read_file("/payload", false).unwrap(),
+        b"survives-replacements"
+    );
+    for index in 0..3 {
+        assert_eq!(
+            reopened.metadata_snapshot().disks[&format!("disk-{index:04}")].status,
+            DiskStatus::Removed
+        );
+    }
 }
 
 #[test]

@@ -303,6 +303,11 @@ impl ArgosFs {
                 "unsupported fallocate mode {mode:#x}"
             )));
         }
+        if length == 0 {
+            return Err(ArgosError::Invalid(
+                "fallocate length must be positive".to_string(),
+            ));
+        }
         let end = offset
             .checked_add(length)
             .ok_or_else(|| ArgosError::Invalid("fallocate range overflow".to_string()))?;
@@ -420,6 +425,15 @@ impl ArgosFs {
         gid: u32,
     ) -> Result<usize> {
         self.write_inode_range_checked(ino, offset, data, Some((uid, gid)), true)
+    }
+
+    pub(crate) fn write_inode_range_from_open_handle(
+        &self,
+        ino: InodeId,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize> {
+        self.write_inode_range_checked(ino, offset, data, None, true)
     }
 
     pub(super) fn write_inode_range_checked(
@@ -857,6 +871,14 @@ impl ArgosFs {
             return Err(ArgosError::AlreadyExists(name));
         }
         let ino = self.alloc_inode_locked(&mut meta);
+        let gid = {
+            let parent_inode = self.dir_inode_locked(&meta, parent)?;
+            if parent_inode.mode & libc::S_ISGID != 0 {
+                parent_inode.gid
+            } else {
+                gid
+            }
+        };
         let inherited_acl = meta
             .inodes
             .get(&parent)
@@ -1327,6 +1349,7 @@ impl ArgosFs {
         default_acl: bool,
         acl_value: PosixAcl,
     ) -> Result<()> {
+        acl::validate_posix_acl(&acl_value)?;
         let ino = self.resolve_path(path, false)?;
         let mut meta = self.meta.write();
         self.ensure_block_backend_writable_locked(&meta)?;
