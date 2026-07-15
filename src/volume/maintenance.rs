@@ -970,3 +970,7 @@ fn maintenance_after_read_delay() {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "maintenance_tests.rs"]
+mod tests;
