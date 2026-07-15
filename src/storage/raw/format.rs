@@ -80,6 +80,21 @@ impl RawSuperblock {
         capacity: u64,
         label: String,
     ) -> Result<Self> {
+        if k == 0 || k.checked_add(m).is_none() || chunk_size == 0 {
+            return Err(ArgosError::Invalid(
+                "invalid raw erasure layout or chunk size".to_string(),
+            ));
+        }
+        if disk_id.is_empty() || disk_id.len() >= 64 {
+            return Err(ArgosError::Invalid(
+                "raw disk id must contain between 1 and 63 bytes".to_string(),
+            ));
+        }
+        if label.len() >= 128 {
+            return Err(ArgosError::Invalid(
+                "raw pool label must contain at most 127 bytes".to_string(),
+            ));
+        }
         if capacity < MIN_DEVICE_BYTES {
             return Err(ArgosError::Invalid(format!(
                 "device too small for raw ArgosFS layout: {capacity} bytes, need at least {MIN_DEVICE_BYTES}"
@@ -593,6 +608,28 @@ mod tests {
             sb.validate_device_capacity(32 * 1024 * 1024).unwrap_err(),
             ArgosError::IncompatibleFormat(_)
         ));
+    }
+
+    #[test]
+    fn superblock_constructor_rejects_unencodable_fields() {
+        let create = |disk_id: &str, k: u32, m: u32, chunk_size: u64, label: &str| {
+            RawSuperblock::new(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                disk_id.to_string(),
+                0,
+                k,
+                m,
+                chunk_size,
+                64 * 1024 * 1024,
+                label.to_string(),
+            )
+        };
+
+        assert!(create("disk-0000", 0, 1, 4096, "pool").is_err());
+        assert!(create("disk-0000", 1, 0, 0, "pool").is_err());
+        assert!(create(&"d".repeat(64), 1, 0, 4096, "pool").is_err());
+        assert!(create("disk-0000", 1, 0, 4096, &"p".repeat(128)).is_err());
     }
 
     #[test]

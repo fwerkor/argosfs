@@ -414,7 +414,7 @@ impl ArgosFs {
                 .iter()
                 .filter(|(id, disk)| id.as_str() != disk_id && disk.status == DiskStatus::Online)
                 .count();
-            let need = max_layout_total(&meta);
+            let need = max_layout_total(&meta)?;
             if have < need {
                 return Err(ArgosError::NotEnoughDisks { need, have });
             }
@@ -513,7 +513,7 @@ impl ArgosFs {
                 .values()
                 .filter(|disk| disk.status == DiskStatus::Online)
                 .count();
-            let need = target_k + target_m;
+            let need = checked_layout_total(target_k, target_m)?;
             if have < need {
                 return Err(ArgosError::NotEnoughDisks { need, have });
             }

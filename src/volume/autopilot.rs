@@ -444,7 +444,7 @@ impl ArgosFs {
             .count();
         let required_after_drain = {
             let meta = self.meta.read();
-            max_layout_total(&meta)
+            max_layout_total(&meta)?
         };
         let mut decisions = Vec::new();
         for disk in &report.disks {

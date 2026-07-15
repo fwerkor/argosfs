@@ -1214,14 +1214,22 @@ pub fn superblock_for_device(
     capacity: u64,
     label: &str,
 ) -> Result<RawSuperblock> {
+    let disk_index = u32::try_from(disk_index)
+        .map_err(|_| ArgosError::Invalid("raw disk index exceeds u32".to_string()))?;
+    let k = u32::try_from(k)
+        .map_err(|_| ArgosError::Invalid("raw data shard count exceeds u32".to_string()))?;
+    let m = u32::try_from(m)
+        .map_err(|_| ArgosError::Invalid("raw parity shard count exceeds u32".to_string()))?;
+    let chunk_size = u64::try_from(chunk_size)
+        .map_err(|_| ArgosError::Invalid("raw chunk size exceeds u64".to_string()))?;
     RawSuperblock::new(
         pool_uuid,
         Uuid::new_v4(),
         disk_id.to_string(),
-        disk_index as u32,
-        k as u32,
-        m as u32,
-        chunk_size as u64,
+        disk_index,
+        k,
+        m,
+        chunk_size,
         capacity,
         label.to_string(),
     )

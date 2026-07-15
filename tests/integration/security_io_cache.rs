@@ -52,6 +52,21 @@ fn oversized_stripe_config_returns_error_instead_of_panicking() {
 }
 
 #[test]
+fn overflowing_layout_config_returns_error_instead_of_panicking() {
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = config(1, 0);
+    cfg.k = usize::MAX;
+    cfg.m = 1;
+
+    let err = ArgosFs::create(tmp.path(), cfg, 0, false).err().unwrap();
+    assert_eq!(err.errno(), libc::EINVAL);
+
+    let fs = ArgosFs::create(tmp.path(), config(1, 0), 1, false).unwrap();
+    let err = fs.reshape_layout(usize::MAX, 1, None).unwrap_err();
+    assert_eq!(err.errno(), libc::EINVAL);
+}
+
+#[test]
 fn posix_and_nfs4_acl_are_enforced_and_exposed_as_xattrs() {
     let tmp = TempDir::new().unwrap();
     let fs = ArgosFs::create(tmp.path(), config(2, 2), 4, false).unwrap();

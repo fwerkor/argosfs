@@ -377,7 +377,7 @@ impl ArgosFs {
             return self.decode_single_shard_block_locked(meta, block, damaged, &cache_key);
         }
         let codec = RsCodec::new(layout.k, layout.m)?;
-        let mut shards: Vec<Option<Vec<u8>>> = vec![None; layout_total(&layout)];
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; layout_total(&layout)?];
         for shard in &block.shards {
             if shard.slot >= shards.len() {
                 damaged.push(format!("{}:invalid-slot:{}", shard.disk_id, shard.slot));
@@ -800,7 +800,7 @@ impl ArgosFs {
                 meta,
                 PlacementRequest {
                     key: &stripe_id,
-                    count: layout_total(&layout),
+                    count: layout_total(&layout)?,
                     storage_class,
                     boot_critical,
                     exclude_disks,

@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn raw_superblock_builder_rejects_overflowing_layout_fields() {
+    let err = argosfs::raw_store::superblock_for_device(
+        uuid::Uuid::new_v4(),
+        0,
+        "disk-0000",
+        usize::MAX,
+        1,
+        4096,
+        64 * 1024 * 1024,
+        "overflow-layout",
+    )
+    .unwrap_err();
+    assert_eq!(err.errno(), libc::EINVAL);
+}
+
+#[test]
 fn verify_journal_cli_supports_loop_backend() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 3);

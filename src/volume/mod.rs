@@ -151,9 +151,10 @@ impl ArgosFs {
         if config.k == 0 {
             return Err(ArgosError::Invalid("k must be positive".to_string()));
         }
-        if disk_count < config.k + config.m {
+        let shard_count = checked_layout_total(config.k, config.m)?;
+        if disk_count < shard_count {
             return Err(ArgosError::NotEnoughDisks {
-                need: config.k + config.m,
+                need: shard_count,
                 have: disk_count,
             });
         }
@@ -361,9 +362,10 @@ impl ArgosFs {
         if config.k == 0 {
             return Err(ArgosError::Invalid("k must be positive".to_string()));
         }
-        if paths.len() < config.k + config.m {
+        let shard_count = checked_layout_total(config.k, config.m)?;
+        if paths.len() < shard_count {
             return Err(ArgosError::NotEnoughDisks {
-                need: config.k + config.m,
+                need: shard_count,
                 have: paths.len(),
             });
         }
