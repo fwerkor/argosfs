@@ -2,7 +2,9 @@
 import ctypes
 import errno
 import multiprocessing
+import mmap
 import os
+import socket
 import pwd
 import stat
 import sys
@@ -138,6 +140,149 @@ def check_xattrs(root):
     require(os.getxattr(p, b"user.argosfs.compat") == b"value-\x00-bytes", "xattr value mismatch")
     require(b"user.argosfs.compat" in [os.fsencode(x) for x in os.listxattr(p)], "xattr missing from listxattr")
     log("passed", "xattrs")
+
+
+
+def check_xattr_lifecycle(root):
+    p = path(root, b"xattr-lifecycle.txt")
+    with open(p, "wb") as f:
+        f.write(b"xattr lifecycle")
+    name = b"user.argosfs.lifecycle"
+    os.setxattr(p, name, b"first", flags=os.XATTR_CREATE)
+    require(os.getxattr(p, name) == b"first", "XATTR_CREATE value mismatch")
+    try:
+        os.setxattr(p, name, b"duplicate", flags=os.XATTR_CREATE)
+    except OSError as exc:
+        require(exc.errno == errno.EEXIST, f"duplicate XATTR_CREATE errno={exc.errno}")
+    else:
+        raise AssertionError("duplicate XATTR_CREATE unexpectedly succeeded")
+    os.setxattr(p, name, b"second", flags=os.XATTR_REPLACE)
+    require(os.getxattr(p, name) == b"second", "XATTR_REPLACE value mismatch")
+    missing = b"user.argosfs.missing"
+    try:
+        os.setxattr(p, missing, b"value", flags=os.XATTR_REPLACE)
+    except OSError as exc:
+        require(exc.errno in (errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)), f"missing XATTR_REPLACE errno={exc.errno}")
+    else:
+        raise AssertionError("missing XATTR_REPLACE unexpectedly succeeded")
+    os.removexattr(p, name)
+    require(name not in [os.fsencode(item) for item in os.listxattr(p)], "removed xattr remained listed")
+    try:
+        os.getxattr(p, name)
+    except OSError as exc:
+        require(exc.errno in (errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)), f"removed xattr errno={exc.errno}")
+    else:
+        raise AssertionError("removed xattr remained readable")
+    log("passed", "xattr-create-replace-remove-errors")
+
+
+def check_directory_and_special_nodes(root):
+    nested = path(root, b"directory-lifecycle")
+    os.mkdir(nested, 0o750)
+    child = path(nested, b"child")
+    with open(child, "wb") as f:
+        f.write(b"child")
+    try:
+        os.rmdir(nested)
+    except OSError as exc:
+        require(exc.errno in (errno.ENOTEMPTY, errno.EEXIST), f"non-empty rmdir errno={exc.errno}")
+    else:
+        raise AssertionError("non-empty directory was removed")
+    os.unlink(child)
+    os.rmdir(nested)
+    require(not os.path.exists(nested), "empty directory was not removed")
+
+    fifo = path(root, b"compat.fifo")
+    os.mkfifo(fifo, 0o620)
+    require(stat.S_ISFIFO(os.lstat(fifo).st_mode), "mkfifo did not create a FIFO")
+    os.unlink(fifo)
+
+    sock_path = path(root, b"compat.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(sock_path)
+        require(stat.S_ISSOCK(os.lstat(sock_path).st_mode), "AF_UNIX bind did not create a socket node")
+    finally:
+        server.close()
+        if os.path.lexists(sock_path):
+            os.unlink(sock_path)
+    log("passed", "mkdir-rmdir-unlink-fifo-unix-socket")
+
+
+def check_advanced_file_io(root):
+    source = path(root, b"advanced-source.bin")
+    destination = path(root, b"advanced-destination.bin")
+    payload = b"0123456789abcdef" * 512
+    fd = os.open(source, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o640)
+    try:
+        require(os.pwrite(fd, payload, 4096) == len(payload), "short positioned write")
+        require(os.pread(fd, len(payload), 4096) == payload, "positioned read mismatch")
+        os.posix_fallocate(fd, 0, 32 * 1024)
+        require(os.fstat(fd).st_size == 32 * 1024, "posix_fallocate size mismatch")
+        data_offset = os.lseek(fd, 0, os.SEEK_DATA)
+        hole_offset = os.lseek(fd, data_offset, os.SEEK_HOLE)
+        require(data_offset <= 4096, f"unexpected SEEK_DATA offset {data_offset}")
+        require(hole_offset >= 4096 + len(payload), f"unexpected SEEK_HOLE offset {hole_offset}")
+        with mmap.mmap(fd, 4096, access=mmap.ACCESS_WRITE, offset=4096) as mapping:
+            require(mapping[:16] == payload[:16], "mmap read mismatch")
+            mapping[0:4] = b"MMAP"
+            mapping.flush()
+        require(os.pread(fd, 4, 4096) == b"MMAP", "mmap write mismatch")
+        os.fdatasync(fd)
+    finally:
+        os.close(fd)
+
+    src_fd = os.open(source, os.O_RDONLY)
+    dst_fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    try:
+        copied = os.copy_file_range(src_fd, dst_fd, 4096, 4096, 2048)
+        require(copied == 4096, f"copy_file_range copied {copied} bytes")
+        require(os.pread(dst_fd, 4, 2048) == b"MMAP", "copy_file_range content mismatch")
+        os.fsync(dst_fd)
+    finally:
+        os.close(src_fd)
+        os.close(dst_fd)
+
+    statfs = os.statvfs(root)
+    require(statfs.f_blocks > 0 and statfs.f_bsize > 0, "statvfs returned an empty filesystem")
+    require(os.access(source, os.R_OK), "os.access denied a readable file")
+    os.chmod(source, 0)
+    if os.geteuid() != 0:
+        require(not os.access(source, os.R_OK), "os.access allowed mode-000 file")
+    os.chmod(source, 0o640)
+    log("passed", "pread-pwrite-fallocate-seek-mmap-copy-file-range-statvfs-access")
+
+
+def check_open_file_rename_and_unlink(root):
+    rename_source = path(root, b"open-rename-source")
+    rename_destination = path(root, b"open-rename-destination")
+    fd = os.open(rename_source, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    try:
+        os.write(fd, b"open rename")
+        os.rename(rename_source, rename_destination)
+        os.lseek(fd, 0, os.SEEK_SET)
+        require(os.read(fd, 64) == b"open rename", "renamed open file became unreadable")
+        os.pwrite(fd, b"!", len(b"open rename"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    with open(rename_destination, "rb") as f:
+        require(f.read() == b"open rename!", "open-file rename update mismatch")
+
+    unlink_path = path(root, b"open-unlink")
+    fd = os.open(unlink_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    try:
+        os.write(fd, b"open unlink")
+        os.unlink(unlink_path)
+        require(not os.path.exists(unlink_path), "unlinked name still exists")
+        os.lseek(fd, 0, os.SEEK_SET)
+        require(os.read(fd, 64) == b"open unlink", "unlinked open file became unreadable")
+        os.pwrite(fd, b"!", len(b"open unlink"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    require(not os.path.exists(unlink_path), "unlinked inode was recreated after close")
+    log("passed", "open-file-rename-unlink-writeback")
 
 
 def check_links(root):
@@ -487,6 +632,10 @@ def main():
         check_file_io,
         check_metadata,
         check_xattrs,
+        check_xattr_lifecycle,
+        check_directory_and_special_nodes,
+        check_advanced_file_io,
+        check_open_file_rename_and_unlink,
         check_links,
         check_non_utf8,
         check_rename,
