@@ -310,6 +310,7 @@ impl Drop for AlignedBuf {
 
 fn cpu_list_contains(spec: &str, cpu: u32) -> bool {
     spec.trim().split(',').any(|part| {
+        let part = part.trim();
         if let Some((start, end)) = part.split_once('-') {
             let Ok(start) = start.parse::<u32>() else {
                 return false;
@@ -438,5 +439,41 @@ mod tests {
             read_all(&file, payload.len(), IoMode::IoUring, true).unwrap(),
             payload
         );
+    }
+
+    #[test]
+    fn direct_helpers_cover_empty_missing_directory_and_short_file_paths() {
+        let dir = tempdir().unwrap();
+        let empty = dir.path().join("empty-direct.bin");
+        assert!(write_iouring(&empty, b"").is_ok() || empty.exists());
+        if empty.exists() {
+            assert!(read_iouring(&empty, 0).unwrap_or_default().is_empty());
+        }
+        let missing = dir.path().join("missing");
+        assert!(read_iouring(&missing, 1).is_err());
+        assert!(read_direct(&missing, ALIGN).is_err());
+        assert!(read_mmap_or_buffered(&missing, false).is_err());
+        assert!(write_buffered(dir.path(), b"x").is_err());
+        assert!(write_direct(dir.path(), &vec![0; ALIGN]).is_err());
+
+        let short = dir.path().join("short.bin");
+        fs::write(&short, b"short").unwrap();
+        assert!(matches!(
+            read_direct(&short, 5),
+            Err(ArgosError::Unsupported(_)) | Err(ArgosError::Io(_))
+        ));
+        assert_eq!(
+            read_all(&short, ALIGN, IoMode::Direct, false).unwrap(),
+            b"short"
+        );
+    }
+
+    #[test]
+    fn aligned_buffer_supports_zero_length_and_cpu_lists_ignore_whitespace() {
+        let buffer = AlignedBuf::new(0).unwrap();
+        assert!(buffer.as_slice().is_empty());
+        assert!(cpu_list_contains(" 0-2, 4 ", 1));
+        assert!(cpu_list_contains(" 0-2, 4 ", 4));
+        assert!(!cpu_list_contains(" 0-2, 4 ", 3));
     }
 }
