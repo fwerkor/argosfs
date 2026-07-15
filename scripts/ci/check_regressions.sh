@@ -94,6 +94,8 @@ require_present 'mountpoint -q "\$mountpoint"' scripts/compat/run_pjdfstest.sh \
   "pjdfstest must verify actual mountpoint"
 require_present 'mountpoint -q "\$ARGOSFS_COMPAT_MOUNTPOINT"' scripts/compat/run_fuse_smoke.sh \
   "fuse smoke must verify actual mountpoint"
+require_present 'no readable pool config or device selector' integrations/capos/systemd/argosfs-watchdog.service \
+  "rootfs watchdog must fail visibly when no pool selector is configured"
 require_present 'kill -0 "\$pid"' scripts/compat/with_fuse_mount.sh \
   "FUSE helper must fail if mount process exits"
 require_present 'mountpoint -q "\$mountpoint"' scripts/compat/with_fuse_mount.sh \

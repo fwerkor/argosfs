@@ -61,6 +61,65 @@ fn verify_journal_cli_supports_loop_backend() {
 }
 
 #[test]
+fn tree_transfer_cli_rejects_mismatched_pool_config() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 1);
+    let fs = ArgosFs::create_loop(
+        &images,
+        config(1, 0),
+        32 * 1024 * 1024,
+        "actual-pool",
+        false,
+    )
+    .unwrap();
+    fs.write_file("/existing", b"existing", 0o644).unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let config_path = tmp.path().join("wrong-pool.json");
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "backend": "loop",
+            "images": images,
+            "pool": "different-pool"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let source = tmp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("sentinel"), b"must-not-import").unwrap();
+
+    let import = Command::new(argosfs_binary())
+        .arg("import-tree")
+        .arg("--pool-config")
+        .arg(&config_path)
+        .arg(&source)
+        .arg("/")
+        .output()
+        .unwrap();
+    assert!(!import.status.success());
+    assert!(String::from_utf8_lossy(&import.stderr).contains("different-pool"));
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert!(reopened.read_file("/sentinel", false).is_err());
+    drop(reopened);
+
+    let destination = tmp.path().join("export");
+    let export = Command::new(argosfs_binary())
+        .arg("export-tree")
+        .arg("--pool-config")
+        .arg(&config_path)
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert!(!export.status.success());
+    assert!(String::from_utf8_lossy(&export.stderr).contains("different-pool"));
+    assert!(!destination.exists());
+}
+
+#[test]
 fn single_device_loop_rootfs_smoke_import_export() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);

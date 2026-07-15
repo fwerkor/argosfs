@@ -8,7 +8,7 @@ Type=simple
 Environment=ARGOSFS_POOL_CONFIG=/etc/argosfs/root-pool.json
 Environment=ARGOSFS_BACKEND=raw
 Environment=ARGOSFS_DEVICES=
-ExecStart=/bin/sh -c 'while sleep 60; do if [ -r "$ARGOSFS_POOL_CONFIG" ]; then /usr/sbin/argosfs preflight-root --pool-config "$ARGOSFS_POOL_CONFIG" --mode ro --json >/run/argosfs-watchdog.json || exit 1; elif [ -n "$ARGOSFS_DEVICES" ]; then /usr/sbin/argosfs preflight-root --backend "$ARGOSFS_BACKEND" --devices "$ARGOSFS_DEVICES" --mode ro --json >/run/argosfs-watchdog.json || exit 1; fi; done'
+ExecStart=/bin/sh -c 'if [ ! -r "$ARGOSFS_POOL_CONFIG" ] && [ -z "$ARGOSFS_DEVICES" ]; then echo "ArgosFS watchdog has no readable pool config or device selector" >&2; exit 1; fi; while sleep 60; do if [ -r "$ARGOSFS_POOL_CONFIG" ]; then /usr/sbin/argosfs preflight-root --pool-config "$ARGOSFS_POOL_CONFIG" --mode ro --json >/run/argosfs-watchdog.json || exit 1; else /usr/sbin/argosfs preflight-root --backend "$ARGOSFS_BACKEND" --devices "$ARGOSFS_DEVICES" --mode ro --json >/run/argosfs-watchdog.json || exit 1; fi; done'
 Restart=always
 RestartSec=5
 

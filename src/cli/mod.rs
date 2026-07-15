@@ -464,9 +464,11 @@ pub fn run() -> Result<()> {
         Command::ImportTree { storage, args } => {
             let storage = storage.resolve(BackendKind::Host)?;
             let backend = storage.backend;
+            let pool = storage.pool;
             let (root, source, dest) = import_args(backend, args)?;
             validate_root_backend(root.as_deref(), backend)?;
             let fs = open_backend(root, backend, storage.images, storage.devices, true)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
             let _bulk_import =
                 (backend != BackendKind::Host).then(|| crate::volume::bulk_import_scope(true));
             let import_result = import_tree(&fs, &source, &dest);
@@ -481,9 +483,11 @@ pub fn run() -> Result<()> {
         Command::ExportTree { storage, args } => {
             let storage = storage.resolve(BackendKind::Host)?;
             let backend = storage.backend;
+            let pool = storage.pool;
             let (root, dest) = export_args(backend, args)?;
             validate_root_backend(root.as_deref(), backend)?;
             let fs = open_backend(root, backend, storage.images, storage.devices, false)?;
+            validate_requested_pool(&fs, pool.as_deref())?;
             export_tree(&fs, &dest)?;
         }
         Command::AddDisk {
@@ -982,11 +986,13 @@ fn print_autopilot_report(report: &serde_json::Value, explicit_json: bool) -> Re
         return Ok(());
     }
 
-    let actions = report
-        .get("actions")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    for line in autopilot_summary_lines(report) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn autopilot_summary_lines(report: &serde_json::Value) -> Vec<String> {
     let health = report.get("health").unwrap_or(&serde_json::Value::Null);
     let volume = health
         .get("volume_uuid")
@@ -1004,10 +1010,64 @@ fn print_autopilot_report(report: &serde_json::Value, explicit_json: bool) -> Re
         .pointer("/planner/stopped_for_conflict")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    println!(
+
+    if let Some(decisions) = report
+        .get("decisions")
+        .and_then(serde_json::Value::as_array)
+    {
+        let mut lines = vec![format!(
+            "autopilot volume={volume} txid={txid} decisions={} mode={adaptive_mode} stopped_for_conflict={stopped}",
+            decisions.len()
+        )];
+        for decision in decisions {
+            let target = decision
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let action = decision
+                .get("chosen_action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let utility = decision
+                .get("expected_utility")
+                .and_then(serde_json::Value::as_f64);
+            let rejected = decision
+                .get("rejected_actions")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let mut line = match utility {
+                Some(utility) => format!("  {target}: {action} (expected_utility={utility:.2})"),
+                None => format!("  {target}: {action}"),
+            };
+            if let Some(first_rejection) = rejected.first() {
+                let rejected_action = first_rejection
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("candidate");
+                let reason = first_rejection
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("rejected by policy");
+                line.push_str(&format!("; {rejected_action} rejected: {reason}"));
+                if rejected.len() > 1 {
+                    line.push_str(&format!(" (+{} more)", rejected.len() - 1));
+                }
+            }
+            lines.push(line);
+        }
+        return lines;
+    }
+
+    let actions = report
+        .get("actions")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut lines = vec![format!(
         "autopilot volume={volume} txid={txid} actions={} mode={adaptive_mode} stopped_for_conflict={stopped}",
         actions.len()
-    );
+    )];
     for action in actions {
         let name = action
             .get("action")
@@ -1017,13 +1077,12 @@ fn print_autopilot_report(report: &serde_json::Value, explicit_json: bool) -> Re
             .get("error")
             .or_else(|| action.get("reason"))
             .and_then(serde_json::Value::as_str);
-        if let Some(detail) = detail {
-            println!("  {name}: {detail}");
-        } else {
-            println!("  {name}");
-        }
+        lines.push(match detail {
+            Some(detail) => format!("  {name}: {detail}"),
+            None => format!("  {name}"),
+        });
     }
-    Ok(())
+    lines
 }
 
 fn structured_json_requested(explicit_json: bool) -> bool {
@@ -1314,6 +1373,28 @@ mod tests {
         };
         assert_eq!(error.kind(), ErrorKind::DisplayVersion);
         assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn dry_run_autopilot_summary_shows_decisions() {
+        let report = serde_json::json!({
+            "dry_run": true,
+            "health": {"volume_uuid": "volume-1", "txid": 42},
+            "planner": {"adaptive_mode": "safe"},
+            "decisions": [{
+                "target": "disk-0001",
+                "chosen_action": "observe",
+                "expected_utility": 0.2,
+                "rejected_actions": [{"action": "drain", "reason": "risk below threshold"}]
+            }]
+        });
+        let lines = autopilot_summary_lines(&report);
+        assert!(lines[0].contains("volume=volume-1"));
+        assert!(lines[0].contains("txid=42"));
+        assert!(lines[0].contains("decisions=1"));
+        assert!(!lines[0].contains("actions=0"));
+        assert!(lines[1].contains("disk-0001: observe"));
+        assert!(lines[1].contains("drain rejected: risk below threshold"));
     }
 
     #[test]
