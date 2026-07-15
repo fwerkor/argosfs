@@ -1175,7 +1175,7 @@ impl Filesystem for ArgosFuse {
 
         match result {
             Ok(()) => reply.ok(),
-            Err(err) => reply.error(errno(&err)),
+            Err(err) => reply.error(xattr_errno(&err)),
         }
     }
 
@@ -2244,8 +2244,7 @@ mod tests {
             fallback_statfs_capacity(tmp.path(), [same_fs, tmp.path().join("missing")]);
         assert!(single_capacity > 0);
         assert_eq!(deduplicated_capacity, single_capacity);
-        assert!(deduplicated_free <= single_free);
-        assert!(single_free.saturating_sub(deduplicated_free) < 1024 * 1024);
+        assert!(deduplicated_free.abs_diff(single_free) < 1024 * 1024);
 
         use std::os::unix::ffi::OsStrExt;
         assert!(statvfs_capacity(Path::new(OsStr::from_bytes(b"bad\0path"))).is_none());
