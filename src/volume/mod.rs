@@ -527,6 +527,9 @@ impl ArgosFs {
         let meta = self.meta.read();
         if meta.backend != BackendKind::Host {
             let superblocks = self.active_superblocks_locked(&meta)?;
+            if self.open_backend_covers_superblocks(&superblocks) {
+                return raw_store::audit(&*self.backend, &superblocks);
+            }
             let backend = self.active_block_backend_locked(&meta, false)?;
             return raw_store::audit(&backend, &superblocks);
         }
@@ -558,9 +561,14 @@ impl ArgosFs {
                 return Ok(());
             }
             let superblocks = self.active_superblocks_locked(&meta)?;
-            let backend = self.active_block_backend_locked(&meta, true)?;
-            raw_store::write_metadata_copies(&backend, &superblocks, &meta)?;
-            backend.flush_all()?;
+            if self.open_backend_covers_superblocks(&superblocks) {
+                raw_store::write_metadata_copies(&*self.backend, &superblocks, &meta)?;
+                self.backend.flush_all()?;
+            } else {
+                let backend = self.active_block_backend_locked(&meta, true)?;
+                raw_store::write_metadata_copies(&backend, &superblocks, &meta)?;
+                backend.flush_all()?;
+            }
             return Ok(());
         }
 
@@ -593,13 +601,20 @@ impl ArgosFs {
         }
         self.ensure_block_backend_writable_locked(&meta)?;
         let superblocks = self.active_superblocks_locked(&meta)?;
-        let backend = self.active_block_backend_locked(&meta, true)?;
-        if meta.config.defer_metadata_commit {
-            raw_store::write_metadata_copies(&backend, &superblocks, &meta)?;
-            backend.flush_all()?;
+        let mark_clean = |backend: &dyn StorageBackend| -> Result<()> {
+            if meta.config.defer_metadata_commit {
+                raw_store::write_metadata_copies(backend, &superblocks, &meta)?;
+                backend.flush_all()?;
+            }
+            raw_store::write_superblock_clean_state(backend, &superblocks, true)?;
+            backend.flush_all()
+        };
+        if self.open_backend_covers_superblocks(&superblocks) {
+            mark_clean(&*self.backend)
+        } else {
+            let backend = self.active_block_backend_locked(&meta, true)?;
+            mark_clean(&backend)
         }
-        raw_store::write_superblock_clean_state(&backend, &superblocks, true)?;
-        backend.flush_all()
     }
 
     fn sync_dirty_host_shards(&self) -> Result<()> {
@@ -1445,28 +1460,35 @@ impl ArgosFs {
             }
             journal::prepare_metadata_integrity_with_previous(meta, previous_meta_hash.clone())?;
             let superblocks = self.active_superblocks_locked(meta)?;
-            let backend = self.active_block_backend_locked(meta, true)?;
-            if meta.config.defer_data_flush || bulk_import_enabled() {
-                backend.flush_all()?;
-                journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
-            }
-            if checkpoint {
-                raw_store::write_metadata_copies(&backend, &superblocks, meta)?;
+            let commit = |backend: &dyn StorageBackend| -> Result<()> {
+                if meta.config.defer_data_flush || bulk_import_enabled() {
+                    backend.flush_all()?;
+                    journal::inject_crash(FaultPoint::AfterDataFlushBeforeJournalCommit.as_str())?;
+                }
+                if checkpoint {
+                    raw_store::write_metadata_copies(backend, &superblocks, meta)?;
+                } else {
+                    raw_store::append_transaction_with_previous(
+                        backend,
+                        &superblocks,
+                        meta,
+                        Some(&previous),
+                        "group-commit",
+                        json!({
+                            "transactions": dirty_transactions,
+                            "previous_txid": previous.txid,
+                            "txid": meta.txid,
+                        }),
+                    )?;
+                }
+                backend.flush_all()
+            };
+            if self.open_backend_covers_superblocks(&superblocks) {
+                commit(&*self.backend)
             } else {
-                raw_store::append_transaction_with_previous(
-                    &backend,
-                    &superblocks,
-                    meta,
-                    Some(&previous),
-                    "group-commit",
-                    json!({
-                        "transactions": dirty_transactions,
-                        "previous_txid": previous.txid,
-                        "txid": meta.txid,
-                    }),
-                )?;
+                let backend = self.active_block_backend_locked(meta, true)?;
+                commit(&backend)
             }
-            backend.flush_all()
         })();
 
         match result {
