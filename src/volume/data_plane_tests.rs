@@ -399,3 +399,285 @@ fn encoding_empty_data_and_stripe_overflow_roll_back_metadata() {
     assert_eq!(fs.read_shard_locked(&meta, &shard).unwrap(), b"host shard");
     fs.delete_shard_locked(&mut meta, &shard).unwrap();
 }
+
+fn configured_host_volume(config: VolumeConfig, disks: usize) -> (tempfile::TempDir, ArgosFs) {
+    let dir = tempdir().unwrap();
+    let fs = ArgosFs::create(dir.path(), config, disks, false).unwrap();
+    (dir, fs)
+}
+
+#[test]
+fn erasure_decode_tolerates_one_missing_shard_and_records_all_damage_classes() {
+    let (_dir, fs) = configured_host_volume(
+        VolumeConfig {
+            k: 2,
+            m: 1,
+            compression: Compression::Zstd,
+            compression_level: 3,
+            chunk_size: 4096,
+            ..VolumeConfig::default()
+        },
+        3,
+    );
+    let raw = b"erasure recovery payload".repeat(300);
+    let mut meta = fs.meta.write();
+    let mut blocks = fs
+        .encode_data_locked(
+            &mut meta,
+            &raw,
+            0,
+            StorageTier::Warm,
+            false,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+    let mut block = blocks.remove(0);
+    let removed = block.shards[0].clone();
+    fs.delete_shard_locked(&mut meta, &removed).unwrap();
+    let mut invalid_slot = block.shards[1].clone();
+    invalid_slot.slot = 99;
+    let mut missing_disk = block.shards[1].clone();
+    missing_disk.disk_id = "missing-disk".to_string();
+    block.shards.push(invalid_slot);
+    block.shards.push(missing_disk);
+    let mut damaged = Vec::new();
+    let decoded = fs
+        .decode_block_locked(&mut meta, &block, None, &mut damaged)
+        .unwrap();
+    assert_eq!(decoded, raw[..block.raw_size]);
+    assert!(damaged.iter().any(|item| item.contains("invalid-slot")));
+    assert!(damaged.iter().any(|item| item.contains("missing-disk")));
+    assert!(damaged.iter().any(|item| item.contains("missing:")));
+
+    let offline_id = block.shards[1].disk_id.clone();
+    meta.disks.get_mut(&offline_id).unwrap().status = DiskStatus::Offline;
+    fs.cache.remove(&format!(
+        "{}:{}:{}",
+        meta.uuid, block.stripe_id, block.raw_sha256
+    ));
+    let mut unavailable = Vec::new();
+    assert!(matches!(
+        fs.decode_block_locked(&mut meta, &block, None, &mut unavailable),
+        Err(ArgosError::UnrecoverableStripe { .. })
+    ));
+    assert!(unavailable.iter().any(|item| item.contains("unavailable")));
+}
+
+#[test]
+fn encrypted_blocks_require_a_valid_nonce_key_and_authenticated_payload() {
+    let (_dir, fs) = host_volume(1);
+    std::env::set_var("ARGOSFS_KEY", "coverage-secret");
+    fs.enable_encryption("coverage-secret").unwrap();
+    let raw = b"encrypted payload".repeat(100);
+    let mut meta = fs.meta.write();
+    let block = fs
+        .encode_data_locked(
+            &mut meta,
+            &raw,
+            0,
+            StorageTier::Warm,
+            false,
+            &BTreeSet::new(),
+        )
+        .unwrap()
+        .remove(0);
+    assert!(block.encrypted);
+    let key = fs.encryption_key_locked(&meta).unwrap();
+    let mut damaged = Vec::new();
+    assert_eq!(
+        fs.decode_block_locked(&mut meta, &block, Some(&key), &mut damaged)
+            .unwrap(),
+        raw[..block.raw_size]
+    );
+    assert!(matches!(
+        fs.decode_block_locked(&mut meta, &block, None, &mut Vec::new()),
+        Err(ArgosError::PermissionDenied(_))
+    ));
+    let mut bad_nonce = block.clone();
+    bad_nonce.nonce_hex = "zz".to_string();
+    assert!(matches!(
+        fs.decode_block_locked(&mut meta, &bad_nonce, Some(&key), &mut Vec::new()),
+        Err(ArgosError::Invalid(_))
+    ));
+    let mut bad_key = key;
+    bad_key[0] ^= 1;
+    assert!(matches!(
+        fs.decode_block_locked(&mut meta, &block, Some(&bad_key), &mut Vec::new()),
+        Err(ArgosError::PermissionDenied(_))
+    ));
+    std::env::remove_var("ARGOSFS_KEY");
+}
+
+#[test]
+fn inode_decode_rejects_size_mismatch_overflow_and_blocks_past_eof() {
+    let (_dir, fs) = host_volume(1);
+    let mut meta = fs.meta.write();
+    let mut inode = meta.inodes[&ROOT_INO].clone();
+    inode.kind = NodeKind::File;
+    inode.id = 42;
+    inode.inline_data = Some(b"abc".to_vec());
+    inode.inline_sha256 = content_hash_hex(b"abc");
+    inode.size = 2;
+    assert!(fs.decode_inode_data_locked(&mut meta, &inode).is_err());
+
+    inode.inline_data = None;
+    inode.inline_sha256.clear();
+    inode.size = 1;
+    inode.blocks = vec![FileBlock {
+        raw_offset: 1,
+        raw_size: 1,
+        raw_sha256: content_hash_hex(b"x"),
+        compressed_size: 1,
+        shard_size: 1,
+        shards: Vec::new(),
+        stripe_id: "past-eof".to_string(),
+        layout_id: DEFAULT_LAYOUT_ID.to_string(),
+        codec: Compression::None,
+        encrypted: false,
+        nonce_hex: String::new(),
+        storage_class: StorageTier::Warm,
+    }];
+    assert!(fs.decode_inode_data_locked(&mut meta, &inode).is_err());
+
+    inode.size = 8;
+    inode.blocks[0].raw_offset = u64::MAX;
+    assert!(fs
+        .decode_inode_range_from_inode_locked(&mut meta, &inode, 0, 8)
+        .is_err());
+}
+
+#[test]
+fn range_decode_validates_metadata_missing_disks_status_checksums_and_read_errors() {
+    let (_dir, fs) = host_volume(1);
+    let mut meta = fs.meta.write();
+    let disk_id = meta.disks.keys().next().unwrap().clone();
+    let data = vec![7u8; SHARD_CHECKSUM_BLOCK_SIZE + 16];
+    let relpath = PathBuf::from("shards/range-checksum.blk");
+    let path = fs.shard_path_locked(&meta, &disk_id, &relpath);
+    ensure_private_dir(path.parent().unwrap()).unwrap();
+    fs::write(&path, &data).unwrap();
+    let hash = content_hash_hex(&data);
+    let mut block = FileBlock {
+        layout_id: DEFAULT_LAYOUT_ID.to_string(),
+        stripe_id: "range-checksum".to_string(),
+        raw_offset: 0,
+        raw_size: data.len(),
+        raw_sha256: hash.clone(),
+        codec: Compression::None,
+        encrypted: false,
+        nonce_hex: String::new(),
+        compressed_size: data.len(),
+        shard_size: data.len(),
+        shards: vec![Shard {
+            slot: 0,
+            disk_id: disk_id.clone(),
+            location: Some(ShardLocation::HostPath {
+                disk_id: disk_id.clone(),
+                relpath: relpath.clone(),
+            }),
+            relpath,
+            sha256: hash.clone(),
+            checksum_block_size: SHARD_CHECKSUM_BLOCK_SIZE,
+            subblock_sha256: shard_subblock_hashes(&data, &hash),
+            size: data.len(),
+        }],
+        storage_class: StorageTier::Warm,
+    };
+    let mut damaged = Vec::new();
+    assert_eq!(
+        fs.decode_block_range_locked(&mut meta, &block, 2, 10, &mut damaged)
+            .unwrap()
+            .unwrap(),
+        data[2..10]
+    );
+
+    block.shards[0].subblock_sha256.pop();
+    assert!(fs
+        .decode_block_range_locked(&mut meta, &block, 0, 1, &mut Vec::new())
+        .unwrap()
+        .is_none());
+    block.shards[0].subblock_sha256 = shard_subblock_hashes(&data, &hash);
+    block.shards[0].subblock_sha256[0] = "bad".to_string();
+    assert!(matches!(
+        fs.decode_block_range_locked(&mut meta, &block, 0, 1, &mut Vec::new()),
+        Err(ArgosError::UnrecoverableStripe { .. })
+    ));
+    block.shards[0].subblock_sha256 = shard_subblock_hashes(&data, &hash);
+
+    let original_disk = block.shards[0].disk_id.clone();
+    block.shards[0].disk_id = "missing".to_string();
+    assert!(matches!(
+        fs.decode_block_range_locked(&mut meta, &block, 0, 1, &mut Vec::new()),
+        Err(ArgosError::UnrecoverableStripe { .. })
+    ));
+    block.shards[0].disk_id = original_disk.clone();
+    meta.disks.get_mut(&original_disk).unwrap().status = DiskStatus::Failed;
+    assert!(matches!(
+        fs.decode_block_range_locked(&mut meta, &block, 0, 1, &mut Vec::new()),
+        Err(ArgosError::UnrecoverableStripe { .. })
+    ));
+    meta.disks.get_mut(&original_disk).unwrap().status = DiskStatus::Online;
+    fs::remove_file(fs.shard_path_locked(
+        &meta,
+        &original_disk,
+        match block.shards[0].location.as_ref().unwrap() {
+            ShardLocation::HostPath { relpath, .. } => relpath,
+            _ => unreachable!(),
+        },
+    ))
+    .unwrap();
+    assert!(fs
+        .decode_block_range_locked(&mut meta, &block, 0, 1, &mut Vec::new())
+        .is_err());
+}
+
+#[test]
+fn placement_scoring_covers_tiers_boot_critical_numa_and_shared_capacity_reservations() {
+    let (_dir, fs) = host_volume(4);
+    let mut meta = fs.meta.write();
+    let ids = meta.disks.keys().cloned().collect::<Vec<_>>();
+    for (index, id) in ids.iter().enumerate() {
+        let disk = meta.disks.get_mut(id).unwrap();
+        disk.tier = match index {
+            0 => StorageTier::Hot,
+            1 | 2 => StorageTier::Cold,
+            _ => StorageTier::Warm,
+        };
+        disk.numa_node = Some(index as i32);
+        disk.weight = if index == 0 { 0.0 } else { 1.0 };
+        disk.capacity_source = CapacitySource::AutoProbe;
+        disk.backing_fs_id = Some(if index < 2 { "shared" } else { "other" }.to_string());
+        disk.capacity_bytes = 100;
+        disk.used_bytes = 10;
+        disk.failure_domain = if index < 2 { "same" } else { "other" }.to_string();
+    }
+    let hot = fs
+        .choose_disks_locked(
+            &meta,
+            PlacementRequest {
+                key: "hot",
+                count: 2,
+                storage_class: StorageTier::Hot,
+                boot_critical: true,
+                exclude_disks: &BTreeSet::new(),
+                required_bytes: 40,
+            },
+        )
+        .unwrap();
+    assert_eq!(hot.len(), 2);
+    let _bulk = bulk_import_scope(true);
+    let cold = fs
+        .choose_disks_locked(
+            &meta,
+            PlacementRequest {
+                key: "cold",
+                count: 2,
+                storage_class: StorageTier::Cold,
+                boot_critical: false,
+                exclude_disks: &BTreeSet::new(),
+                required_bytes: 40,
+            },
+        )
+        .unwrap();
+    assert_eq!(cold.len(), 2);
+}
