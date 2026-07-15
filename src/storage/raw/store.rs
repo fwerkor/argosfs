@@ -514,23 +514,34 @@ fn append_journal(
     entry.extend_from_slice(&record_hash_bytes);
     entry.extend_from_slice(&record_bytes);
 
+    let mut append_positions = Vec::with_capacity(superblocks.len());
+    let mut rollover = false;
+    for sb in superblocks {
+        let mut header = vec![0u8; RAW_HEADER_SIZE];
+        backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
+        if &header[..16] != JOURNAL_MAGIC {
+            initialize_journal_region(backend, &sb.disk_id, sb)?;
+            backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
+        }
+        let write_offset = get_u64(&header, 24)?;
+        let end = write_offset.checked_add(entry.len() as u64);
+        if write_offset < RAW_HEADER_SIZE as u64 || end.is_none_or(|end| end > sb.journal.length) {
+            rollover = true;
+        }
+        append_positions.push((header, write_offset, end.unwrap_or_default()));
+    }
+    if rollover {
+        for sb in superblocks {
+            checkpoint_and_reset_journal(backend, sb, metadata)?;
+        }
+        return Ok(());
+    }
+
     let mut rollback_headers: Vec<(String, u64, Vec<u8>)> = Vec::new();
     let result = (|| -> Result<()> {
-        for (index, sb) in superblocks.iter().enumerate() {
-            let mut header = vec![0u8; RAW_HEADER_SIZE];
-            backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
-            if &header[..16] != JOURNAL_MAGIC {
-                initialize_journal_region(backend, &sb.disk_id, sb)?;
-                backend.read_at(&sb.disk_id, sb.journal.offset, &mut header)?;
-            }
-            let write_offset = get_u64(&header, 24)?;
-            let end = write_offset
-                .checked_add(entry.len() as u64)
-                .ok_or_else(|| ArgosError::Invalid("journal append overflow".to_string()))?;
-            if end > sb.journal.length {
-                checkpoint_and_reset_journal(backend, sb, metadata)?;
-                continue;
-            }
+        for (index, (sb, (mut header, write_offset, end))) in
+            superblocks.iter().zip(append_positions).enumerate()
+        {
             rollback_headers.push((sb.disk_id.clone(), sb.journal.offset, header.clone()));
             backend.write_at(&sb.disk_id, sb.journal.offset + write_offset, &entry)?;
             put_u64(&mut header, 24, end);

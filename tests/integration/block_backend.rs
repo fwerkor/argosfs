@@ -640,6 +640,77 @@ fn raw_journal_member_reports_quorum_across_devices() {
 }
 
 #[test]
+fn raw_journal_rollover_keeps_one_quorum_across_mixed_members() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 4);
+    let fs = ArgosFs::create_loop(
+        &images,
+        config(3, 1),
+        32 * 1024 * 1024,
+        "mixed-rollover",
+        false,
+    )
+    .unwrap();
+    fs.write_file("/before", b"committed", 0o644).unwrap();
+    fs.sync().unwrap();
+    let mut next = fs.metadata_snapshot();
+    drop(fs);
+
+    let superblocks = images
+        .iter()
+        .map(|path| {
+            argosfs::raw_store::inspect_device(BackendKind::LoopBlock, path.clone())
+                .unwrap()
+                .0
+        })
+        .collect::<Vec<_>>();
+    for (path, superblock) in images.iter().zip(&superblocks).take(2) {
+        let disk = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut header = [0u8; 4096];
+        disk.read_at(&mut header, superblock.journal.offset)
+            .unwrap();
+        header[24..32].copy_from_slice(&(superblock.journal.length - 1).to_le_bytes());
+        disk.write_at(&header, superblock.journal.offset).unwrap();
+        disk.sync_all().unwrap();
+    }
+
+    let previous_hash = next.integrity.meta_hash.clone();
+    next.txid += 1;
+    next.raw_pool.pool_name = "after-mixed-rollover".to_string();
+    journal::prepare_metadata_integrity_with_previous(&mut next, previous_hash).unwrap();
+    let devices = images
+        .iter()
+        .enumerate()
+        .map(|(index, path)| (format!("disk-{index:04}"), path.clone()))
+        .collect::<Vec<_>>();
+    let backend = FileBlockBackend::open_with_ids(BackendKind::LoopBlock, devices, true).unwrap();
+    argosfs::raw_store::append_transaction(
+        &backend,
+        &superblocks,
+        &next,
+        "mixed-rollover",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    drop(backend);
+
+    let reopened = ArgosFs::open_loop(&images, false).unwrap();
+    assert_eq!(reopened.metadata_snapshot().txid, next.txid);
+    assert_eq!(
+        reopened.metadata_snapshot().raw_pool.pool_name,
+        "after-mixed-rollover"
+    );
+    assert_eq!(
+        reopened.transaction_report().unwrap().raw_journal_quorum,
+        Some(true)
+    );
+}
+
+#[test]
 fn raw_journal_rollover_checkpoints_large_import_style_workloads() {
     let tmp = TempDir::new().unwrap();
     let images = loop_images(&tmp, 1);
