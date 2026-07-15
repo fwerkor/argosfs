@@ -239,3 +239,127 @@ fn redundancy_uses_config_when_no_blocks_exist() {
     .unwrap();
     assert_eq!(minimum_active_redundancy(&fs.metadata_snapshot()), 1);
 }
+
+fn create_switch_root_dirs(fs: &ArgosFs) {
+    for path in ["/dev", "/proc", "/sys", "/run"] {
+        if fs.attr_path(path, false).is_err() {
+            fs.mkdir(path, 0o755).unwrap();
+        }
+    }
+}
+
+#[test]
+fn preflight_report_covers_degraded_redundancy_and_unnecessary_modes() {
+    let dir = tempdir().unwrap();
+    let images = [
+        dir.path().join("disk0.img"),
+        dir.path().join("disk1.img"),
+        dir.path().join("disk2.img"),
+    ];
+    let fs = ArgosFs::create_loop(
+        &images,
+        VolumeConfig {
+            k: 1,
+            m: 1,
+            ..VolumeConfig::default()
+        },
+        32 * 1024 * 1024,
+        "rootfs-preflight",
+        false,
+    )
+    .unwrap();
+    create_switch_root_dirs(&fs);
+    let ids = fs
+        .metadata_snapshot()
+        .disks
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    fs.mark_disk(&ids[0], DiskStatus::Offline).unwrap();
+
+    let degraded_rw = preflight_report(&fs, RootMountMode::ReadWrite);
+    assert!(degraded_rw
+        .issues
+        .iter()
+        .any(|issue| issue.code == "degraded-rootfs-requires-explicit-mode"));
+    let degraded_ro = preflight_report(&fs, RootMountMode::DegradedReadOnly);
+    assert!(degraded_ro.degraded);
+    assert_eq!(degraded_ro.missing_devices, 1);
+    assert_eq!(degraded_ro.redundancy, 1);
+
+    fs.mark_disk(&ids[1], DiskStatus::Offline).unwrap();
+    let insufficient = preflight_report(&fs, RootMountMode::DegradedReadOnly);
+    assert!(insufficient
+        .issues
+        .iter()
+        .any(|issue| issue.code == "insufficient-redundancy"));
+
+    let fresh_dir = tempdir().unwrap();
+    let fresh_images = [
+        fresh_dir.path().join("disk0.img"),
+        fresh_dir.path().join("disk1.img"),
+    ];
+    let fresh = ArgosFs::create_loop(
+        &fresh_images,
+        VolumeConfig {
+            k: 1,
+            m: 1,
+            ..VolumeConfig::default()
+        },
+        32 * 1024 * 1024,
+        "rootfs-fresh",
+        false,
+    )
+    .unwrap();
+    create_switch_root_dirs(&fresh);
+    let unnecessary = preflight_report(&fresh, RootMountMode::DegradedReadWrite);
+    assert!(unnecessary
+        .issues
+        .iter()
+        .any(|issue| issue.code == "unnecessary-degraded-rw"));
+}
+
+#[test]
+fn preflight_report_classifies_invalid_journal_as_rw_error_and_ro_warning() {
+    let dir = tempdir().unwrap();
+    let fs = ArgosFs::create(
+        dir.path(),
+        VolumeConfig {
+            k: 1,
+            m: 0,
+            ..VolumeConfig::default()
+        },
+        1,
+        false,
+    )
+    .unwrap();
+    create_switch_root_dirs(&fs);
+    use std::io::Write as _;
+    let mut journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.path().join(".argosfs/journal.jsonl"))
+        .unwrap();
+    writeln!(journal, "not-json").unwrap();
+    journal.sync_all().unwrap();
+
+    let rw = preflight_report(&fs, RootMountMode::ReadWrite);
+    assert!(rw.invalid_journal_entries > 0);
+    assert!(rw
+        .issues
+        .iter()
+        .any(|issue| issue.code == "journal-replay-required"));
+    assert!(rw
+        .issues
+        .iter()
+        .any(|issue| issue.code == "transaction-errors-block-rw"));
+
+    let ro = preflight_report(&fs, RootMountMode::ReadOnly);
+    assert!(ro
+        .issues
+        .iter()
+        .any(|issue| issue.code == "journal-has-invalid-entries"));
+    assert!(ro
+        .issues
+        .iter()
+        .any(|issue| issue.code == "transaction-audit-warning"));
+}
