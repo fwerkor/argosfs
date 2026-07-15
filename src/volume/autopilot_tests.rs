@@ -318,3 +318,186 @@ fn state_loading_resets_corrupt_files_and_save_round_trips() {
     let (upgraded, _) = fs.load_autopilot_state();
     assert_eq!(upgraded.version, autopilot_state_version());
 }
+
+fn autopilot_host_volume(disks: usize) -> (tempfile::TempDir, ArgosFs) {
+    let dir = tempdir().unwrap();
+    let fs = ArgosFs::create(
+        dir.path(),
+        VolumeConfig {
+            k: 1,
+            m: 0,
+            ..VolumeConfig::default()
+        },
+        disks,
+        false,
+    )
+    .unwrap();
+    (dir, fs)
+}
+
+#[test]
+fn public_autopilot_wrappers_run_and_reject_invalid_policies() {
+    let (_dir, fs) = autopilot_host_volume(2);
+    let once = fs.autopilot_once().unwrap();
+    assert!(once["actions"].is_array());
+    let policy_once = fs
+        .autopilot_once_with_policy(AutopilotPolicy {
+            mode: AutopilotMode::Observe,
+            ..AutopilotPolicy::default()
+        })
+        .unwrap();
+    assert!(policy_once["planner"]["background_io"]["throttle_decisions"].is_array());
+
+    let config = AutopilotConfig {
+        probe_interval_sec: u64::MAX,
+        smart_interval_sec: u64::MAX,
+        scrub_interval_sec: u64::MAX,
+        rebalance_interval_sec: u64::MAX,
+        ..AutopilotConfig::default()
+    };
+    assert!(fs.autopilot_once_with_config(config.clone()).is_ok());
+    assert!(fs.autopilot_dry_run().unwrap()["decisions"].is_array());
+    assert!(fs
+        .autopilot_dry_run_with_policy(AutopilotPolicy::default())
+        .unwrap()["decisions"]
+        .is_array());
+    assert!(fs.autopilot_dry_run_with_config(config).unwrap()["decisions"].is_array());
+
+    let invalid = AutopilotPolicy {
+        background_io: crate::autopilot::BackgroundIoPolicy {
+            target_foreground_p99_ms: 0.0,
+            ..Default::default()
+        },
+        ..AutopilotPolicy::default()
+    };
+    assert!(fs.autopilot_once_with_policy(invalid.clone()).is_err());
+    assert!(fs.autopilot_dry_run_with_policy(invalid).is_err());
+}
+
+#[test]
+fn autopilot_resets_corrupt_state_and_records_probe_smart_and_paused_actions() {
+    let (dir, fs) = autopilot_host_volume(1);
+    std::fs::write(dir.path().join(".argosfs/autopilot-state.json"), b"{").unwrap();
+    let config = AutopilotConfig {
+        probe_interval_sec: 1,
+        smart_interval_sec: 1,
+        scrub_interval_sec: 1,
+        rebalance_interval_sec: 1,
+        max_drains_per_run: 0,
+        scrub_files_per_run: 0,
+        rebalance_files_per_run: 0,
+        rebalance_min_skew: 0.0,
+        ..AutopilotConfig::default()
+    };
+    let result = fs
+        .autopilot_once_with_config_and_policy(
+            config,
+            AutopilotPolicy {
+                mode: AutopilotMode::Observe,
+                ..AutopilotPolicy::default()
+            },
+        )
+        .unwrap();
+    let actions = result["actions"].as_array().unwrap();
+    assert!(actions
+        .iter()
+        .any(|action| action["action"] == "autopilot-state-reset"));
+    assert!(actions
+        .iter()
+        .any(|action| { action["action"] == "probe" || action["action"] == "probe-skipped" }));
+    assert!(actions.iter().any(|action| {
+        action["action"] == "smart-refresh" || action["action"] == "smart-refresh-skipped"
+    }));
+    assert!(actions
+        .iter()
+        .any(|action| action["action"] == "background-io-paused"));
+    assert!(actions
+        .iter()
+        .any(|action| action["action"] == "scrub-paused"));
+    assert!(actions
+        .iter()
+        .any(|action| action["action"] == "rebalance-paused"));
+    assert!(actions
+        .iter()
+        .any(|action| action["action"] == "verify-actions"));
+}
+
+#[test]
+fn dry_run_explains_budget_redundancy_cooldown_and_low_risk_rejections() {
+    let (dir, fs) = autopilot_host_volume(2);
+    let ids = fs
+        .metadata_snapshot()
+        .disks
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    fs.set_disk_health(
+        &ids[0],
+        HealthCounters {
+            reallocated_sectors: 500,
+            pending_sectors: 10,
+            io_errors: 50,
+            ..HealthCounters::default()
+        },
+    )
+    .unwrap();
+
+    let observe = fs
+        .autopilot_dry_run_with_policy(AutopilotPolicy {
+            mode: AutopilotMode::Observe,
+            ..AutopilotPolicy::default()
+        })
+        .unwrap();
+    assert!(observe["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| {
+            decision["rejected_actions"]
+                .as_array()
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item["reason"]
+                            .as_str()
+                            .is_some_and(|reason| reason.contains("observe"))
+                    })
+                })
+        }));
+
+    let mut state = AutopilotState::default();
+    state.disks.insert(
+        ids[0].clone(),
+        AutopilotDiskState {
+            risk_streak: 10,
+            next_action_after: now_f64() + 3600.0,
+            ..AutopilotDiskState::default()
+        },
+    );
+    fs.save_autopilot_state(&state).unwrap();
+    let cooldown = fs.autopilot_dry_run().unwrap();
+    assert!(cooldown["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| {
+            decision["rejected_actions"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["reason"] == "cooldown"))
+        }));
+
+    std::fs::remove_file(dir.path().join(".argosfs/autopilot-state.json")).unwrap();
+    let low_risk = fs.autopilot_dry_run().unwrap();
+    assert!(low_risk["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|decision| {
+            decision["rejected_actions"]
+                .as_array()
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item["reason"] == "risk below threshold")
+                })
+        }));
+}
