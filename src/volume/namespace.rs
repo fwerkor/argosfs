@@ -303,6 +303,11 @@ impl ArgosFs {
                 "unsupported fallocate mode {mode:#x}"
             )));
         }
+        if length == 0 {
+            return Err(ArgosError::Invalid(
+                "fallocate length must be positive".to_string(),
+            ));
+        }
         let end = offset
             .checked_add(length)
             .ok_or_else(|| ArgosError::Invalid("fallocate range overflow".to_string()))?;

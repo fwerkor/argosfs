@@ -279,6 +279,11 @@ fn fallocate_extends_regular_file_with_zeroes() {
             .errno(),
         libc::ENOTSUP
     );
+    assert_eq!(
+        fs.fallocate_inode(ino, 64, 0, 0).unwrap_err().errno(),
+        libc::EINVAL
+    );
+    assert_eq!(fs.attr_inode(ino).unwrap().size, 14);
 }
 
 #[test]
