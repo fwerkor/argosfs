@@ -25,9 +25,8 @@ echo ARGOSFS_QEMU_REBOOT_PHASE1_BEGIN
 awk '$2=="/"{print "ARGOSFS_ROOT_MOUNT_PHASE1 " $1 " " $3 " " $4; exit}' /proc/mounts
 test -e /run/argosfs-root-active && echo ARGOSFS_REBOOT_ROOT_MARKER_PHASE1_OK
 mkdir -p /root/argosfs-reboot-ci
-printf 'reboot persistent payload\n' >/root/argosfs-reboot-ci/persistent.txt
-sha256sum /root/argosfs-reboot-ci/persistent.txt >/root/argosfs-reboot-ci/persistent.sha256
-sync
+printf 'reboot persistent payload\n' | dd of=/root/argosfs-reboot-ci/persistent.txt conv=fsync 2>/dev/null
+sha256sum /root/argosfs-reboot-ci/persistent.txt | dd of=/root/argosfs-reboot-ci/persistent.sha256 conv=fsync 2>/dev/null
 echo ARGOSFS_REBOOT_REQUESTED
 reboot -f
 CMDS
@@ -40,7 +39,7 @@ cd /root/argosfs-reboot-ci
 sha256sum -c persistent.sha256
 grep -q 'reboot persistent payload' persistent.txt
 echo ARGOSFS_REBOOT_PERSISTENCE_OK
-sync
+dd if=/dev/null of=persistent.txt count=0 conv=notrunc,fsync 2>/dev/null
 echo ARGOSFS_QEMU_REBOOT_DONE
 poweroff -f || reboot -f || halt -f
 CMDS
@@ -89,15 +88,35 @@ exec 3>"$stdin_fifo"
 wait_status=0
 wait_for_log_count 'Please press Enter to activate this console\.' 1 "$login_delay_s" 'first login prompt' || wait_status=$?
 if [ "$wait_status" -eq 0 ]; then
-	send_command_file "$commands1" /tmp/argosfs-qemu-reboot-phase1.sh
-	wait_for_log_count 'ARGOSFS_REBOOT_REQUESTED' 1 60 'phase1 reboot request' || wait_status=$?
+	send_command_file "$commands1" /tmp/argosfs-qemu-reboot-phase1.sh || wait_status=$?
+fi
+if [ "$wait_status" -eq 0 ]; then
+	deadline=$((SECONDS + 120))
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		if [ "$(argosfs_qemu_log_marker_count "$log" ARGOSFS_REBOOT_REQUESTED)" -ge 1 ]; then break; fi
+		sleep 1
+	done
+	if [ "$(argosfs_qemu_log_marker_count "$log" ARGOSFS_REBOOT_REQUESTED)" -lt 1 ]; then
+		echo "timed out waiting for phase1 reboot request in $log" >&2
+		wait_status=1
+	fi
 fi
 if [ "$wait_status" -eq 0 ]; then
 	wait_for_log_count 'Please press Enter to activate this console\.' 2 "$reboot_delay_s" 'second login prompt' || wait_status=$?
 fi
 if [ "$wait_status" -eq 0 ]; then
-	send_command_file "$commands2" /tmp/argosfs-qemu-reboot-phase2.sh
-	wait_for_log_count "$done_marker" 1 120 'reboot persistence completion' || wait_status=$?
+	send_command_file "$commands2" /tmp/argosfs-qemu-reboot-phase2.sh || wait_status=$?
+fi
+if [ "$wait_status" -eq 0 ]; then
+	deadline=$((SECONDS + 180))
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		if [ "$(argosfs_qemu_log_marker_count "$log" "$done_marker")" -ge 1 ]; then break; fi
+		sleep 1
+	done
+	if [ "$(argosfs_qemu_log_marker_count "$log" "$done_marker")" -lt 1 ]; then
+		echo "timed out waiting for reboot persistence completion in $log" >&2
+		wait_status=1
+	fi
 fi
 exec 3>&-
 if [ "$wait_status" -eq 0 ]; then
@@ -134,14 +153,14 @@ for marker in \
 	ARGOSFS_REBOOT_ROOT_MARKER_PHASE2_OK \
 	ARGOSFS_REBOOT_PERSISTENCE_OK \
 	"$done_marker"; do
-	if ! grep -Fq "$marker" "$log"; then
+	if ! argosfs_qemu_log_has_marker "$log" "$marker"; then
 		missing+=("$marker")
 	fi
 done
-if ! grep -Eq 'ARGOSFS_ROOT_MOUNT_PHASE1 .* fuse' "$log"; then
+if ! argosfs_qemu_log_has_root_mount "$log" ARGOSFS_ROOT_MOUNT_PHASE1; then
 	missing+=("ARGOSFS_ROOT_MOUNT_PHASE1 fuse")
 fi
-if ! grep -Eq 'ARGOSFS_ROOT_MOUNT_PHASE2 .* fuse' "$log"; then
+if ! argosfs_qemu_log_has_root_mount "$log" ARGOSFS_ROOT_MOUNT_PHASE2; then
 	missing+=("ARGOSFS_ROOT_MOUNT_PHASE2 fuse")
 fi
 if [ "${#missing[@]}" -eq 0 ]; then

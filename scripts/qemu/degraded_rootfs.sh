@@ -14,9 +14,7 @@ log="$artifacts/qemu-degraded-rootfs-$arch.log"
 commands="$artifacts/qemu-degraded-rootfs.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault|I/O error}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-1200}"
-login_delay_s="${ARGOSFS_QEMU_DEGRADED_LOGIN_DELAY:-140}"
-login_delay_s="$(argosfs_qemu_adjust_login_delay "$login_delay_s")"
-command_delay_s="${ARGOSFS_QEMU_DEGRADED_COMMAND_DELAY:-1}"
+console_timeout_s="${ARGOSFS_QEMU_DEGRADED_CONSOLE_TIMEOUT:-600}"
 done_marker="ARGOSFS_QEMU_DEGRADED_ROOTFS_DONE"
 
 disks=()
@@ -81,34 +79,39 @@ qemu_device_add() {
   local idx="$1" path="$2"
   local bus_arg rom_arg
   argosfs_qemu_monitor_command "$monitor" \
-    "drive_add 0 if=none,file=$path,format=raw,id=deg$idx" "$monitor_log"
+    "drive_add 0 if=none,file=$path,format=raw,id=deg$idx" "$monitor_log" || return
   bus_arg="$(argosfs_qemu_hotplug_bus_arg deg "$idx")"
   rom_arg=""
   [ "$arch" != "arm64" ] || rom_arg=",romfile="
   argosfs_qemu_monitor_command "$monitor" \
-    "device_add virtio-blk-pci,drive=deg$idx,id=degdisk$idx${bus_arg}${rom_arg}" "$monitor_log"
+    "device_add virtio-blk-pci,drive=deg$idx,id=degdisk$idx${bus_arg}${rom_arg}" "$monitor_log" || return
 }
 
 set +e
 # QEMU output is intentionally polled while this pipeline appends to the log.
 # shellcheck disable=SC2094
 (
-  sleep "$login_delay_s"
-  printf '\r'
-  sleep "$command_delay_s"
-  while IFS= read -r line; do
-    printf '%s\r' "$line"
-    sleep "$command_delay_s"
-    if [ "$line" = "echo ARGOSFS_WAIT_DEGRADED_HOTPLUG" ]; then
-      argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_DEGRADED_HOTPLUG 180
-      for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
-      idx=0
-      for disk in "${disks[@]}"; do qemu_device_add "$idx" "$disk"; idx=$((idx + 1)); done
-    fi
-  done <"$commands"
+  set -e
+  argosfs_qemu_wait_console_prompt "$log" 1 "$console_timeout_s" "$reject" "degraded-rootfs console prompt"
+  argosfs_qemu_stream_script "$commands" 1 /tmp/argosfs-qemu-degraded-rootfs.sh "$log"
+  argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_DEGRADED_HOTPLUG 300
+  argosfs_qemu_wait_monitor "$monitor" 60
+  idx=0
+  for disk in "${disks[@]}"; do
+    qemu_device_add "$idx" "$disk"
+    idx=$((idx + 1))
+  done
 ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log" 2>&1
-status=${PIPESTATUS[1]}
+pipeline_status=("${PIPESTATUS[@]}")
+feeder_status="${pipeline_status[0]}"
+status="${pipeline_status[1]}"
 set -e
+
+if [ "$feeder_status" -ne 0 ]; then
+  echo "QEMU degraded rootfs feeder failed; status=$feeder_status" >&2
+  tail -n 460 "$log" >&2 || true
+  exit 1
+fi
 
 if grep -Eiq "$reject" "$log"; then
   echo "QEMU degraded rootfs failed; qemu status=$status; rejected pattern: $reject" >&2
@@ -117,9 +120,9 @@ if grep -Eiq "$reject" "$log"; then
 fi
 missing=()
 for marker in ARGOSFS_QEMU_DEGRADED_ROOTFS_BEGIN ARGOSFS_ROOT_MARKER_OK ARGOSFS_DEGRADED_RW_REJECTED_OK ARGOSFS_DEGRADED_ROOT_MOUNT_OK "$done_marker"; do
-  grep -Fq "$marker" "$log" || missing+=("$marker")
+  argosfs_qemu_log_has_marker "$log" "$marker" || missing+=("$marker")
 done
-grep -Eq 'ARGOSFS_ROOT_MOUNT .* fuse' "$log" || missing+=("ARGOSFS_ROOT_MOUNT fuse")
+argosfs_qemu_log_has_root_mount "$log" || missing+=("ARGOSFS_ROOT_MOUNT fuse")
 if [ "${#missing[@]}" -eq 0 ]; then
   echo "QEMU degraded rootfs test passed for $arch; artifacts=$artifacts"
   exit 0
