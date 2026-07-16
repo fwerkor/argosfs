@@ -49,7 +49,7 @@ echo ARGOSFS_CHAOS_BLOCK_DEVICES_OK
 src=/root/argosfs-chaos-source
 baseline=/tmp/argosfs-chaos-baseline
 rm -rf "\$src" "\$baseline"
-mkdir -p "\$src/data" "\$baseline"
+mkdir -p "\$src/data" "\$src/dev" "\$src/proc" "\$src/run" "\$src/sys" "\$baseline"
 i=0
 while [ "\$i" -lt "$file_count" ]; do
   printf 'chaos metadata file=%s generation=0\n' "\$i" >"\$src/data/meta-\$i.txt"
