@@ -1,15 +1,9 @@
 use super::*;
-use std::sync::{Mutex, OnceLock};
 use tempfile::NamedTempFile;
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-}
 
 #[test]
 fn passphrase_prefers_key_file_and_trims_only_line_endings() {
-    let _guard = env_lock();
+    let _guard = test_env_lock();
     let mut file = NamedTempFile::new().unwrap();
     std::io::Write::write_all(&mut file, b" file key  \r\n").unwrap();
     std::env::set_var("ARGOSFS_KEY", "environment key");

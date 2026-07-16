@@ -6,6 +6,14 @@ use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use sha2::{Digest, Sha256};
 use std::fs;
 
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
 pub const NONCE_LEN: usize = 24;
 pub const SALT_LEN: usize = 16;
 

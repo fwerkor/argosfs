@@ -67,9 +67,20 @@ fn proc_status_group_parser_reads_supplementary_groups() {
 }
 
 #[test]
-fn missing_xattr_maps_to_enodata() {
+fn missing_xattr_maps_to_enodata_and_reports_absent() {
     let err = ArgosError::NotFound("xattr security.selinux".to_string());
     assert_eq!(xattr_errno(&err).code(), Errno::NO_XATTR.code());
+    assert!(!xattr_exists(Err(err)).unwrap());
+}
+
+#[test]
+fn missing_inode_keeps_enoent_for_xattr_operations() {
+    let err = ArgosError::NotFound("inode 42".to_string());
+    assert_eq!(xattr_errno(&err).code(), Errno::ENOENT.code());
+    assert!(matches!(
+        xattr_exists(Err(err)),
+        Err(ArgosError::NotFound(_))
+    ));
 }
 
 #[test]

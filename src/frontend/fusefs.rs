@@ -1161,7 +1161,7 @@ impl Filesystem for ArgosFuse {
 
             let name = xattr_name(name)?;
             self.require_xattr_write_access(req, ino, name)?;
-            let exists = self.volume.getxattr_inode(ino.0, name).is_ok();
+            let exists = xattr_exists(self.volume.getxattr_inode(ino.0, name))?;
 
             if flags & libc::XATTR_CREATE != 0 && exists {
                 return Err(ArgosError::AlreadyExists(format!("xattr {name}")));
@@ -1534,11 +1534,24 @@ fn errno(err: &ArgosError) -> Errno {
     Errno::from_i32(err.errno())
 }
 
-fn xattr_errno(err: &ArgosError) -> Errno {
-    match err {
-        ArgosError::NotFound(_) => Errno::NO_XATTR,
-        _ => errno(err),
+fn xattr_exists(result: Result<Vec<u8>>) -> Result<bool> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(err) if is_missing_xattr(&err) => Ok(false),
+        Err(err) => Err(err),
     }
+}
+
+fn xattr_errno(err: &ArgosError) -> Errno {
+    if is_missing_xattr(err) {
+        Errno::NO_XATTR
+    } else {
+        errno(err)
+    }
+}
+
+fn is_missing_xattr(err: &ArgosError) -> bool {
+    matches!(err, ArgosError::NotFound(resource) if resource.starts_with("xattr "))
 }
 
 fn file_type_from_attr(attr: &NodeAttr) -> FileType {

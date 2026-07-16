@@ -465,6 +465,7 @@ fn erasure_decode_tolerates_one_missing_shard_and_records_all_damage_classes() {
 
 #[test]
 fn encrypted_blocks_require_a_valid_nonce_key_and_authenticated_payload() {
+    let _env_guard = crypto::test_env_lock();
     let (_dir, fs) = host_volume(1);
     std::env::set_var("ARGOSFS_KEY", "coverage-secret");
     fs.enable_encryption("coverage-secret").unwrap();
