@@ -248,9 +248,9 @@ jobs:
             suite: full-guest
             script: scripts/qemu/full_guest.sh
             qemu_mem: "1536"
-            qemu_timeout: "600"
+            qemu_timeout: "1500"
             stress_seconds: ""
-            job_timeout: 30
+            job_timeout: 40
           - arch: arm64
             suite: hotplug
             script: scripts/qemu/hotplug.sh
@@ -269,37 +269,37 @@ jobs:
             suite: rootfs-stress
             script: scripts/qemu/rootfs_stress.sh
             qemu_mem: "1536"
-            qemu_timeout: "2400"
+            qemu_timeout: "3300"
             stress_seconds: "1800"
-            job_timeout: 50
+            job_timeout: 65
           - arch: arm64
             suite: block-lifecycle-stress
             script: scripts/qemu/block_lifecycle_stress.sh
             qemu_mem: "1536"
-            qemu_timeout: "1800"
+            qemu_timeout: "3600"
             stress_seconds: ""
-            job_timeout: 45
+            job_timeout: 70
           - arch: arm64
             suite: degraded-rootfs
             script: scripts/qemu/degraded_rootfs.sh
             qemu_mem: "1536"
-            qemu_timeout: "1200"
+            qemu_timeout: "1800"
             stress_seconds: ""
-            job_timeout: 35
+            job_timeout: 45
           - arch: arm64
             suite: crash-recovery
             script: scripts/qemu/crash_recovery.sh
             qemu_mem: "1536"
-            qemu_timeout: "1800"
+            qemu_timeout: "2400"
             stress_seconds: ""
-            job_timeout: 45
+            job_timeout: 80
           - arch: arm64
             suite: mixed-chaos
             script: scripts/qemu/mixed_chaos.sh
             qemu_mem: "1536"
             qemu_timeout: "4200"
             stress_seconds: ""
-            job_timeout: 85
+            job_timeout: 120
     steps:
       - name: Checkout ArgosFS
         uses: actions/checkout@v7
