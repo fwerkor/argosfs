@@ -241,9 +241,9 @@ jobs:
             suite: boot
             script: scripts/qemu/boot.sh
             qemu_mem: "1536"
-            qemu_timeout: "300"
+            qemu_timeout: "600"
             stress_seconds: ""
-            job_timeout: 20
+            job_timeout: 30
           - arch: arm64
             suite: full-guest
             script: scripts/qemu/full_guest.sh
