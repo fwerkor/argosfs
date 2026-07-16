@@ -288,6 +288,9 @@ jobs:
       - name: Check QEMU scripts
         run: find scripts/qemu -name '*.sh' -print0 | xargs -0 bash -n
 
+      - name: Test QEMU helper synchronization
+        run: scripts/tests/host/qemu_helper_logic.sh
+
       - name: Probe QEMU binary
         env:
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
