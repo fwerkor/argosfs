@@ -70,6 +70,7 @@ jobs:
         run: |
           sudo modprobe fuse 2>/dev/null || true
           sudo modprobe loop 2>/dev/null || true
+          sudo sh -c 'grep -qxF user_allow_other /etc/fuse.conf 2>/dev/null || printf "%s\n" user_allow_other >>/etc/fuse.conf'
           if [ -e /dev/fuse ]; then sudo chmod 0666 /dev/fuse; fi
           test -e /dev/fuse
           test -e /dev/loop-control
