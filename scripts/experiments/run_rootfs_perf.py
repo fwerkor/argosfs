@@ -17,6 +17,9 @@ from typing import Any, Callable
 from common import REPO, binary, seed
 
 
+CURRENT_ITERATION = 1
+
+
 def run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=REPO, text=True, capture_output=True, check=check)
 
@@ -25,8 +28,16 @@ def command(name: str) -> str | None:
     return shutil.which(name)
 
 
+def privileged(cmd: list[str]) -> list[str]:
+    if os.geteuid() == 0:
+        return cmd
+    sudo = command("sudo")
+    return [sudo, *cmd] if sudo else cmd
+
+
 def emit(out: Path, record: dict[str, Any]) -> None:
     record.setdefault("seed", seed())
+    record.setdefault("iteration", CURRENT_ITERATION)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
@@ -44,10 +55,14 @@ def skip(out: Path, mode: str, scenario: str, reason: str) -> None:
     )
 
 
-def wait_for_mount(mountpoint: Path, proc: subprocess.Popen[str], attempts: int = 100) -> None:
+def wait_for_mount(
+    mountpoint: Path, proc: subprocess.Popen[str], attempts: int = 100
+) -> None:
     for _ in range(attempts):
         if proc.poll() is not None:
-            raise RuntimeError(f"mount process exited early with status {proc.returncode}")
+            raise RuntimeError(
+                f"mount process exited early with status {proc.returncode}"
+            )
         if subprocess.run(["mountpoint", "-q", str(mountpoint)]).returncode == 0:
             return
         time.sleep(0.1)
@@ -55,15 +70,22 @@ def wait_for_mount(mountpoint: Path, proc: subprocess.Popen[str], attempts: int 
 
 
 def unmount(mountpoint: Path) -> None:
-    for cmd in (["fusermount3", "-u", str(mountpoint)], ["umount", str(mountpoint)]):
+    for cmd in (
+        ["fusermount3", "-u", str(mountpoint)],
+        privileged(["umount", str(mountpoint)]),
+    ):
         if command(cmd[0]) and subprocess.run(cmd, capture_output=True).returncode == 0:
             return
 
 
 def remove_path(path: Path) -> None:
-    if command("mountpoint") and subprocess.run(
-        ["mountpoint", "-q", str(path)], capture_output=True
-    ).returncode == 0:
+    if (
+        command("mountpoint")
+        and subprocess.run(
+            ["mountpoint", "-q", str(path)], capture_output=True
+        ).returncode
+        == 0
+    ):
         unmount(path)
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
@@ -127,13 +149,17 @@ def workload(root: Path, *, file_mib: int, small_files: int) -> dict[str, Any]:
         "large_read_mib_s": file_mib / read_sec if read_sec else 0.0,
         "small_files": small_files,
         "small_create_sec": small_create_sec,
-        "small_create_files_s": small_files / small_create_sec if small_create_sec else 0.0,
+        "small_create_files_s": small_files / small_create_sec
+        if small_create_sec
+        else 0.0,
         "small_stat_sec": stat_sec,
         "small_stat_files_s": small_files / stat_sec if stat_sec else 0.0,
     }
 
 
-def run_host_directory(out: Path, mode: str, work: Path, file_mib: int, small_files: int) -> None:
+def run_host_directory(
+    out: Path, mode: str, work: Path, file_mib: int, small_files: int
+) -> None:
     root = work / "host-directory"
     remove_path(root)
     started = time.perf_counter()
@@ -150,7 +176,9 @@ def run_host_directory(out: Path, mode: str, work: Path, file_mib: int, small_fi
     emit(out, metrics)
 
 
-def run_argosfs_loop(out: Path, mode: str, work: Path, file_mib: int, small_files: int) -> None:
+def run_argosfs_loop(
+    out: Path, mode: str, work: Path, file_mib: int, small_files: int
+) -> None:
     run_argosfs_loop_variant(
         out, mode, work, file_mib, small_files, defer_flush=False, batch_metadata=False
     )
@@ -185,7 +213,9 @@ def run_argosfs_loop_variant(
     if batch_metadata:
         scenario = "argosfs-loop-fuse-batched"
     else:
-        scenario = "argosfs-loop-fuse-deferred" if defer_flush else "argosfs-loop-fuse-strict"
+        scenario = (
+            "argosfs-loop-fuse-deferred" if defer_flush else "argosfs-loop-fuse-strict"
+        )
     if not Path("/dev/fuse").exists():
         skip(out, mode, scenario, "/dev/fuse unavailable")
         return
@@ -271,7 +301,9 @@ def run_argosfs_loop_variant(
         )
         emit(out, metrics)
     except Exception as err:
-        stdout, stderr = proc.communicate(timeout=2) if proc.poll() is not None else ("", "")
+        stdout, stderr = (
+            proc.communicate(timeout=2) if proc.poll() is not None else ("", "")
+        )
         emit(
             out,
             {
@@ -294,8 +326,14 @@ def run_argosfs_loop_variant(
                 proc.kill()
 
 
-def run_ext4_loop(out: Path, mode: str, work: Path, file_mib: int, small_files: int) -> None:
-    missing = [name for name in ("mkfs.ext4", "mount", "umount", "mountpoint") if not command(name)]
+def run_ext4_loop(
+    out: Path, mode: str, work: Path, file_mib: int, small_files: int
+) -> None:
+    missing = [
+        name
+        for name in ("mkfs.ext4", "mount", "umount", "mountpoint")
+        if not command(name)
+    ]
     if missing:
         skip(out, mode, "ext4-loop", f"missing commands: {','.join(missing)}")
         return
@@ -310,9 +348,22 @@ def run_ext4_loop(out: Path, mode: str, work: Path, file_mib: int, small_files: 
     if mkfs.returncode != 0:
         skip(out, mode, "ext4-loop", f"mkfs.ext4 failed: {mkfs.stderr.strip()}")
         return
-    mount = run(["mount", "-o", "loop", str(image), str(mountpoint)], check=False)
+    mount = run(
+        privileged(["mount", "-o", "loop", str(image), str(mountpoint)]), check=False
+    )
     if mount.returncode != 0:
         skip(out, mode, "ext4-loop", f"mount -o loop failed: {mount.stderr.strip()}")
+        return
+    owner = f"{os.getuid()}:{os.getgid()}"
+    chown = run(privileged(["chown", owner, str(mountpoint)]), check=False)
+    if chown.returncode != 0:
+        subprocess.run(privileged(["umount", str(mountpoint)]), capture_output=True)
+        skip(
+            out,
+            mode,
+            "ext4-loop",
+            f"failed to transfer mountpoint ownership: {chown.stderr.strip()}",
+        )
         return
     started = time.perf_counter()
     try:
@@ -328,21 +379,34 @@ def run_ext4_loop(out: Path, mode: str, work: Path, file_mib: int, small_files: 
         )
         emit(out, metrics)
     finally:
-        subprocess.run(["umount", str(mountpoint)], capture_output=True)
+        subprocess.run(privileged(["umount", str(mountpoint)]), capture_output=True)
 
 
 def main() -> int:
+    global CURRENT_ITERATION
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["quick", "full"], default="quick")
-    parser.add_argument("--output", type=Path, default=Path("target/argosfs-artifacts/raw/rootfs-perf.jsonl"))
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("target/argosfs-artifacts/raw/rootfs-perf.jsonl"),
+    )
     parser.add_argument("--workdir", type=Path)
     parser.add_argument("--keep-workdir", action="store_true")
+    parser.add_argument("--iterations", type=int, default=1)
+    parser.add_argument(
+        "--require-all",
+        action="store_true",
+        help="fail if any requested scenario is skipped, fails, or is missing",
+    )
     parser.add_argument(
         "--scenarios",
         default="host-directory,argosfs-loop-strict,argosfs-loop-deferred,argosfs-loop-batched,ext4-loop",
         help="comma-separated scenarios to run",
     )
     args = parser.parse_args()
+    if args.iterations < 1:
+        parser.error("--iterations must be positive")
 
     file_mib = 128 if args.mode == "full" else 16
     small_files = 2048 if args.mode == "full" else 256
@@ -358,9 +422,14 @@ def main() -> int:
             "mode": args.mode,
             "scenario": "environment",
             "status": "info",
+            "iteration": 0,
             "platform": platform.platform(),
             "kernel": platform.release(),
             "python": sys.version.split()[0],
+            "cpu_count": os.cpu_count(),
+            "iterations": args.iterations,
+            "file_mib": file_mib,
+            "small_files": small_files,
         },
     )
 
@@ -372,11 +441,60 @@ def main() -> int:
         "ext4-loop": run_ext4_loop,
     }
     scenarios = [name.strip() for name in args.scenarios.split(",") if name.strip()]
+    if not scenarios:
+        parser.error("at least one scenario is required")
     unknown = [name for name in scenarios if name not in scenario_map]
     if unknown:
         parser.error(f"unknown scenario(s): {','.join(unknown)}")
-    for scenario in scenarios:
-        scenario_map[scenario](args.output, args.mode, work, file_mib, small_files)
+    result_scenarios = {
+        "argosfs-loop-strict": "argosfs-loop-fuse-strict",
+        "argosfs-loop-deferred": "argosfs-loop-fuse-deferred",
+        "argosfs-loop-batched": "argosfs-loop-fuse-batched",
+        "host-directory": "host-directory",
+        "ext4-loop": "ext4-loop",
+    }
+    for iteration in range(1, args.iterations + 1):
+        CURRENT_ITERATION = iteration
+        iteration_work = work / f"iteration-{iteration:02d}"
+        iteration_work.mkdir(parents=True, exist_ok=True)
+        offset = (iteration - 1) % len(scenarios)
+        ordered_scenarios = scenarios[offset:] + scenarios[:offset]
+        for scenario in ordered_scenarios:
+            scenario_map[scenario](
+                args.output,
+                args.mode,
+                iteration_work,
+                file_mib,
+                small_files,
+            )
+
+    if args.require_all:
+        records = [
+            json.loads(line)
+            for line in args.output.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        observed = {
+            (record.get("iteration"), record.get("scenario")): record.get("status")
+            for record in records
+            if record.get("scenario") != "environment"
+        }
+        incomplete = []
+        for iteration in range(1, args.iterations + 1):
+            for scenario in scenarios:
+                result_scenario = result_scenarios[scenario]
+                status = observed.get((iteration, result_scenario), "missing")
+                if status != "passed":
+                    incomplete.append(
+                        f"iteration {iteration} {result_scenario}: {status}"
+                    )
+        if incomplete:
+            print("required performance scenarios did not all pass:", file=sys.stderr)
+            for item in incomplete:
+                print(f"- {item}", file=sys.stderr)
+            if not args.keep_workdir:
+                shutil.rmtree(work, ignore_errors=True)
+            return 1
     if not args.keep_workdir:
         shutil.rmtree(work, ignore_errors=True)
     return 0
