@@ -256,6 +256,24 @@ def run_argosfs_loop_variant(
         mkfs_cmd.append("--defer-metadata-commit")
         mkfs_cmd.append("--defer-data-flush")
     run(mkfs_cmd)
+
+    rootfs_seed = work / f"rootfs-seed-{suffix}"
+    remove_path(rootfs_seed)
+    for name in ("dev", "proc", "run", "sys"):
+        (rootfs_seed / name).mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            str(bin_path),
+            "import-tree",
+            "--backend",
+            "loop",
+            "--images",
+            str(image),
+            str(rootfs_seed),
+            "/",
+        ]
+    )
+
     proc = subprocess.Popen(
         [
             str(bin_path),
