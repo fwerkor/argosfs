@@ -61,7 +61,14 @@ def format_value(value: float) -> str:
 
 
 def format_ratio(value: float, baseline: float) -> str:
-    return f"{value / baseline:.2f}x" if baseline else "n/a"
+    if not baseline:
+        return "n/a"
+    ratio = value / baseline
+    if ratio < 0.01:
+        return f"{ratio:.4f}x"
+    if ratio < 0.1:
+        return f"{ratio:.3f}x"
+    return f"{ratio:.2f}x"
 
 
 def ordered_scenarios(scenarios: set[str]) -> list[str]:
