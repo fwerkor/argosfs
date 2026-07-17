@@ -321,10 +321,22 @@ impl BlockCache {
 }
 
 fn configured_l2_limit(default_limit: u64) -> u64 {
-    if std::env::var_os("ARGOSFS_DISABLE_L2_CACHE").is_some() {
+    resolve_l2_limit(
+        default_limit,
+        std::env::var_os("ARGOSFS_DISABLE_L2_CACHE"),
+        std::env::var_os("ARGOSFS_L2_CACHE_BYTES"),
+    )
+}
+
+fn resolve_l2_limit(
+    default_limit: u64,
+    disable_override: Option<std::ffi::OsString>,
+    size_override: Option<std::ffi::OsString>,
+) -> u64 {
+    if disable_override.is_some() {
         return 0;
     }
-    std::env::var_os("ARGOSFS_L2_CACHE_BYTES")
+    size_override
         .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
         .unwrap_or(default_limit)
 }

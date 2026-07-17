@@ -1,11 +1,5 @@
 use super::*;
-use std::sync::{Mutex as StdMutex, OnceLock};
 use tempfile::tempdir;
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap()
-}
 
 #[test]
 fn memory_cache_evicts_replaces_invalidates_and_reports_stats() {
@@ -88,17 +82,12 @@ fn l2_hits_promote_to_memory_and_remove_cleans_index() {
 }
 
 #[test]
-fn configured_l2_limit_honors_disable_override_and_invalid_values() {
-    let _guard = env_lock();
-    std::env::remove_var("ARGOSFS_DISABLE_L2_CACHE");
-    std::env::remove_var("ARGOSFS_L2_CACHE_BYTES");
-    assert_eq!(configured_l2_limit(123), 123);
-    std::env::set_var("ARGOSFS_L2_CACHE_BYTES", "456");
-    assert_eq!(configured_l2_limit(123), 456);
-    std::env::set_var("ARGOSFS_L2_CACHE_BYTES", "invalid");
-    assert_eq!(configured_l2_limit(123), 123);
-    std::env::set_var("ARGOSFS_DISABLE_L2_CACHE", "1");
-    assert_eq!(configured_l2_limit(123), 0);
-    std::env::remove_var("ARGOSFS_DISABLE_L2_CACHE");
-    std::env::remove_var("ARGOSFS_L2_CACHE_BYTES");
+fn l2_limit_resolution_honors_disable_override_and_invalid_values() {
+    assert_eq!(resolve_l2_limit(123, None, None), 123);
+    assert_eq!(resolve_l2_limit(123, None, Some("456".into())), 456);
+    assert_eq!(resolve_l2_limit(123, None, Some("invalid".into())), 123);
+    assert_eq!(
+        resolve_l2_limit(123, Some("1".into()), Some("456".into())),
+        0
+    );
 }
