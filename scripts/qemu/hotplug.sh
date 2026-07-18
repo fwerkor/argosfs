@@ -79,7 +79,10 @@ set +e
 	argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_UNPLUG 600
 	argosfs_qemu_monitor_command "$monitor" "device_del hotdisk0" "$monitor_log"
 	sleep 2
-	argosfs_qemu_monitor_command "$monitor" "drive_del hot0" "$monitor_log" "Device '[^']+' not found"
+	# The guest powers off immediately after observing the unplug. The monitor may
+	# therefore disappear before this optional backend cleanup reaches QEMU; the
+	# guest markers below remain the authoritative validation of the operation.
+	argosfs_qemu_monitor_command "$monitor" "drive_del hot0" "$monitor_log" "Device '[^']+' not found" || true
 ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log" 2>&1
 pipeline_status=("${PIPESTATUS[@]}")
 feeder_status="${pipeline_status[0]}"

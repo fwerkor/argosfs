@@ -422,7 +422,13 @@ impl ArgosFs {
                 .disks
                 .get_mut(disk_id)
                 .ok_or_else(|| ArgosError::NotFound(disk_id.to_string()))?;
-            disk.status = DiskStatus::Draining;
+            // Keep an already unavailable member unavailable while its shards are
+            // reconstructed onto the remaining devices. Marking an offline disk
+            // as draining makes raw metadata commits try to reopen its vanished
+            // path before the rewrite can start.
+            if matches!(disk.status, DiskStatus::Online | DiskStatus::Degraded) {
+                disk.status = DiskStatus::Draining;
+            }
             self.commit_locked(&mut meta, "drain-start", json!({"disk_id": disk_id}))?;
         }
         let targets = {
