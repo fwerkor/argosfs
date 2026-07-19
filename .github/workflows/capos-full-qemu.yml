@@ -269,6 +269,7 @@ jobs:
             script: scripts/qemu/mixed_chaos.sh
             qemu_mem: "1536"
             qemu_timeout: "3600"
+            chaos_workers: "6"
             stress_seconds: ""
             job_timeout: 75
           - arch: arm64
@@ -331,7 +332,8 @@ jobs:
             suite: mixed-chaos
             script: scripts/qemu/mixed_chaos.sh
             qemu_mem: "1536"
-            qemu_timeout: "4200"
+            qemu_timeout: "6000"
+            chaos_workers: "2"
             stress_seconds: ""
             job_timeout: 120
     steps:
@@ -360,6 +362,7 @@ jobs:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/qemu-test-${{ matrix.arch }}-${{ matrix.suite }}
           ARGOSFS_QEMU_MEM: ${{ matrix.qemu_mem }}
           ARGOSFS_QEMU_TIMEOUT: ${{ matrix.qemu_timeout }}
+          ARGOSFS_QEMU_CHAOS_WORKERS: ${{ matrix.chaos_workers }}
           ARGOSFS_QEMU_STRESS_SECONDS: ${{ matrix.stress_seconds }}
         run: ${{ matrix.script }}
 
