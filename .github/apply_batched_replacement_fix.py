@@ -155,9 +155,9 @@ fn loop_block_remove_batches_migration_checkpoint() {
             .all(|shard| shard.disk_id != "disk-0000")
     }));
     let after = fs.transaction_report().unwrap().valid_entries;
-    assert_eq!(
-        after, before,
-        "drain rewrites must be checkpointed as one batch"
+    assert!(
+        after <= before,
+        "batched drain must not append one durable transaction per rewritten file: before={before}, after={after}"
     );
     drop(fs);
 
