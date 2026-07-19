@@ -113,6 +113,9 @@ cmp "\$src/sentinel.txt" "\$degraded/sentinel.txt"
 cmp "\$src/data/meta-83.txt" "\$degraded/data/meta-83.txt"
 cmp "\$src/data/blob-149.bin" "\$degraded/data/blob-149.bin"
 echo ARGOSFS_CHAOS_DEGRADED_READ_OK
+: >"\$stop"
+wait
+echo ARGOSFS_CHAOS_WORKLOAD_STOPPED
 argosfs replace-device --backend raw --devices "\$survivors" --old disk-0001 --new /dev/vdg --force >/tmp/argosfs-chaos-replace.json
 repaired="\$survivors,/dev/vdg"
 argosfs fsck --backend raw --devices "\$repaired" --repair --remove-orphans >/tmp/argosfs-chaos-fsck.json
@@ -270,7 +273,7 @@ if ! run_phase1_until_kill_marker; then
   tail -n 600 "$log1" >&2 || true
   exit 1
 fi
-for marker in ARGOSFS_CHAOS_BASELINE_OK ARGOSFS_CHAOS_WORKLOAD_STARTED ARGOSFS_CHAOS_DEVICE_LOSS_OBSERVED ARGOSFS_CHAOS_DEGRADED_READ_OK ARGOSFS_CHAOS_REPLACEMENT_REPAIR_OK ARGOSFS_CHAOS_READY_FOR_HARD_KILL; do
+for marker in ARGOSFS_CHAOS_BASELINE_OK ARGOSFS_CHAOS_WORKLOAD_STARTED ARGOSFS_CHAOS_DEVICE_LOSS_OBSERVED ARGOSFS_CHAOS_DEGRADED_READ_OK ARGOSFS_CHAOS_WORKLOAD_STOPPED ARGOSFS_CHAOS_REPLACEMENT_REPAIR_OK ARGOSFS_CHAOS_READY_FOR_HARD_KILL; do
   if ! argosfs_qemu_log_has_marker "$log1" "$marker"; then
     echo "QEMU mixed chaos phase1 missed marker: $marker" >&2
     tail -n 600 "$log1" >&2 || true
