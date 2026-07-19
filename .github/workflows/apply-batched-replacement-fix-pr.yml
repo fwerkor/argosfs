@@ -17,23 +17,22 @@ jobs:
     if: github.head_ref == 'ci/ext4-performance-report'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
-          fetch-depth: 0
-
       - name: Apply and validate fix
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
+          git clone --quiet --branch "$HEAD_BRANCH" "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
+          cd repo
           python3 .github/apply_batched_replacement_fix.py
           cargo fmt --all
-          cargo test --locked --test integration loop_block_remove_batches_migration_checkpoint -- --test-threads=1
+          cargo test --quiet --locked --test integration loop_block_remove_batches_migration_checkpoint -- --test-threads=1
           bash -n scripts/qemu/mixed_chaos.sh
           git diff --check
-
           git config user.name "Cao Yuhang"
           git config user.email "caoyuhang@fwerkor.com"
           git add -A
-          git commit -m "fix: batch block-device replacement migration"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          git commit --quiet -m "fix: batch block-device replacement migration"
+          git push --quiet origin HEAD:"$HEAD_BRANCH"
