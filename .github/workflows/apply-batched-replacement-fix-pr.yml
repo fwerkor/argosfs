@@ -1,0 +1,51 @@
+name: Apply batched replacement fix (observable)
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-batched-replacement-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  apply:
+    if: github.head_ref == 'ci/ext4-performance-report'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Apply and validate fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          source = Path('.github/workflows/apply-batched-replacement-fix.yml').read_text().splitlines()
+          start = next(index for index, line in enumerate(source) if "python3 - <<'PY'" in line) + 1
+          end = next(index for index in range(start, len(source)) if source[index].strip() == 'PY')
+          script = textwrap.dedent('\n'.join(source[start:end])) + '\n'
+          Path('/tmp/apply-batched-replacement-fix.py').write_text(script)
+          PY
+
+          python3 /tmp/apply-batched-replacement-fix.py
+          rm -f .github/workflows/apply-batched-replacement-fix-pr.yml
+          cargo fmt --all
+          cargo test --locked --test integration loop_block_remove_batches_migration_checkpoint -- --test-threads=1
+          bash -n scripts/qemu/mixed_chaos.sh
+          git diff --check
+
+          git config user.name "Cao Yuhang"
+          git config user.email "caoyuhang@fwerkor.com"
+          git add -A
+          git commit -m "fix: batch block-device replacement migration"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
