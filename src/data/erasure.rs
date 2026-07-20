@@ -88,14 +88,5 @@ impl RsCodec {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn codec_rejects_an_overflowing_shard_count() {
-        assert!(matches!(
-            RsCodec::new(usize::MAX, 1),
-            Err(ArgosError::Invalid(_))
-        ));
-    }
-}
+#[path = "erasure_tests.rs"]
+mod tests;

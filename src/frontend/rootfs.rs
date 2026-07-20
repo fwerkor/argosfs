@@ -382,3 +382,7 @@ fn minimum_active_redundancy(meta: &Metadata) -> usize {
     }
     values.into_iter().min().unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "rootfs_tests.rs"]
+mod tests;

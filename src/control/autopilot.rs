@@ -343,17 +343,5 @@ fn validate_policy_path(path: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_unsafe_policy_values() {
-        let mut policy = AutopilotPolicy::default();
-        policy.background_io.max_read_mib_s = Some(f64::NAN);
-        assert!(policy.validate().is_err());
-
-        let mut policy = AutopilotPolicy::default();
-        policy.paths.boot_critical.push("../boot".to_string());
-        assert!(policy.validate().is_err());
-    }
-}
+#[path = "autopilot_tests.rs"]
+mod tests;

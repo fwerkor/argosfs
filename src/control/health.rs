@@ -227,7 +227,11 @@ pub fn refresh_smart(disk: &Disk) -> Result<HealthCounters> {
             device.display()
         )));
     }
-    let value: Value = serde_json::from_slice(&output.stdout)?;
+    parse_smartctl_json(disk, &output.stdout)
+}
+
+fn parse_smartctl_json(disk: &Disk, output: &[u8]) -> Result<HealthCounters> {
+    let value: Value = serde_json::from_slice(output)?;
     let mut health = disk.health.clone();
     let mut observed = std::collections::BTreeSet::new();
     let device_type = if value
@@ -432,3 +436,7 @@ fn linux_major(dev: u64) -> u64 {
 fn linux_minor(dev: u64) -> u64 {
     (dev & 0x00ff) | ((dev >> 12) & !0x00ff)
 }
+
+#[cfg(test)]
+#[path = "health_tests.rs"]
+mod tests;

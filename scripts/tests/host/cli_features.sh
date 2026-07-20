@@ -47,10 +47,35 @@ cmp "$artifacts/src/small.txt" "$artifacts/out/symlink-small.txt"
 "$argosfs" cat "$volume" /data/small.txt >"$artifacts/out/small-truncated.txt"
 test "$(wc -c <"$artifacts/out/small-truncated.txt")" -eq 12
 "$argosfs" rm "$volume" /data/small.renamed-link
+"$argosfs" mknod "$volume" /data/compat.fifo --mode 010600 --rdev 0
+"$argosfs" stat "$volume" /data/compat.fifo >"$artifacts/logs/stat-fifo.json"
+"$argosfs" rm "$volume" /data/compat.fifo
+"$argosfs" ls "$volume" /data >"$artifacts/logs/ls-data.txt"
+
+extra_path="$artifacts/extra-disk"
+extra_id="$("$argosfs" add-disk "$volume" --path "$extra_path" --tier cold --weight 0.75 --capacity-bytes 64MiB)"
+test -n "$extra_id"
+"$argosfs" probe-disks "$volume" "$extra_id" >"$artifacts/logs/probe-extra.json"
+"$argosfs" set-health "$volume" "$extra_id" \
+  --reallocated-sectors 2 --pending-sectors 1 --crc-errors 3 --io-errors 4 \
+  --latency-ms 12.5 --wear-percent 20 --temperature-c 35
+"$argosfs" mark-disk "$volume" "$extra_id" degraded
+"$argosfs" health "$volume" >"$artifacts/logs/health-degraded.txt"
+"$argosfs" mark-disk "$volume" "$extra_id" online
+"$argosfs" rebalance "$volume" >"$artifacts/logs/rebalance.json"
+"$argosfs" reshape "$volume" --k 3 --m 1 --max-files 1 >"$artifacts/logs/reshape.json"
+"$argosfs" remove-disk "$volume" "$extra_id" >"$artifacts/logs/remove-extra.json"
+
+"$argosfs" fsck "$volume" >"$artifacts/logs/fsck-readonly.json"
+"$argosfs" autopilot "$volume" --once --dry-run >"$artifacts/logs/autopilot-dry-run.txt"
+"$argosfs" autopilot "$volume" --once --explain --json >"$artifacts/logs/autopilot-explain.json"
+"$argosfs" compact-journal "$volume" >"$artifacts/logs/compact-journal.json"
 
 "$argosfs" snapshot "$volume" ci-snapshot >"$artifacts/logs/snapshot.txt"
 "$argosfs" set-posix-acl "$volume" /data/random.bin 'user::rw-,group::r--,mask::r--,other::---'
 "$argosfs" get-posix-acl "$volume" /data/random.bin >"$artifacts/logs/random.posix-acl"
+"$argosfs" set-posix-acl "$volume" /data 'user::rwx,group::r-x,mask::r-x,other::---' --default-acl
+"$argosfs" get-posix-acl "$volume" /data --default-acl >"$artifacts/logs/data.default-posix-acl"
 cat >"$artifacts/logs/nfs4-acl.json" <<'JSON'
 {"entries":[{"ace_type":"allow","principal":"EVERYONE@","flags":[],"permissions":["read"]}]}
 JSON
@@ -61,11 +86,22 @@ JSON
 ARGOSFS_KEY_FILE="$key_file" "$argosfs" encryption-status "$volume" >"$artifacts/logs/encryption-status.json"
 ARGOSFS_KEY_FILE="$key_file" "$argosfs" get "$volume" /data/compressible.bin "$artifacts/out/compressible.bin"
 cmp "$artifacts/src/compressible.bin" "$artifacts/out/compressible.bin"
+ARGOSFS_KEY_FILE="$key_file" "$argosfs" set-io-mode "$volume" --mode direct --direct-io --no-zero-copy --no-numa >"$artifacts/logs/io-mode-direct.json"
 ARGOSFS_KEY_FILE="$key_file" "$argosfs" set-io-mode "$volume" --mode buffered >"$artifacts/logs/io-mode.json"
 ARGOSFS_KEY_FILE="$key_file" "$argosfs" scrub "$volume" >"$artifacts/logs/scrub.json"
 ARGOSFS_KEY_FILE="$key_file" "$argosfs" fsck "$volume" --repair --remove-orphans >"$artifacts/logs/fsck.json"
 ARGOSFS_KEY_FILE="$key_file" "$argosfs" verify-journal "$volume" >"$artifacts/logs/verify-journal.json"
 ARGOSFS_KEY_FILE="$key_file" "$argosfs" health "$volume" --json >"$artifacts/logs/health.json"
+
+stdin_volume="$artifacts/stdin-volume"
+"$argosfs" mkfs "$stdin_volume" --force --disks 1 --k 1 --m 0 --compression none >"$artifacts/logs/stdin-mkfs.json"
+printf 'stdin-feature-key\n' | "$argosfs" enable-encryption "$stdin_volume" --passphrase-stdin >"$artifacts/logs/stdin-encryption.json"
+"$argosfs" encryption-status "$stdin_volume" >"$artifacts/logs/stdin-encryption-status.json"
+"$argosfs" refresh-smart "$volume" "$extra_id" >"$artifacts/logs/refresh-smart.json" 2>"$artifacts/logs/refresh-smart.err" || true
+if "$argosfs" refresh-smart "$volume" missing-disk >"$artifacts/logs/refresh-smart-missing.json" 2>"$artifacts/logs/refresh-smart-missing.err"; then
+  echo "refresh-smart unexpectedly succeeded for an unknown disk" >&2
+  exit 1
+fi
 
 python3 - <<'PY' "$volume" "$artifacts/logs/encryption-status.json"
 from pathlib import Path

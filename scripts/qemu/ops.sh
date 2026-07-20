@@ -14,8 +14,7 @@ log="$artifacts/qemu-ops-$arch.log"
 commands="$artifacts/qemu-ops.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-240}"
-login_delay_s="${ARGOSFS_QEMU_OPS_LOGIN_DELAY:-90}"
-command_delay_s="${ARGOSFS_QEMU_OPS_COMMAND_DELAY:-1}"
+console_timeout_s="${ARGOSFS_QEMU_OPS_CONSOLE_TIMEOUT:-600}"
 done_marker="ARGOSFS_QEMU_OPS_DONE"
 
 cat >"$commands" <<'CMDS'
@@ -39,17 +38,23 @@ CMDS
 argosfs_qemu_build_args
 
 set +e
+# QEMU output is intentionally polled while this pipeline appends to the log.
+# shellcheck disable=SC2094
 (
-	sleep "$login_delay_s"
-	printf '\r'
-	sleep "$command_delay_s"
-	while IFS= read -r line; do
-		printf '%s\r' "$line"
-		sleep "$command_delay_s"
-	done <"$commands"
+	set -e
+	argosfs_qemu_wait_console_prompt "$log" 1 "$console_timeout_s" "$reject" "ops console prompt"
+	argosfs_qemu_stream_script "$commands" 1 /tmp/argosfs-qemu-ops.sh "$log"
 ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log" 2>&1
-status=${PIPESTATUS[1]}
+pipeline_status=("${PIPESTATUS[@]}")
+feeder_status="${pipeline_status[0]}"
+status="${pipeline_status[1]}"
 set -e
+
+if [ "$feeder_status" -ne 0 ]; then
+	echo "QEMU ops feeder failed; status=$feeder_status" >&2
+	tail -n 240 "$log" >&2 || true
+	exit 1
+fi
 
 if grep -Eiq "$reject" "$log"; then
 	echo "QEMU ops failed; qemu status=$status; rejected pattern: $reject" >&2
@@ -59,11 +64,11 @@ fi
 
 missing=()
 for marker in ARGOSFS_QEMU_OPS_BEGIN ARGOSFS_MARKER_OK ARGOSFS_TMPFS_RW_OK "$done_marker"; do
-	if ! grep -Fq "$marker" "$log"; then
+	if ! argosfs_qemu_log_has_marker "$log" "$marker"; then
 		missing+=("$marker")
 	fi
 done
-if ! grep -Eq 'ARGOSFS_ROOT_MOUNT .* fuse' "$log"; then
+if ! argosfs_qemu_log_has_root_mount "$log"; then
 	missing+=("ARGOSFS_ROOT_MOUNT fuse")
 fi
 

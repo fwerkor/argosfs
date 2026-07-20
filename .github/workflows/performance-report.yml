@@ -1,0 +1,124 @@
+name: Performance report
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Sunday 04:00 Asia/Shanghai (UTC+8), separated from Wednesday chaos CI.
+    - cron: "0 20 * * 6"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Benchmark workload size
+        required: false
+        default: quick
+        type: choice
+        options:
+          - quick
+          - full
+      iterations:
+        description: Number of repeated measurements
+        required: false
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-report-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rootfs-performance:
+    name: ArgosFS versus ext4
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PERF_MODE: ${{ github.event_name == 'schedule' && 'full' || github.event_name == 'workflow_dispatch' && inputs.mode || 'quick' }}
+      PERF_ITERATIONS: ${{ github.event_name == 'schedule' && '5' || github.event_name == 'workflow_dispatch' && inputs.iterations || '3' }}
+      PERF_OUTPUT: ${{ github.workspace }}/target/ci-performance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install benchmark dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            e2fsprogs \
+            fuse3 \
+            libfuse3-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        run: scripts/ci/install-rust.sh stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rootfs-performance
+
+      - name: Prepare FUSE and loop devices
+        run: |
+          sudo modprobe fuse 2>/dev/null || true
+          sudo modprobe loop 2>/dev/null || true
+          sudo sh -c 'grep -qxF user_allow_other /etc/fuse.conf 2>/dev/null || printf "%s\n" user_allow_other >>/etc/fuse.conf'
+          if [ -e /dev/fuse ]; then sudo chmod 0666 /dev/fuse; fi
+          test -e /dev/fuse
+          test -e /dev/loop-control
+          mountpoint --version
+          mkfs.ext4 -V
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run repeated rootfs benchmarks
+        run: |
+          mkdir -p "$PERF_OUTPUT"
+          python3 scripts/experiments/run_rootfs_perf.py \
+            --mode "$PERF_MODE" \
+            --iterations "$PERF_ITERATIONS" \
+            --require-all \
+            --output "$PERF_OUTPUT/rootfs-perf.jsonl"
+
+      - name: Render ext4 comparison report
+        if: always()
+        run: |
+          python3 scripts/experiments/render_rootfs_perf_report.py \
+            "$PERF_OUTPUT/rootfs-perf.jsonl" \
+            --markdown "$PERF_OUTPUT/performance-report.md" \
+            --csv "$PERF_OUTPUT/performance-summary.csv" \
+            --commit "$GITHUB_SHA"
+          cat "$PERF_OUTPUT/performance-report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record runner details
+        if: always()
+        run: |
+          mkdir -p "$PERF_OUTPUT"
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "event=$GITHUB_EVENT_NAME"
+            echo "mode=$PERF_MODE"
+            echo "iterations=$PERF_ITERATIONS"
+            echo "kernel=$(uname -srmo)"
+            echo "cpu=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+            echo "memory_kib=$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+            echo "filesystem=$(findmnt -no FSTYPE -T "$RUNNER_TEMP")"
+          } > "$PERF_OUTPUT/environment.txt"
+
+      - name: Upload performance artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: argosfs-performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/target/ci-performance
+          if-no-files-found: error
+          retention-days: 30
