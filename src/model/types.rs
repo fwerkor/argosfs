@@ -718,3 +718,7 @@ pub struct FsckReport {
     pub removed_orphans: u64,
     pub errors: Vec<String>,
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod tests;

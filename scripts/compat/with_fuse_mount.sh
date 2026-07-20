@@ -43,8 +43,19 @@ cleanup() {
   if [ "$mounted" = 1 ] && mountpoint -q "$mountpoint" 2>/dev/null; then
     "$fusermount" -u "$mountpoint" >/dev/null 2>&1 || umount "$mountpoint" >/dev/null 2>&1 || true
   fi
-  if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
-    kill "$pid" >/dev/null 2>&1 || true
+  if [ -n "$pid" ]; then
+    # A successful FUSE unmount normally makes the foreground daemon exit on
+    # its own. Give it time to run normal shutdown handlers (including LLVM
+    # profile flushing) before falling back to a signal.
+    for _ in $(seq 1 50); do
+      if ! kill -0 "$pid" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
     wait "$pid" >/dev/null 2>&1 || true
   fi
   if [ "${ARGOSFS_COMPAT_KEEP_WORKDIR:-0}" != "1" ]; then

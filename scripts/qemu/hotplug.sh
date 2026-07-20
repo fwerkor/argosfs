@@ -64,10 +64,11 @@ set +e
 # QEMU output is intentionally polled while this pipeline appends to the log.
 # shellcheck disable=SC2094
 (
-	argosfs_qemu_wait_console_prompt "$log" 1 "$console_timeout_s" "$reject" "hotplug console prompt" || exit $?
+	set -e
+	argosfs_qemu_wait_console_prompt "$log" 1 "$console_timeout_s" "$reject" "hotplug console prompt"
 	argosfs_qemu_stream_script "$commands" 1 /tmp/argosfs-qemu-hotplug.sh "$log"
-	argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_HOTPLUG 180
-	for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
+	argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_HOTPLUG 300
+	argosfs_qemu_wait_monitor "$monitor" 60
 	argosfs_qemu_monitor_command "$monitor" \
 		"drive_add 0 if=none,file=$hotplug_disk,format=raw,id=hot0" "$monitor_log"
 	bus_arg="$(argosfs_qemu_hotplug_bus_arg hot 0)"
@@ -78,10 +79,21 @@ set +e
 	argosfs_qemu_wait_log_marker "$log" ARGOSFS_WAIT_UNPLUG 600
 	argosfs_qemu_monitor_command "$monitor" "device_del hotdisk0" "$monitor_log"
 	sleep 2
-	argosfs_qemu_monitor_command "$monitor" "drive_del hot0" "$monitor_log" "Device '[^']+' not found"
+	# The guest powers off immediately after observing the unplug. The monitor may
+	# therefore disappear before this optional backend cleanup reaches QEMU; the
+	# guest markers below remain the authoritative validation of the operation.
+	argosfs_qemu_monitor_command "$monitor" "drive_del hot0" "$monitor_log" "Device '[^']+' not found" || true
 ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log" 2>&1
-status=${PIPESTATUS[1]}
+pipeline_status=("${PIPESTATUS[@]}")
+feeder_status="${pipeline_status[0]}"
+status="${pipeline_status[1]}"
 set -e
+
+if [ "$feeder_status" -ne 0 ]; then
+	echo "QEMU hotplug feeder failed; status=$feeder_status" >&2
+	tail -n 260 "$log" >&2 || true
+	exit 1
+fi
 
 if grep -Eiq "$reject" "$log"; then
 	echo "QEMU hotplug failed; qemu status=$status; rejected pattern: $reject" >&2
@@ -90,14 +102,14 @@ if grep -Eiq "$reject" "$log"; then
 fi
 missing=()
 for marker in ARGOSFS_QEMU_HOTPLUG_BEGIN ARGOSFS_HOTPLUG_BLOCK_DEVICE_OK ARGOSFS_HOTPLUG_RAW_ARGOSFS_OK ARGOSFS_ROOT_SURVIVED_HOTPLUG_OK "$done_marker"; do
-	if ! grep -Fq "$marker" "$log"; then
+	if ! argosfs_qemu_log_has_marker "$log" "$marker"; then
 		missing+=("$marker")
 	fi
 done
-if ! grep -Eq 'ARGOSFS_ROOT_MOUNT .* fuse' "$log"; then
+if ! argosfs_qemu_log_has_root_mount "$log"; then
 	missing+=("ARGOSFS_ROOT_MOUNT fuse")
 fi
-if [ "${ARGOSFS_QEMU_HOTPLUG_REQUIRE_UNPLUG:-1}" = "1" ] && ! grep -Fq ARGOSFS_UNPLUG_BLOCK_DEVICE_OK "$log"; then
+if [ "${ARGOSFS_QEMU_HOTPLUG_REQUIRE_UNPLUG:-1}" = "1" ] && ! argosfs_qemu_log_has_marker "$log" ARGOSFS_UNPLUG_BLOCK_DEVICE_OK; then
 	missing+=("ARGOSFS_UNPLUG_BLOCK_DEVICE_OK")
 fi
 if [ "${#missing[@]}" -eq 0 ]; then

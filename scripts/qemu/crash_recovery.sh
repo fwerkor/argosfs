@@ -20,7 +20,7 @@ console_timeout_s="${ARGOSFS_QEMU_CRASH_CONSOLE_TIMEOUT:-600}"
 done_marker="ARGOSFS_QEMU_CRASH_RECOVERY_DONE"
 
 disks=()
-for idx in 0 1 2; do
+for idx in 0 1 2 3; do
   disk="$artifacts/crash-$idx.img"
   qemu-img create -f raw "$disk" "${ARGOSFS_QEMU_CRASH_DISK_SIZE:-128M}" >/dev/null
   disks+=("$disk")
@@ -32,36 +32,35 @@ echo ARGOSFS_QEMU_CRASH_RECOVERY_PHASE1_BEGIN
 awk '$2=="/"{print "ARGOSFS_ROOT_MOUNT_PHASE1 " $1 " " $3 " " $4; exit}' /proc/mounts
 test -e /run/argosfs-root-active && echo ARGOSFS_CRASH_ROOT_MARKER_PHASE1_OK
 echo ARGOSFS_WAIT_CRASH_HOTPLUG
-for dev in /dev/vdb /dev/vdc /dev/vdd; do
+for dev in /dev/vdb /dev/vdc /dev/vdd /dev/vde; do
   name="${dev##*/}"
   for i in $(seq 1 60); do [ -b "$dev" ] && [ -e "/sys/class/block/$name" ] && break; sleep 1; done
   test -b "$dev"
   test -e "/sys/class/block/$name"
 done
 base=/tmp/argosfs-crash-base
-next=/tmp/argosfs-crash-next
 out=/tmp/argosfs-crash-out
-rm -rf "$base" "$next" "$out"
-mkdir -p "$base/data" "$next/data" "$out"
+rm -rf "$base" "$out"
+mkdir -p "$base/data" "$out"
 printf 'before crash journal replay\n' >"$base/data/crash.txt"
-printf 'after crash journal replay\n' >"$next/data/crash.txt"
 devs=/dev/vdb,/dev/vdc,/dev/vdd
+all_devs=$devs,/dev/vde
 argosfs mkfs --backend raw --devices "$devs" --k 2 --m 1 --chunk-size 65536 --compression zstd --force --pool-name crash-root >/tmp/argosfs-crash-mkfs.json
 argosfs import-tree --backend raw --devices "$devs" "$base" /
-if ARGOSFS_CRASH_POINT=after-journal argosfs import-tree --backend raw --devices "$devs" "$next" / >/tmp/argosfs-crash-injected.log 2>&1; then
+if ARGOSFS_CRASH_POINT=after-journal-commit-before-metadata-commit argosfs add-device --backend raw --devices "$devs" --device /dev/vde --force >/tmp/argosfs-crash-injected.log 2>&1; then
   echo expected injected crash failure >&2
   exit 1
 fi
 echo ARGOSFS_RAW_CRASH_INJECTED_OK
-argosfs list-devices --backend raw --devices "$devs" >/tmp/argosfs-crash-devices-before-replay.json
-argosfs replay-journal --backend raw --devices "$devs" >/tmp/argosfs-crash-replay.json
-argosfs fsck --backend raw --devices "$devs" --repair --remove-orphans >/tmp/argosfs-crash-fsck.json
-argosfs export-tree --backend raw --devices "$devs" "$out"
-grep -q 'after crash journal replay' "$out/data/crash.txt"
+argosfs replay-journal --backend raw --devices "$all_devs" >/tmp/argosfs-crash-replay.json
+argosfs list-devices --backend raw --devices "$all_devs" >/tmp/argosfs-crash-devices-after-replay.json
+grep -q '"id": "disk-0003"' /tmp/argosfs-crash-devices-after-replay.json
+argosfs fsck --backend raw --devices "$all_devs" --repair --remove-orphans >/tmp/argosfs-crash-fsck.json
+argosfs export-tree --backend raw --devices "$all_devs" "$out"
+grep -q 'before crash journal replay' "$out/data/crash.txt"
 echo ARGOSFS_RAW_JOURNAL_REPLAY_OK
 mkdir -p /root/argosfs-hardkill
-printf 'hardkill persistent baseline\n' >/root/argosfs-hardkill/marker.txt
-sync
+printf 'hardkill persistent baseline\n' | dd of=/root/argosfs-hardkill/marker.txt conv=fsync 2>/dev/null
 echo ARGOSFS_READY_FOR_HOST_KILL
 i=0
 while true; do
@@ -79,8 +78,7 @@ test -e /run/argosfs-root-active && echo ARGOSFS_CRASH_ROOT_MARKER_PHASE2_OK
 grep -q 'hardkill persistent baseline' /root/argosfs-hardkill/marker.txt
 echo ARGOSFS_HARDKILL_ROOT_REBOOT_OK
 mkdir -p /root/argosfs-hardkill/after-recovery
-printf 'after recovery write\n' >/root/argosfs-hardkill/after-recovery/payload.txt
-sync
+printf 'after recovery write\n' | dd of=/root/argosfs-hardkill/after-recovery/payload.txt conv=fsync 2>/dev/null
 grep -q 'after recovery write' /root/argosfs-hardkill/after-recovery/payload.txt
 echo ARGOSFS_QEMU_CRASH_RECOVERY_DONE
 poweroff -f || reboot -f || halt -f
@@ -90,42 +88,52 @@ qemu_device_add() {
   local idx="$1" path="$2"
   local bus_arg rom_arg
   argosfs_qemu_monitor_command "$monitor" \
-    "drive_add 0 if=none,file=$path,format=raw,id=crash$idx" "$monitor_log"
+    "drive_add 0 if=none,file=$path,format=raw,id=crash$idx" "$monitor_log" || return
   bus_arg="$(argosfs_qemu_hotplug_bus_arg crash "$idx")"
   rom_arg=""
   [ "$arch" != "arm64" ] || rom_arg=",romfile="
   argosfs_qemu_monitor_command "$monitor" \
-    "device_add virtio-blk-pci,drive=crash$idx,id=crashdisk$idx${bus_arg}${rom_arg}" "$monitor_log"
+    "device_add virtio-blk-pci,drive=crash$idx,id=crashdisk$idx${bus_arg}${rom_arg}" "$monitor_log" || return
 }
 
 run_phase1_until_kill_marker() {
   rm -f "$monitor"
   argosfs_qemu_build_args
-  argosfs_qemu_add_hotplug_ports 3 crash
+  argosfs_qemu_add_hotplug_ports 4 crash
   qemu_args+=(-monitor "unix:$monitor,server,nowait")
   : >"$monitor_log"
   : >"$log1"
+  feeder_status_file="$artifacts/crash-phase1-feeder.status"
+  rm -f "$feeder_status_file"
   set +e
   # QEMU output is intentionally polled while this pipeline appends to the log.
   # shellcheck disable=SC2094
-  (
-    argosfs_qemu_wait_console_prompt "$log1" 1 "$console_timeout_s" "$reject" "crash-recovery phase1 console prompt" || exit $?
-    argosfs_qemu_stream_script "$commands1" 1 /tmp/argosfs-qemu-crash-phase1.sh "$log1"
-    argosfs_qemu_wait_log_marker "$log1" ARGOSFS_WAIT_CRASH_HOTPLUG 180
-    for _ in $(seq 1 30); do [ -S "$monitor" ] && break; sleep 1; done
-    idx=0
-    for disk in "${disks[@]}"; do qemu_device_add "$idx" "$disk"; idx=$((idx + 1)); done
-  ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log1" 2>&1 &
+  {
+    (
+      set -e
+      argosfs_qemu_wait_console_prompt "$log1" 1 "$console_timeout_s" "$reject" "crash-recovery phase1 console prompt"
+      argosfs_qemu_stream_script "$commands1" 1 /tmp/argosfs-qemu-crash-phase1.sh "$log1"
+      argosfs_qemu_wait_log_marker "$log1" ARGOSFS_WAIT_CRASH_HOTPLUG 300
+      argosfs_qemu_wait_monitor "$monitor" 60
+      idx=0
+      for disk in "${disks[@]}"; do
+        qemu_device_add "$idx" "$disk"
+        idx=$((idx + 1))
+      done
+      echo 0 >"$feeder_status_file"
+    ) || echo "$?" >"$feeder_status_file"
+  } | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log1" 2>&1 &
   qemu_pid=$!
   deadline=$((SECONDS + timeout_s))
   wait_status=1
   while [ "$SECONDS" -lt "$deadline" ]; do
     if grep -Eiq "$reject" "$log1" 2>/dev/null; then wait_status=2; break; fi
-    if grep -Fq ARGOSFS_READY_FOR_HOST_KILL "$log1" 2>/dev/null; then wait_status=0; break; fi
+    if [ -s "$feeder_status_file" ] && [ "$(cat "$feeder_status_file")" -ne 0 ]; then wait_status=4; break; fi
+    if argosfs_qemu_log_has_marker "$log1" ARGOSFS_READY_FOR_HOST_KILL; then wait_status=0; break; fi
     if ! kill -0 "$qemu_pid" 2>/dev/null; then wait_status=3; break; fi
     sleep 1
   done
-  if [ "$wait_status" -eq 0 ] && kill -0 "$qemu_pid" 2>/dev/null; then
+  if kill -0 "$qemu_pid" 2>/dev/null; then
     argosfs_qemu_kill_tree "$qemu_pid"
   fi
   wait "$qemu_pid" >/dev/null 2>&1 || true
@@ -140,11 +148,15 @@ run_phase2() {
   # QEMU output is intentionally polled while this pipeline appends to the log.
   # shellcheck disable=SC2094
   (
-    argosfs_qemu_wait_console_prompt "$log2" 1 "$console_timeout_s" "$reject" "crash-recovery phase2 console prompt" || exit $?
+    set -e
+    argosfs_qemu_wait_console_prompt "$log2" 1 "$console_timeout_s" "$reject" "crash-recovery phase2 console prompt"
     argosfs_qemu_stream_script "$commands2" 1 /tmp/argosfs-qemu-crash-phase2.sh "$log2"
   ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log2" 2>&1
-  status=${PIPESTATUS[1]}
+  pipeline_status=("${PIPESTATUS[@]}")
+  feeder_status="${pipeline_status[0]}"
+  status="${pipeline_status[1]}"
   set -e
+  [ "$feeder_status" -eq 0 ] || return "$feeder_status"
   return "$status"
 }
 
@@ -153,7 +165,7 @@ if ! run_phase1_until_kill_marker; then
   tail -n 500 "$log1" >&2 || true
   exit 1
 fi
-if ! grep -Fq ARGOSFS_RAW_CRASH_INJECTED_OK "$log1" || ! grep -Fq ARGOSFS_RAW_JOURNAL_REPLAY_OK "$log1"; then
+if ! argosfs_qemu_log_has_marker "$log1" ARGOSFS_RAW_CRASH_INJECTED_OK || ! argosfs_qemu_log_has_marker "$log1" ARGOSFS_RAW_JOURNAL_REPLAY_OK; then
   echo "QEMU crash recovery phase1 missed raw journal markers" >&2
   tail -n 500 "$log1" >&2 || true
   exit 1
@@ -176,9 +188,9 @@ if grep -Eiq "$reject" "$log2"; then
 fi
 missing=()
 for marker in ARGOSFS_QEMU_CRASH_RECOVERY_PHASE2_BEGIN ARGOSFS_CRASH_ROOT_MARKER_PHASE2_OK ARGOSFS_HARDKILL_ROOT_REBOOT_OK "$done_marker"; do
-  grep -Fq "$marker" "$log2" || missing+=("$marker")
+  argosfs_qemu_log_has_marker "$log2" "$marker" || missing+=("$marker")
 done
-grep -Eq 'ARGOSFS_ROOT_MOUNT_PHASE2 .* fuse' "$log2" || missing+=("ARGOSFS_ROOT_MOUNT_PHASE2 fuse")
+argosfs_qemu_log_has_root_mount "$log2" ARGOSFS_ROOT_MOUNT_PHASE2 || missing+=("ARGOSFS_ROOT_MOUNT_PHASE2 fuse")
 if [ "${#missing[@]}" -eq 0 ]; then
   echo "QEMU crash recovery test passed for $arch; artifacts=$artifacts"
   exit 0

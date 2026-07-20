@@ -1484,3 +1484,7 @@ fn get_fixed_hex(bytes: &[u8], offset: usize, len: usize) -> Result<String> {
         .map(str::to_string)
         .map_err(|err| ArgosError::CorruptedMetadata(err.to_string()))
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

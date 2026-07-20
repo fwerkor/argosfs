@@ -98,3 +98,7 @@ impl ArgosError {
 }
 
 pub type Result<T> = std::result::Result<T, ArgosError>;
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

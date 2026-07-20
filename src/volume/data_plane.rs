@@ -1452,3 +1452,7 @@ impl ArgosFs {
             .sum()
     }
 }
+
+#[cfg(test)]
+#[path = "data_plane_tests.rs"]
+mod tests;

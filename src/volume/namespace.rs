@@ -1603,3 +1603,7 @@ pub(super) fn boot_critical_name(name: &str) -> bool {
         "boot" | "etc" | "bin" | "sbin" | "lib" | "lib64" | "usr" | "init"
     )
 }
+
+#[cfg(test)]
+#[path = "namespace_tests.rs"]
+mod tests;
