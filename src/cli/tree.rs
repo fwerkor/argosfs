@@ -481,3 +481,7 @@ fn timespec_from_f64(value: f64) -> libc::timespec {
 fn normalize_dest(dest: &str) -> String {
     clean_path(dest.trim())
 }
+
+#[cfg(test)]
+#[path = "tree_tests.rs"]
+mod tests;

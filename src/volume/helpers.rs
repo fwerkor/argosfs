@@ -504,3 +504,7 @@ pub(super) fn update_latency_ewma(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "helpers_tests.rs"]
+mod tests;

@@ -163,3 +163,7 @@ fn escape_label_value(value: &str) -> String {
     }
     escaped
 }
+
+#[cfg(test)]
+#[path = "metrics_tests.rs"]
+mod tests;

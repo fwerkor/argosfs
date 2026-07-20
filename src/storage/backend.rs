@@ -302,3 +302,7 @@ fn block_device_capacity(file: &File) -> Result<Option<u64>> {
 fn block_device_capacity(_file: &File) -> Result<Option<u64>> {
     Ok(None)
 }
+
+#[cfg(test)]
+#[path = "backend_tests.rs"]
+mod tests;

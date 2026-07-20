@@ -747,3 +747,7 @@ fn record_autopilot_action(
         stats.utility_ewma * 0.85 + utility * 0.15
     };
 }
+
+#[cfg(test)]
+#[path = "autopilot_tests.rs"]
+mod tests;
