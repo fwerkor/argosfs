@@ -310,6 +310,7 @@ impl Drop for AlignedBuf {
 
 fn cpu_list_contains(spec: &str, cpu: u32) -> bool {
     spec.trim().split(',').any(|part| {
+        let part = part.trim();
         if let Some((start, end)) = part.split_once('-') {
             let Ok(start) = start.parse::<u32>() else {
                 return false;
@@ -323,3 +324,7 @@ fn cpu_list_contains(spec: &str, cpu: u32) -> bool {
         }
     })
 }
+
+#[cfg(test)]
+#[path = "advanced_io_tests.rs"]
+mod tests;
