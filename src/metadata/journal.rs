@@ -1127,3 +1127,7 @@ fn missing_or_invalid_copy(report: &TransactionReport) -> bool {
         .iter()
         .any(|candidate| !candidate.present || !candidate.valid)
 }
+
+#[cfg(test)]
+#[path = "journal_tests.rs"]
+mod tests;

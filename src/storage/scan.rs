@@ -13,9 +13,16 @@ pub fn scan_devices(paths: &[PathBuf]) -> Vec<ScannedDevice> {
 }
 
 pub fn discover_raw_devices() -> Vec<PathBuf> {
+    discover_devices_in_roots([
+        PathBuf::from("/dev/disk/by-id"),
+        PathBuf::from("/dev/disk/by-uuid"),
+    ])
+}
+
+fn discover_devices_in_roots(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    for root in ["/dev/disk/by-id", "/dev/disk/by-uuid"] {
+    for root in roots {
         let Ok(entries) = fs::read_dir(root) else {
             continue;
         };
@@ -29,3 +36,7 @@ pub fn discover_raw_devices() -> Vec<PathBuf> {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "scan_tests.rs"]
+mod tests;

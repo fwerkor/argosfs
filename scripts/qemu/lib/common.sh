@@ -135,6 +135,49 @@ argosfs_qemu_hotplug_bus_arg() {
 	fi
 }
 
+argosfs_qemu_log_has_marker() {
+	local log="$1"
+	local marker="$2"
+	[ -f "$log" ] || return 1
+	awk -v marker="$marker" '
+		{ gsub(/\r/, ""); if ($0 == marker) found = 1 }
+		END { exit !found }
+	' "$log"
+}
+
+argosfs_qemu_log_marker_count() {
+	local log="$1"
+	local marker="$2"
+	[ -f "$log" ] || { printf '0\n'; return 0; }
+	awk -v marker="$marker" '
+		{ gsub(/\r/, ""); if ($0 == marker) count++ }
+		END { print count + 0 }
+	' "$log"
+}
+
+argosfs_qemu_log_has_marker_prefix() {
+	local log="$1"
+	local prefix="$2"
+	[ -f "$log" ] || return 1
+	awk -v prefix="$prefix" '
+		{ gsub(/\r/, ""); if (index($0, prefix) == 1) found = 1 }
+		END { exit !found }
+	' "$log"
+}
+
+argosfs_qemu_log_has_root_mount() {
+	local log="$1"
+	local marker="${2:-ARGOSFS_ROOT_MOUNT}"
+	[ -f "$log" ] || return 1
+	awk -v marker="$marker" '
+		{
+			gsub(/\r/, "")
+			if ($1 == marker && $3 ~ /^fuse([.]|$)/) found = 1
+		}
+		END { exit !found }
+	' "$log"
+}
+
 argosfs_qemu_wait_log_marker() {
 	local log="$1"
 	local marker="$2"
@@ -142,13 +185,27 @@ argosfs_qemu_wait_log_marker() {
 	local deadline=$((SECONDS + timeout_s))
 
 	while [ "$SECONDS" -lt "$deadline" ]; do
-		if [ -f "$log" ] && awk -v marker="$marker" \
-			'{ sub(/\r$/, ""); if ($0 == marker) found = 1 } END { exit !found }' "$log"; then
+		if argosfs_qemu_log_has_marker "$log" "$marker"; then
 			return 0
 		fi
 		sleep 1
 	done
 	echo "timed out waiting for QEMU guest marker: $marker" >&2
+	return 1
+}
+
+argosfs_qemu_wait_monitor() {
+	local monitor="$1"
+	local timeout_s="${2:-30}"
+	local deadline=$((SECONDS + timeout_s))
+
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		if [ -S "$monitor" ]; then
+			return 0
+		fi
+		sleep 1
+	done
+	echo "timed out waiting for QEMU monitor socket: $monitor" >&2
 	return 1
 }
 
@@ -193,7 +250,7 @@ argosfs_qemu_stream_script() {
 		sleep "${ARGOSFS_QEMU_SCRIPT_START_DELAY:-1}"
 	fi
 
-	printf 'stty -echo; echo %s\r' "$upload_marker" >&"$fd"
+	printf 'if command -v stty >/dev/null 2>&1; then stty -echo; fi; echo %s\r' "$upload_marker" >&"$fd"
 	if [ -n "$log" ]; then
 		argosfs_qemu_wait_log_marker "$log" "$upload_marker" "${ARGOSFS_QEMU_SCRIPT_READY_TIMEOUT:-30}" || return $?
 	else
@@ -205,7 +262,8 @@ argosfs_qemu_stream_script() {
 		sleep "$line_delay"
 	done <"$script"
 	printf '%s\r' "$delimiter" >&"$fd"
-	printf "stty echo; sh '%s'\r" "$remote" >&"$fd"
+	printf "if command -v stty >/dev/null 2>&1; then stty echo; fi; sh '%s'; status=\$?; echo ARGOSFS_QEMU_SCRIPT_EXIT_%s status=\$status; if [ \"\$status\" -ne 0 ]; then poweroff -f || reboot -f || halt -f; fi\r" \
+		"$remote" "$marker_id" >&"$fd"
 }
 argosfs_qemu_wait_console_prompt() {
 	local log="$1"

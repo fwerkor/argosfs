@@ -494,3 +494,7 @@ fn format_perm_bits(bits: u16) -> String {
         if bits & ACL_EXECUTE != 0 { 'x' } else { '-' },
     )
 }
+
+#[cfg(test)]
+#[path = "acl_tests.rs"]
+mod tests;

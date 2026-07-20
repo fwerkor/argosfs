@@ -274,6 +274,7 @@ The run directory contains:
 - a manifest with build, kernel, and ArgosFS configuration.
 
 See `docs/artifact-evaluation.md`, `docs/compatibility-report.md`,
-`docs/self-driving-model.md`, `docs/safety-invariants.md`, and
-`docs/related-work.md` for paper-oriented reproduction and positioning. A
-static project website lives in `website/index.html`.
+`docs/performance-report.md`, `docs/self-driving-model.md`,
+`docs/safety-invariants.md`, and `docs/related-work.md` for paper-oriented
+reproduction and positioning. A static project website lives in
+`website/index.html`.
