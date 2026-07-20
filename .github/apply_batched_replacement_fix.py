@@ -1,0 +1,184 @@
+from pathlib import Path
+import re
+
+
+def sub_once(path: str, pattern: str, replacement: str, flags: int = 0) -> None:
+    file = Path(path)
+    text = file.read_text()
+    updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+    if count != 1:
+        raise SystemExit(
+            f"{path}: expected one regex replacement, found {count}: {pattern}"
+        )
+    file.write_text(updated)
+
+
+sub_once(
+    "src/volume/maintenance.rs",
+    r"(?m)^    pub fn drain_disk\(&self, disk_id: &str\) -> Result<u64> \{\n",
+    """    pub fn drain_disk(&self, disk_id: &str) -> Result<u64> {
+        self.run_batched_block_maintenance(|| self.drain_disk_unbatched(disk_id))
+    }
+
+    fn drain_disk_unbatched(&self, disk_id: &str) -> Result<u64> {
+""",
+)
+sub_once(
+    "src/volume/maintenance.rs",
+    r"(?m)^    pub fn remove_disk\(&self, disk_id: &str\) -> Result<u64> \{\n        let rewritten = self\.drain_disk\(disk_id\)\?;\n",
+    """    pub fn remove_disk(&self, disk_id: &str) -> Result<u64> {
+        self.run_batched_block_maintenance(|| self.remove_disk_unbatched(disk_id))
+    }
+
+    fn remove_disk_unbatched(&self, disk_id: &str) -> Result<u64> {
+        let rewritten = self.drain_disk_unbatched(disk_id)?;
+""",
+)
+sub_once(
+    "src/volume/maintenance.rs",
+    r"(?m)^    pub fn rebalance\(&self\) -> Result<u64> \{",
+    """    fn run_batched_block_maintenance<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let should_batch = {
+            let meta = self.meta.read();
+            meta.backend != BackendKind::Host && !bulk_import_enabled()
+        };
+        if !should_batch {
+            return operation();
+        }
+
+        let _batch = bulk_import_scope(true);
+        let result = operation()?;
+        self.sync()?;
+        Ok(result)
+    }
+
+    pub fn rebalance(&self) -> Result<u64> {""",
+)
+
+qemu_path = Path("scripts/qemu/mixed_chaos.sh")
+qemu_lines = qemu_path.read_text().splitlines()
+start = qemu_lines.index("echo ARGOSFS_CHAOS_DEGRADED_READ_OK") + 1
+end = qemu_lines.index("recovered=/tmp/argosfs-chaos-recovered")
+qemu_lines[start:end] = [
+    "echo ARGOSFS_CHAOS_REPLACE_BEGIN",
+    'argosfs replace-device --backend raw --devices "\\$survivors" --old disk-0001 --new /dev/vdg --force >/tmp/argosfs-chaos-replace.json',
+    "echo ARGOSFS_CHAOS_REPLACE_OK",
+    'repaired="\\$survivors,/dev/vdg"',
+    "echo ARGOSFS_CHAOS_FSCK_BEGIN",
+    'argosfs fsck --backend raw --devices "\\$repaired" --repair --remove-orphans >/tmp/argosfs-chaos-fsck.json',
+    "echo ARGOSFS_CHAOS_FSCK_OK",
+    "echo ARGOSFS_CHAOS_SCRUB_BEGIN",
+    'argosfs scrub --backend raw --devices "\\$repaired" >/tmp/argosfs-chaos-scrub.json',
+    "echo ARGOSFS_CHAOS_SCRUB_OK",
+]
+old_marker = next(
+    line
+    for line in qemu_lines
+    if line.startswith("for marker in ARGOSFS_CHAOS_BASELINE_OK ")
+)
+new_marker = (
+    "for marker in ARGOSFS_CHAOS_BASELINE_OK ARGOSFS_CHAOS_WORKLOAD_STARTED "
+    "ARGOSFS_CHAOS_DEVICE_LOSS_OBSERVED ARGOSFS_CHAOS_DEGRADED_READ_OK "
+    "ARGOSFS_CHAOS_REPLACE_OK ARGOSFS_CHAOS_FSCK_OK ARGOSFS_CHAOS_SCRUB_OK "
+    "ARGOSFS_CHAOS_REPLACEMENT_REPAIR_OK ARGOSFS_CHAOS_READY_FOR_HARD_KILL; do"
+)
+qemu_lines[qemu_lines.index(old_marker)] = new_marker
+qemu_path.write_text("\n".join(qemu_lines) + "\n")
+
+workflow_path = Path(".github/workflows/capos-full-qemu.yml")
+workflow_lines = workflow_path.read_text().splitlines()
+suite_index = next(
+    index
+    for index, line in enumerate(workflow_lines)
+    if line.strip() == "suite: mixed-chaos"
+    and any(
+        candidate.strip() == "- arch: arm64"
+        for candidate in workflow_lines[max(0, index - 3) : index]
+    )
+)
+for index in range(suite_index + 1, min(len(workflow_lines), suite_index + 10)):
+    stripped = workflow_lines[index].strip()
+    if stripped.startswith("qemu_timeout:"):
+        indent = workflow_lines[index][
+            : len(workflow_lines[index]) - len(workflow_lines[index].lstrip())
+        ]
+        workflow_lines[index] = f'{indent}qemu_timeout: "4200"'
+    elif stripped.startswith("chaos_workers:"):
+        workflow_lines[index] = None
+    elif stripped.startswith("- arch:"):
+        break
+workflow_path.write_text(
+    "\n".join(line for line in workflow_lines if line is not None) + "\n"
+)
+
+test_path = Path("tests/integration/block_backend.rs")
+test_text = test_path.read_text()
+test_name = "loop_block_remove_batches_migration_checkpoint"
+if test_name in test_text:
+    raise SystemExit(f"duplicate test {test_name}")
+test_text += r'''
+
+#[test]
+fn loop_block_remove_batches_migration_checkpoint() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 4);
+    let fs = ArgosFs::create_loop(
+        &images,
+        config(2, 1),
+        64 * 1024 * 1024,
+        "batched-remove",
+        false,
+    )
+    .unwrap();
+    let payloads = (0..24)
+        .map(|index| {
+            let payload = vec![index as u8; 4096 + index * 17];
+            fs.write_file(&format!("/file-{index:02}"), &payload, 0o644)
+                .unwrap();
+            payload
+        })
+        .collect::<Vec<_>>();
+    fs.sync().unwrap();
+    let before = fs.transaction_report().unwrap().valid_entries;
+
+    let rewritten = fs.remove_disk("disk-0000").unwrap();
+    assert!(rewritten > 0);
+    let meta = fs.metadata_snapshot();
+    assert_eq!(meta.disks["disk-0000"].status, DiskStatus::Removed);
+    assert!(meta.inodes.values().flat_map(|inode| &inode.blocks).all(|block| {
+        block
+            .shards
+            .iter()
+            .all(|shard| shard.disk_id != "disk-0000")
+    }));
+    let after = fs.transaction_report().unwrap().valid_entries;
+    assert!(
+        after <= before,
+        "batched drain must not append one durable transaction per rewritten file: before={before}, after={after}"
+    );
+    drop(fs);
+
+    let survivors = images[1..].to_vec();
+    let reopened = ArgosFs::open_loop(&survivors, false).unwrap();
+    for (index, payload) in payloads.iter().enumerate() {
+        assert_eq!(
+            reopened
+                .read_file(&format!("/file-{index:02}"), true)
+                .unwrap(),
+            payload.as_slice()
+        );
+    }
+    assert!(reopened.fsck(false, false).unwrap().errors.is_empty());
+}
+'''
+test_path.write_text(test_text)
+
+for path in [
+    ".github/workflows/apply-batched-replacement-fix.yml",
+    ".github/workflows/apply-batched-replacement-fix-pr.yml",
+    ".github/apply_batched_replacement_fix.py",
+]:
+    Path(path).unlink(missing_ok=True)

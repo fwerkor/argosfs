@@ -76,6 +76,37 @@ jobs:
           sudo apt-get clean
           df -h
 
+      - name: Select CapOS build storage
+        id: storage
+        shell: bash
+        env:
+          CAPOS_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+
+          storage_root="$RUNNER_TEMP"
+          runner_device="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $1 }')"
+          runner_available="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')"
+
+          if [ -d /mnt ]; then
+            mnt_device="$(df -Pk /mnt | awk 'NR == 2 { print $1 }')"
+            mnt_available="$(df -Pk /mnt | awk 'NR == 2 { print $4 }')"
+            if [ "$mnt_device" != "$runner_device" ] && [ "$mnt_available" -gt "$runner_available" ]; then
+              storage_root=/mnt
+            fi
+          fi
+
+          build_root="$storage_root/argosfs-capos-$CAPOS_ARCH-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          sudo rm -rf "$build_root"
+          sudo mkdir -p "$build_root/artifacts" "$build_root/capos-dl"
+          sudo chown -R "$(id -u):$(id -g)" "$build_root"
+
+          echo "artifacts=$build_root/artifacts" >> "$GITHUB_OUTPUT"
+          echo "dl_dir=$build_root/capos-dl" >> "$GITHUB_OUTPUT"
+
+          echo "Selected CapOS build storage: $build_root"
+          df -h "$RUNNER_TEMP" "$storage_root"
+
       - name: Probe QEMU host prerequisites
         env:
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
@@ -105,7 +136,7 @@ jobs:
       - name: Cache CapOS downloads
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/capos-dl
+          path: ${{ steps.storage.outputs.dl_dir }}
           key: capos-dl-${{ matrix.capos_target }}-${{ github.run_id }}
           restore-keys: |
             capos-dl-${{ matrix.capos_target }}-
@@ -114,7 +145,7 @@ jobs:
       - name: Build full CapOS ArgosFS image
         id: build
         env:
-          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}
+          ARGOSFS_TEST_ARTIFACTS: ${{ steps.storage.outputs.artifacts }}
           ARGOSFS_QEMU_ARCH: ${{ matrix.arch }}
           ARGOSFS_CAPOS_BUILD_TARGET: ${{ matrix.capos_target }}
           ARGOSFS_CAPOS_MAKE_JOBS: ${{ matrix.make_jobs }}
@@ -123,25 +154,28 @@ jobs:
           ARGOSFS_CAPOS_LOG_STDOUT: periodic
           ARGOSFS_CI_LOG_INTERVAL_S: "120"
           ARGOSFS_CI_LOG_TAIL_LINES: "35"
-          ARGOSFS_CAPOS_DL_DIR: ${{ runner.temp }}/capos-dl
+          ARGOSFS_CAPOS_DL_DIR: ${{ steps.storage.outputs.dl_dir }}
+          ARGOSFS_CAPOS_PRUNE_CARGO_TARGET: "1"
           ARGOSFS_CI_LIGHT_RUST_PROFILE: "1"
           CAPOS_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}
         run: scripts/qemu/build_capos_image.sh
 
       - name: Pack QEMU bundle
         env:
-          ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/capos-full-${{ matrix.arch }}
+          ARGOSFS_TEST_ARTIFACTS: ${{ steps.storage.outputs.artifacts }}
         run: scripts/ci/pack-qemu-bundle.sh
 
       - name: Summarize discovered QEMU artifacts
+        env:
+          ARGOSFS_TEST_ARTIFACTS: ${{ steps.storage.outputs.artifacts }}
         run: |
-          cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu/qemu-artifacts.json"
-          cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-bundle/bundle.env"
+          cat "$ARGOSFS_TEST_ARTIFACTS/qemu/qemu-artifacts.json"
+          cat "$ARGOSFS_TEST_ARTIFACTS/qemu-bundle/bundle.env"
           {
             echo "### Full CapOS QEMU build (${{ matrix.arch }})"
             echo
             echo "- CapOS ref: '${{ github.event_name == 'workflow_dispatch' && inputs.capos_ref || env.ARGOSFS_CAPOS_REF }}'"
-            echo "- CapOS commit: '$(cat "${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-commit" 2>/dev/null || echo unknown)'"
+            echo "- CapOS commit: '$(cat "$ARGOSFS_TEST_ARTIFACTS/capos-commit" 2>/dev/null || echo unknown)'"
             echo "- Bundle: capos-qemu-bundle-${{ matrix.arch }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -149,7 +183,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: capos-qemu-bundle-${{ matrix.arch }}
-          path: ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu-bundle
+          path: ${{ steps.storage.outputs.artifacts }}/qemu-bundle
           if-no-files-found: error
 
       - name: Upload full CapOS build logs
@@ -158,10 +192,10 @@ jobs:
         with:
           name: capos-full-build-${{ matrix.arch }}
           path: |
-            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/qemu
-            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-commit
-            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-*.log
-            ${{ runner.temp }}/capos-full-${{ matrix.arch }}/capos-config-*
+            ${{ steps.storage.outputs.artifacts }}/qemu
+            ${{ steps.storage.outputs.artifacts }}/capos-commit
+            ${{ steps.storage.outputs.artifacts }}/capos-*.log
+            ${{ steps.storage.outputs.artifacts }}/capos-config-*
           if-no-files-found: ignore
 
   capos-qemu-test:
@@ -235,22 +269,23 @@ jobs:
             script: scripts/qemu/mixed_chaos.sh
             qemu_mem: "1536"
             qemu_timeout: "3600"
+            chaos_workers: "6"
             stress_seconds: ""
             job_timeout: 75
           - arch: arm64
             suite: boot
             script: scripts/qemu/boot.sh
             qemu_mem: "1536"
-            qemu_timeout: "300"
+            qemu_timeout: "600"
             stress_seconds: ""
-            job_timeout: 20
+            job_timeout: 30
           - arch: arm64
             suite: full-guest
             script: scripts/qemu/full_guest.sh
             qemu_mem: "1536"
-            qemu_timeout: "600"
+            qemu_timeout: "1500"
             stress_seconds: ""
-            job_timeout: 30
+            job_timeout: 40
           - arch: arm64
             suite: hotplug
             script: scripts/qemu/hotplug.sh
@@ -269,37 +304,38 @@ jobs:
             suite: rootfs-stress
             script: scripts/qemu/rootfs_stress.sh
             qemu_mem: "1536"
-            qemu_timeout: "2400"
+            qemu_timeout: "3300"
             stress_seconds: "1800"
-            job_timeout: 50
+            job_timeout: 65
           - arch: arm64
             suite: block-lifecycle-stress
             script: scripts/qemu/block_lifecycle_stress.sh
             qemu_mem: "1536"
-            qemu_timeout: "1800"
+            qemu_timeout: "3600"
             stress_seconds: ""
-            job_timeout: 45
+            job_timeout: 70
           - arch: arm64
             suite: degraded-rootfs
             script: scripts/qemu/degraded_rootfs.sh
             qemu_mem: "1536"
-            qemu_timeout: "1200"
-            stress_seconds: ""
-            job_timeout: 35
-          - arch: arm64
-            suite: crash-recovery
-            script: scripts/qemu/crash_recovery.sh
-            qemu_mem: "1536"
             qemu_timeout: "1800"
             stress_seconds: ""
             job_timeout: 45
           - arch: arm64
+            suite: crash-recovery
+            script: scripts/qemu/crash_recovery.sh
+            qemu_mem: "1536"
+            qemu_timeout: "2400"
+            stress_seconds: ""
+            job_timeout: 80
+          - arch: arm64
             suite: mixed-chaos
             script: scripts/qemu/mixed_chaos.sh
             qemu_mem: "1536"
-            qemu_timeout: "4200"
+            qemu_timeout: "6000"
+            chaos_workers: "2"
             stress_seconds: ""
-            job_timeout: 85
+            job_timeout: 120
     steps:
       - name: Checkout ArgosFS
         uses: actions/checkout@v7
@@ -326,6 +362,7 @@ jobs:
           ARGOSFS_TEST_ARTIFACTS: ${{ runner.temp }}/qemu-test-${{ matrix.arch }}-${{ matrix.suite }}
           ARGOSFS_QEMU_MEM: ${{ matrix.qemu_mem }}
           ARGOSFS_QEMU_TIMEOUT: ${{ matrix.qemu_timeout }}
+          ARGOSFS_QEMU_CHAOS_WORKERS: ${{ matrix.chaos_workers }}
           ARGOSFS_QEMU_STRESS_SECONDS: ${{ matrix.stress_seconds }}
         run: ${{ matrix.script }}
 

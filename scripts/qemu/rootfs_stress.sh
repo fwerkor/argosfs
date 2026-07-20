@@ -12,9 +12,7 @@ log="$artifacts/qemu-rootfs-stress-$arch.log"
 commands="$artifacts/qemu-rootfs-stress.commands"
 reject="${ARGOSFS_QEMU_REJECT:-Kernel panic|Bad file descriptor|argosfs-initrd: emergency|Oops:|BUG:|segfault|EXT4-fs error|I/O error|No space left on device}"
 timeout_s="${ARGOSFS_QEMU_TIMEOUT:-2400}"
-login_delay_s="${ARGOSFS_QEMU_STRESS_LOGIN_DELAY:-140}"
-login_delay_s="$(argosfs_qemu_adjust_login_delay "$login_delay_s")"
-command_delay_s="${ARGOSFS_QEMU_STRESS_COMMAND_DELAY:-1}"
+console_timeout_s="${ARGOSFS_QEMU_STRESS_CONSOLE_TIMEOUT:-600}"
 stress_s="${ARGOSFS_QEMU_STRESS_SECONDS:-1800}"
 workers="${ARGOSFS_QEMU_STRESS_WORKERS:-6}"
 done_marker="ARGOSFS_QEMU_ROOTFS_STRESS_DONE"
@@ -77,17 +75,23 @@ CMDS
 
 argosfs_qemu_build_args
 set +e
+# QEMU output is intentionally polled while this pipeline appends to the log.
+# shellcheck disable=SC2094
 (
-  sleep "$login_delay_s"
-  printf '\r'
-  sleep "$command_delay_s"
-  while IFS= read -r line; do
-    printf '%s\r' "$line"
-    sleep "$command_delay_s"
-  done <"$commands"
+  set -e
+  argosfs_qemu_wait_console_prompt "$log" 1 "$console_timeout_s" "$reject" "rootfs-stress console prompt"
+  argosfs_qemu_stream_script "$commands" 1 /tmp/argosfs-qemu-rootfs-stress.sh "$log"
 ) | timeout "$timeout_s" "$qemu_bin" "${qemu_args[@]}" >"$log" 2>&1
-status=${PIPESTATUS[1]}
+pipeline_status=("${PIPESTATUS[@]}")
+feeder_status="${pipeline_status[0]}"
+status="${pipeline_status[1]}"
 set -e
+
+if [ "$feeder_status" -ne 0 ]; then
+  echo "QEMU rootfs stress feeder failed; status=$feeder_status" >&2
+  tail -n 420 "$log" >&2 || true
+  exit 1
+fi
 
 if grep -Eiq "$reject" "$log"; then
   echo "QEMU rootfs stress failed; qemu status=$status; rejected pattern: $reject" >&2
@@ -96,11 +100,11 @@ if grep -Eiq "$reject" "$log"; then
 fi
 missing=()
 for marker in ARGOSFS_QEMU_ROOTFS_STRESS_BEGIN ARGOSFS_ROOT_MARKER_OK ARGOSFS_STRESS_WORKERS_OK ARGOSFS_ROOTFS_STRESS_FILECOUNT_OK "$done_marker"; do
-  grep -Fq "$marker" "$log" || missing+=("$marker")
+  argosfs_qemu_log_has_marker "$log" "$marker" || missing+=("$marker")
 done
-grep -Eq 'ARGOSFS_ROOT_MOUNT .* fuse' "$log" || missing+=("ARGOSFS_ROOT_MOUNT fuse")
+argosfs_qemu_log_has_root_mount "$log" || missing+=("ARGOSFS_ROOT_MOUNT fuse")
 for id in $(seq 1 "$workers"); do
-  grep -Fq "ARGOSFS_STRESS_WORKER_${id}_DONE" "$log" || missing+=("ARGOSFS_STRESS_WORKER_${id}_DONE")
+  argosfs_qemu_log_has_marker_prefix "$log" "ARGOSFS_STRESS_WORKER_${id}_DONE" || missing+=("ARGOSFS_STRESS_WORKER_${id}_DONE")
 done
 if [ "${#missing[@]}" -eq 0 ]; then
   echo "QEMU rootfs stress test passed for $arch; artifacts=$artifacts"

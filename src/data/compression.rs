@@ -18,3 +18,7 @@ pub fn decompress(data: &[u8], codec: Compression) -> Result<Vec<u8>> {
             .map_err(|err| ArgosError::Invalid(format!("zstd decompression failed: {err}"))),
     }
 }
+
+#[cfg(test)]
+#[path = "compression_tests.rs"]
+mod tests;

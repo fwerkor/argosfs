@@ -1431,6 +1431,58 @@ fn loop_block_cli_replace_device_rewrites_off_old_member() {
 }
 
 #[test]
+fn offline_loop_member_can_be_reconstructed_onto_replacement() {
+    let tmp = TempDir::new().unwrap();
+    let images = loop_images(&tmp, 5);
+    let payload = vec![b'r'; 256 * 1024];
+    let fs = ArgosFs::create_loop(
+        &images,
+        config(3, 2),
+        32 * 1024 * 1024,
+        "offline-replacement",
+        false,
+    )
+    .unwrap();
+    fs.write_file("/payload", &payload, 0o644).unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+
+    let missing = images[1].clone();
+    fs::remove_file(&missing).unwrap();
+    let mut active = images
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != 1)
+        .map(|(_, path)| path.clone())
+        .collect::<Vec<_>>();
+    let degraded = ArgosFs::open_loop(&active, true).unwrap();
+    assert_eq!(
+        degraded.metadata_snapshot().disks["disk-0001"].status,
+        DiskStatus::Offline
+    );
+    let replacement = tmp.path().join("replacement.img");
+    assert_eq!(
+        degraded
+            .add_block_device(replacement.clone(), 32 * 1024 * 1024, false)
+            .unwrap(),
+        "disk-0005"
+    );
+    degraded.sync().unwrap();
+    drop(degraded);
+
+    active.push(replacement);
+    let repaired = ArgosFs::open_loop(&active, true).unwrap();
+    assert_eq!(repaired.remove_disk("disk-0001").unwrap(), 1);
+    repaired.sync().unwrap();
+    assert_eq!(
+        repaired.metadata_snapshot().disks["disk-0001"].status,
+        DiskStatus::Removed
+    );
+    assert_eq!(repaired.read_file("/payload", false).unwrap(), payload);
+    assert!(repaired.fsck(false, false).unwrap().errors.is_empty());
+}
+
+#[test]
 fn repeated_loop_replacements_do_not_raise_quorum_with_removed_members() {
     let tmp = TempDir::new().unwrap();
     let mut active = loop_images(&tmp, 3);
