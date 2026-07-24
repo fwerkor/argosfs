@@ -28,7 +28,7 @@ fuser = { version = "0.17", features = ["libfuse3"] }
 hex = "0.4"
 io-uring = "0.7"
 libc = "0.2"
-lz4_flex = "0.13"
+lz4_flex = "0.14"
 memmap2 = "0.9.11"
 parking_lot = "0.12"
 rand = "0.10"
